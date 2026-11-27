@@ -15,11 +15,21 @@
                                 static_cast<size_t>(layer) * mla_absorb_layer_stride_;
             // ao is [n, nh*hd]; the absorbed kernel writes nh*v_head_dim compact
             // (same layout the paged decode kernel produces), narrowed downstream.
-            mla_absorbed_decode(static_cast<const half*>(sub_q.data),
-                                static_cast<const half*>(ly.kv_b_proj.data), cache_layer,
-                                static_cast<half*>(sub_ao.data), mla_absorb_scores_.data(), sub_state.context_lens,
-                                nh, hd, cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.kv_lora_rank,
-                                cfg.v_head_dim, mla_absorb_max_seq_, scale, stream);
+            mla_absorbed_decode({.q = static_cast<const half*>(sub_q.data),
+                                 .kv_b = static_cast<const half*>(ly.kv_b_proj.data),
+                                 .cache = cache_layer,
+                                 .out = static_cast<half*>(sub_ao.data),
+                                 .scores = mla_absorb_scores_.data(),
+                                 .context_lens = sub_state.context_lens,
+                                 .n_heads = nh,
+                                 .head_dim = hd,
+                                 .rope_dim = cfg.qk_rope_head_dim,
+                                 .nope_dim = cfg.qk_nope_head_dim,
+                                 .kv_lora_rank = cfg.kv_lora_rank,
+                                 .v_head_dim = cfg.v_head_dim,
+                                 .max_seq = mla_absorb_max_seq_,
+                                 .scale = scale,
+                                 .stream = stream});
             return;  // leaves the decode_attend lambda (executor_attention.cu)
         }
 

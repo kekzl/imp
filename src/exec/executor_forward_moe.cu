@@ -461,9 +461,20 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // gather/scatter + D2H sync. NVFP4 and dp4a/FP16 sub-paths handled
     // internally. Always exits via moe_after_experts.
     if (will_decode_fast) {
-        run_moe_decode_fast(layer, stream, n, d, eff, top_k, routing, no, h, r,
-                            moe_use_fp32_residual, moe_fused_norm_q8,
-                            will_skip_residual_copy, residual_fused);
+        run_moe_decode_fast({.layer = layer,
+                             .stream = stream,
+                             .n = n,
+                             .d = d,
+                             .eff = eff,
+                             .top_k = top_k,
+                             .routing = &routing,
+                             .no = &no,
+                             .h = &h,
+                             .r = &r,
+                             .moe_use_fp32_residual = moe_use_fp32_residual,
+                             .moe_fused_norm_q8 = moe_fused_norm_q8,
+                             .will_skip_residual_copy = will_skip_residual_copy,
+                             .residual_fused = &residual_fused});
         goto moe_after_experts;
     }
     // Host-resident NVFP4 experts, 2..8 rows (a speculative verify, n = k + 1): row by row through

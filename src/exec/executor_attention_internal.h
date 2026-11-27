@@ -250,9 +250,25 @@ static void fa2_prefill_for_replay(const Fa2PrefillArgs& a) {
 }
 
 // Fused QKV GEMV dispatch by quant type (all share identical signatures).
-static void dispatch_gemv_qkv_fused(QType qtype, const void* W_q, const void* W_k, const void* W_v,
-                                    const block_q8_1* q8_1, const float* d8, half* y_q, half* y_k, half* y_v,
-                                    int q_rows, int k_rows, int v_rows, int K, cudaStream_t stream) {
+// Arguments in the old parameter order (audit D-11).
+struct GemvQkvFusedArgs {
+    QType qtype{};
+    const void* W_q = nullptr;
+    const void* W_k = nullptr;
+    const void* W_v = nullptr;
+    const block_q8_1* q8_1 = nullptr;
+    const float* d8 = nullptr;
+    half* y_q = nullptr;
+    half* y_k = nullptr;
+    half* y_v = nullptr;
+    int q_rows = 0;
+    int k_rows = 0;
+    int v_rows = 0;
+    int K = 0;
+    cudaStream_t stream = nullptr;
+};
+static void dispatch_gemv_qkv_fused(const GemvQkvFusedArgs& a) {
+    const auto& [qtype, W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream] = a;
     switch (qtype) {
         case QType::Q6_K:
             gemv_qkv_fused_q6k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K,

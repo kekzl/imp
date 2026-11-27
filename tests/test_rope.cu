@@ -131,7 +131,8 @@ TEST(RoPETest, RopeBasicFP32) {
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
+    rope_forward(
+        {.Q = &Q, .K = &K, .positions = pos_dev, .head_dim = head_dim, .theta = theta, .scaling = scaling});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Read back
@@ -188,7 +189,12 @@ TEST(RoPETest, LongContextPositionsMatchDoubleReference) {
         int* pos_dev = to_device(pos_host.data(), pos_host.size());
         Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
         Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
-        rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
+        rope_forward({.Q = &Q,
+                      .K = &K,
+                      .positions = pos_dev,
+                      .head_dim = head_dim,
+                      .theta = theta,
+                      .scaling = scaling});
         CUDA_CHECK(cudaDeviceSynchronize());
 
         auto q_out = to_host(q_dev, n);
@@ -256,8 +262,17 @@ TEST(RoPETest, YarnLongContextPositionsMatchDoubleReference) {
         Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
         Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
         // corr_dims is read on the HOST (rope.cu:162), so this is a host array.
-        rope_forward(Q, K, pos_dev, head_dim, theta, scaling, /*rope_dim=*/0, /*neox=*/false, ext_factor,
-                     attn_factor, corr);
+        rope_forward({.Q = &Q,
+                      .K = &K,
+                      .positions = pos_dev,
+                      .head_dim = head_dim,
+                      .theta = theta,
+                      .scaling = scaling,
+                      .rope_dim = 0,
+                      .neox = false,
+                      .ext_factor = ext_factor,
+                      .attn_factor = attn_factor,
+                      .corr_dims = corr});
         CUDA_CHECK(cudaDeviceSynchronize());
 
         auto q_out = to_host(q_dev, n);
@@ -316,7 +331,8 @@ TEST(RoPETest, RopeBasicFP16) {
     Tensor Q = make_device_tensor(q_dev, QType::F16, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F16, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
+    rope_forward(
+        {.Q = &Q, .K = &K, .positions = pos_dev, .head_dim = head_dim, .theta = theta, .scaling = scaling});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Read back FP16 and convert to float for comparison
@@ -367,7 +383,8 @@ TEST(RoPETest, RopePositionInvariance) {
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q, K, pos_dev, head_dim, 10000.0f, 1.0f);
+    rope_forward(
+        {.Q = &Q, .K = &K, .positions = pos_dev, .head_dim = head_dim, .theta = 10000.0f, .scaling = 1.0f});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto q_out = to_host(q_dev, q_count);
@@ -414,7 +431,8 @@ TEST(RoPETest, RopeThetaScaling) {
     Tensor Q1 = make_device_tensor(q_dev1, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K1 = make_device_tensor(k_dev1, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q1, K1, pos_dev, head_dim, 10000.0f, 1.0f);
+    rope_forward(
+        {.Q = &Q1, .K = &K1, .positions = pos_dev, .head_dim = head_dim, .theta = 10000.0f, .scaling = 1.0f});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto q_out1 = to_host(q_dev1, q_count);
@@ -427,7 +445,12 @@ TEST(RoPETest, RopeThetaScaling) {
     Tensor Q2 = make_device_tensor(q_dev2, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K2 = make_device_tensor(k_dev2, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q2, K2, pos_dev, head_dim, 1000000.0f, 1.0f);
+    rope_forward({.Q = &Q2,
+                  .K = &K2,
+                  .positions = pos_dev,
+                  .head_dim = head_dim,
+                  .theta = 1000000.0f,
+                  .scaling = 1.0f});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto q_out2 = to_host(q_dev2, q_count);
@@ -488,7 +511,8 @@ TEST(RoPETest, RopeLargerDim) {
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
+    rope_forward(
+        {.Q = &Q, .K = &K, .positions = pos_dev, .head_dim = head_dim, .theta = theta, .scaling = scaling});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto q_out = to_host(q_dev, q_count);
@@ -570,7 +594,14 @@ TEST(RoPETest, PartialRoPE) {
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q, K, pos_dev, head_dim, theta, scaling, rope_dim, /*neox=*/true);
+    rope_forward({.Q = &Q,
+                  .K = &K,
+                  .positions = pos_dev,
+                  .head_dim = head_dim,
+                  .theta = theta,
+                  .scaling = scaling,
+                  .rope_dim = rope_dim,
+                  .neox = true});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto q_out = to_host(q_dev, q_count);
@@ -684,8 +715,19 @@ TEST(RoPETest, MtpMropeMatchesMainYarn) {
     int* pos_dev = to_device(&pos_arr, 1);
     Tensor Qm = make_device_tensor(q_main, QType::F16, 1, 1, n_heads, head_dim);
     Tensor Km = make_device_tensor(k_main, QType::F16, 1, 1, n_kv_heads, head_dim);
-    rope_forward(Qm, Km, pos_dev, head_dim, theta, freq_scale, rope_dim, /*neox=*/true, ext_factor,
-                 attn_factor, corr, /*stream=*/nullptr, /*longrope=*/nullptr);
+    rope_forward({.Q = &Qm,
+                  .K = &Km,
+                  .positions = pos_dev,
+                  .head_dim = head_dim,
+                  .theta = theta,
+                  .scaling = freq_scale,
+                  .rope_dim = rope_dim,
+                  .neox = true,
+                  .ext_factor = ext_factor,
+                  .attn_factor = attn_factor,
+                  .corr_dims = corr,
+                  .stream = nullptr,
+                  .longrope_inv_freqs = nullptr});
     CUDA_CHECK(cudaDeviceSynchronize());
     auto q_main_out = to_host(q_main, qn);
     auto k_main_out = to_host(k_main, kn);

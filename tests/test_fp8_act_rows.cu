@@ -125,8 +125,20 @@ std::vector<uint16_t> run(Dev& d, const std::vector<half>& h, int M, bool per_ro
         if (route == Route::kTileStreamK && !ws)
             EXPECT_EQ(cudaMalloc(&ws, ws_bytes), cudaSuccess);
         const bool sk = route == Route::kTileStreamK;
-        EXPECT_TRUE(gemm_fp8_tile(d.x8, d.w, d.rs, d.ws, 0.0f, d.y, M, kN, kK, nullptr, -1, sk ? ws : nullptr,
-                                  sk ? ws_bytes : 0, per_row));
+        EXPECT_TRUE(gemm_fp8_tile({.a_data = d.x8,
+                                   .w_data = d.w,
+                                   .a_scale = d.rs,
+                                   .w_scale = d.ws,
+                                   .beta = 0.0f,
+                                   .d_fp16 = d.y,
+                                   .M = M,
+                                   .N = kN,
+                                   .K = kK,
+                                   .stream = nullptr,
+                                   .variant = -1,
+                                   .workspace = sk ? ws : nullptr,
+                                   .workspace_bytes = sk ? ws_bytes : 0,
+                                   .a_per_row = per_row}));
     }
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     return d.row0();

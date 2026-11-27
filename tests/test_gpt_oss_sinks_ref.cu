@@ -153,9 +153,21 @@ std::vector<double> run_kernel(const std::vector<half>& Qh, const std::vector<ha
     Tensor S(b.S, QType::F16, 3, sshape, true);
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    attention_cublas_prefill(Q, K, V, O, S, n_heads, n_kv_heads, head_dim, scale, causal,
-                             /*softcap=*/0.0f, /*q_offset=*/0, /*stream=*/nullptr, sliding_window,
-                             sinks_ptr);
+    attention_cublas_prefill({.Q = &Q,
+                              .K = &K,
+                              .V = &V,
+                              .O = &O,
+                              .S = &S,
+                              .n_heads = n_heads,
+                              .n_kv_heads = n_kv_heads,
+                              .head_dim = head_dim,
+                              .scale = scale,
+                              .causal = causal,
+                              .softcap = 0.0f,
+                              .q_offset = 0,
+                              .stream = nullptr,
+                              .sliding_window = sliding_window,
+                              .sinks = sinks_ptr});
     cudaDeviceSynchronize();
 
     std::vector<half> Oh(qn);

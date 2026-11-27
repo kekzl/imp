@@ -91,9 +91,21 @@ TEST_P(Nvfp4TileSwigluQuant, BytesEqualUnfusedPath) {
             ASSERT_TRUE(gemm_nvfp4_tile(act.p, act_sf.p, cw.data, cw.scale_factors, cw.tensor_scale, up.p, M,
                                         N, K, s, -1, wsp, wsb));
             swiglu_quantize_fp16_to_nvfp4_cutlass(gate.p, up.p, so.p, pk_ref.p, sf_ref.p, M, N, s, as);
-            ASSERT_TRUE(gemm_nvfp4_tile_swiglu_quant(act.p, act_sf.p, cw.data, cw.scale_factors,
-                                                     cw.tensor_scale, gate.p, pk_own.p, sf_own.p, as, M, N, K,
-                                                     s, wsp, wsb));
+            ASSERT_TRUE(gemm_nvfp4_tile_swiglu_quant({.a_data = act.p,
+                                                      .a_sf = act_sf.p,
+                                                      .w_data = cw.data,
+                                                      .w_sf = cw.scale_factors,
+                                                      .alpha = cw.tensor_scale,
+                                                      .gate_fp16 = gate.p,
+                                                      .q_packed = pk_own.p,
+                                                      .q_sf = sf_own.p,
+                                                      .q_act_scale = as,
+                                                      .M = M,
+                                                      .N = N,
+                                                      .K = K,
+                                                      .stream = s,
+                                                      .workspace = wsp,
+                                                      .workspace_bytes = wsb}));
             ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
             const auto pr = pk_ref.host(), po = pk_own.host(), sr = sf_ref.host(), so_ = sf_own.host();
             size_t bad_pk = 0, bad_sf = 0;

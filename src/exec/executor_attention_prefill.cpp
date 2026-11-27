@@ -231,13 +231,9 @@
                 // the SMEM-capped fused hd=512 kernel). hd=256 SWA layers took FA2 above; only hd=512 layers
                 // land here.
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
-                attention_cublas_prefill(seq_q, k_full_t, v_full_t, seq_ao, attn_scores_, nh, nkv, hd, scale,
-                                         /*causal=*/true, cfg.attn_logit_softcap, att_off, stream,
-                                         layer_sliding_window, attn_sinks);
+                attention_cublas_prefill(cublas_prefill_args(fa2, &attn_scores_));
             } else if (hd == 512 && !prefer_fmha && s_cap > 0 &&
-                       attention_cublas_prefill_sliced(seq_q, k_full_t, v_full_t, seq_ao, attn_scores_, nh, nkv, hd,
-                                                       scale, /*causal=*/true, cfg.attn_logit_softcap,
-                                                       att_off, stream, layer_sliding_window, attn_sinks)) {
+                       attention_cublas_prefill_sliced(cublas_prefill_args(fa2, &attn_scores_))) {
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
                 // hd=512 S-matrix overflow (long ctx): cuBLAS in workspace-sized q-row
                 // slices, faster than the whole-chunk FMHA hd=512 fallback (the FMHA's
@@ -318,14 +314,9 @@
             // S-matrix fits (faster than the SMEM-capped fused hd=512 kernel). hd=256 SWA layers took FA2
             // above.
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
-            attention_cublas_prefill(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
-                                     /*causal=*/true, cfg.attn_logit_softcap,
-                                     /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
+            attention_cublas_prefill(cublas_prefill_args(fa2, &attn_scores_));
         } else if (hd == 512 && !prefer_fmha && attn_scores_buf_.get() != nullptr &&
-                   attention_cublas_prefill_sliced(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
-                                                   /*causal=*/true, cfg.attn_logit_softcap,
-                                                   /*q_offset=*/0, stream, layer_sliding_window,
-                                                   attn_sinks)) {
+                   attention_cublas_prefill_sliced(cublas_prefill_args(fa2, &attn_scores_))) {
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
             // hd=512 S-matrix overflow: cuBLAS in workspace-sized q-row slices, faster
             // than the whole-prompt FMHA hd=512 fallback. False only when even a

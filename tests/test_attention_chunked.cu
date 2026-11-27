@@ -163,8 +163,19 @@ TEST(AttentionChunkedTest, RectangularEqualsSquareAtZeroOffset) {
     fill_fp16_random((half*)K.data, seq * nkv * hd, 2);
     fill_fp16_random((half*)V.data, seq * nkv * hd, 3);
 
-    attention_cublas_prefill(Q, K, V, O, S, nh, nkv, hd, scale, /*causal=*/true,
-                             /*softcap=*/0.0f, /*q_offset=*/0, 0);
+    attention_cublas_prefill({.Q = &Q,
+                              .K = &K,
+                              .V = &V,
+                              .O = &O,
+                              .S = &S,
+                              .n_heads = nh,
+                              .n_kv_heads = nkv,
+                              .head_dim = hd,
+                              .scale = scale,
+                              .causal = true,
+                              .softcap = 0.0f,
+                              .q_offset = 0,
+                              .stream = 0});
     cudaDeviceSynchronize();
 
     std::vector<half> h_o((size_t)seq * nh * hd);
@@ -220,8 +231,19 @@ TEST(AttentionChunkedTest, OffsetAwareCausalMask) {
     cudaMemcpy(K.data, h_k.data(), h_k.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(V.data, h_v.data(), h_v.size() * sizeof(half), cudaMemcpyHostToDevice);
 
-    attention_cublas_prefill(Q, K, V, O, S, nh, nkv, hd, scale, /*causal=*/true,
-                             /*softcap=*/0.0f, /*q_offset=*/q_offset, 0);
+    attention_cublas_prefill({.Q = &Q,
+                              .K = &K,
+                              .V = &V,
+                              .O = &O,
+                              .S = &S,
+                              .n_heads = nh,
+                              .n_kv_heads = nkv,
+                              .head_dim = hd,
+                              .scale = scale,
+                              .causal = true,
+                              .softcap = 0.0f,
+                              .q_offset = q_offset,
+                              .stream = 0});
     cudaDeviceSynchronize();
 
     std::vector<half> h_o(q_len * nh * hd);
@@ -254,8 +276,19 @@ TEST(AttentionChunkedTest, GQA_Ratio4) {
     fill_fp16_random((half*)K.data, kv_len * nkv * hd, 8);
     fill_fp16_random((half*)V.data, kv_len * nkv * hd, 9);
 
-    attention_cublas_prefill(Q, K, V, O, S, nh, nkv, hd, scale, /*causal=*/true,
-                             /*softcap=*/0.0f, /*q_offset=*/16, 0);
+    attention_cublas_prefill({.Q = &Q,
+                              .K = &K,
+                              .V = &V,
+                              .O = &O,
+                              .S = &S,
+                              .n_heads = nh,
+                              .n_kv_heads = nkv,
+                              .head_dim = hd,
+                              .scale = scale,
+                              .causal = true,
+                              .softcap = 0.0f,
+                              .q_offset = 16,
+                              .stream = 0});
     cudaDeviceSynchronize();
 
     std::vector<half> h_o((size_t)q_len * nh * hd);
@@ -302,9 +335,20 @@ TEST(AttentionChunkedTest, SlidingWindowMatchesNaive) {
     cudaMemcpy(K.data, h_k.data(), h_k.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(V.data, h_v.data(), h_v.size() * sizeof(half), cudaMemcpyHostToDevice);
 
-    attention_cublas_prefill(Q, K, V, O_cublas, S, nh, nkv, hd, scale, /*causal=*/true,
-                             /*softcap=*/0.0f, /*q_offset=*/0, /*stream=*/0,
-                             /*sliding_window=*/sliding_window);
+    attention_cublas_prefill({.Q = &Q,
+                              .K = &K,
+                              .V = &V,
+                              .O = &O_cublas,
+                              .S = &S,
+                              .n_heads = nh,
+                              .n_kv_heads = nkv,
+                              .head_dim = hd,
+                              .scale = scale,
+                              .causal = true,
+                              .softcap = 0.0f,
+                              .q_offset = 0,
+                              .stream = 0,
+                              .sliding_window = sliding_window});
     naive_attention_prefill_ref(static_cast<const half*>(Q.data),
                                 static_cast<const half*>(K.data),
                                 static_cast<const half*>(V.data),
@@ -359,9 +403,20 @@ TEST(AttentionChunkedTest, SlidingWindowMasksOutsideWindow) {
     cudaMemcpy(K.data, h_k.data(), h_k.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(V.data, h_v.data(), h_v.size() * sizeof(half), cudaMemcpyHostToDevice);
 
-    attention_cublas_prefill(Q, K, V, O, S, nh, nkv, hd, scale, /*causal=*/true,
-                             /*softcap=*/0.0f, /*q_offset=*/q_offset, /*stream=*/0,
-                             /*sliding_window=*/sliding_window);
+    attention_cublas_prefill({.Q = &Q,
+                              .K = &K,
+                              .V = &V,
+                              .O = &O,
+                              .S = &S,
+                              .n_heads = nh,
+                              .n_kv_heads = nkv,
+                              .head_dim = hd,
+                              .scale = scale,
+                              .causal = true,
+                              .softcap = 0.0f,
+                              .q_offset = q_offset,
+                              .stream = 0,
+                              .sliding_window = sliding_window});
     cudaDeviceSynchronize();
 
     std::vector<half> h_o(q_len * nh * hd);

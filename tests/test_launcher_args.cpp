@@ -421,3 +421,58 @@ static_assert(!imp::GreedyArgmaxArgs{}.allow_cutlass && imp::GreedyArgmaxArgs{}.
 static_assert(imp::GreedyArgmaxArgs{}.h_row_hist == nullptr &&
               imp::GreedyArgmaxArgs{}.h_row_hist_n == nullptr &&
               imp::GreedyArgmaxArgs{}.h_row_pens == nullptr);
+
+// B-133 slice 9: same rule; the structs without old defaults are pinned as aggregates only.
+#include "compute/attention_cublas.h"
+#include "compute/mla_absorb.h"
+#include "exec/decode_pipeline_advance.h"
+#include "exec/moe_decode_args.h"
+#include "exec/moe_router_route.h"
+#include "exec/workspace.h"
+#include "quant/nvfp4_gemm_tile.h"
+
+static_assert(std::is_aggregate_v<imp::Workspace::InitArgs> &&
+              std::is_aggregate_v<imp::RouterFusedRouteArgs> &&
+              std::is_aggregate_v<imp::DecodePipelineAdvanceArgs> &&
+              std::is_aggregate_v<imp::MoeDecodeFastArgs>);
+// gdn_scan_reference_f32: tiled layout, no device row count.
+static_assert(imp::GdnScanReferenceArgs{}.grouped_layout == 0 &&
+              imp::GdnScanReferenceArgs{}.d_real_n == nullptr);
+// The two tile GEMMs: no stream-K workspace; gemm_fp8_tile auto variant, per-tensor activation scale.
+static_assert(imp::GemmNvfp4TileSwigluQuantArgs{}.workspace == nullptr &&
+              imp::GemmNvfp4TileSwigluQuantArgs{}.workspace_bytes == 0);
+static_assert(imp::GemmFp8TileArgs{}.variant == -1 && imp::GemmFp8TileArgs{}.workspace == nullptr &&
+              imp::GemmFp8TileArgs{}.workspace_bytes == 0 && !imp::GemmFp8TileArgs{}.a_per_row);
+// mtp_draft_step: host token path, no NVFP4 / FP8 head view.
+static_assert(imp::MtpDraftStepArgs{}.lm_head_nvfp4 == nullptr &&
+              imp::MtpDraftStepArgs{}.d_prev_token == nullptr &&
+              imp::MtpDraftStepArgs{}.d_out_token == nullptr &&
+              imp::MtpDraftStepArgs{}.lm_head_fp8 == nullptr &&
+              imp::MtpDraftStepArgs{}.lm_head_fp8_scales == nullptr);
+// mtp_workspace_allocate's 2-argument form: no MoE, no attention, one KV slot, no hc streams.
+static_assert(imp::MtpWorkspaceAllocateArgs{}.n_experts == 0 && imp::MtpWorkspaceAllocateArgs{}.top_k == 0 &&
+              imp::MtpWorkspaceAllocateArgs{}.expert_d_ff == 0 &&
+              imp::MtpWorkspaceAllocateArgs{}.shared_d_ff == 0);
+static_assert(imp::MtpWorkspaceAllocateArgs{}.num_heads == 0 &&
+              imp::MtpWorkspaceAllocateArgs{}.num_kv_heads == 0 &&
+              imp::MtpWorkspaceAllocateArgs{}.head_dim == 0 &&
+              imp::MtpWorkspaceAllocateArgs{}.max_seq_len == 0);
+static_assert(imp::MtpWorkspaceAllocateArgs{}.n_kv_slots == 1 &&
+              imp::MtpWorkspaceAllocateArgs{}.hc_count == 0 &&
+              imp::MtpWorkspaceAllocateArgs{}.hc_lowrank == 0);
+static_assert(imp::MlaAbsorbedDecodeArgs{}.stream == nullptr);
+// attention_cublas_prefill{,_sliced}: no softcap, square path, default stream, no window, no sinks.
+static_assert(imp::AttnCublasPrefillArgs{}.softcap == 0.0f && imp::AttnCublasPrefillArgs{}.q_offset == 0 &&
+              imp::AttnCublasPrefillArgs{}.stream == nullptr &&
+              imp::AttnCublasPrefillArgs{}.sliding_window == 0 &&
+              imp::AttnCublasPrefillArgs{}.sinks == nullptr);
+// rope_forward: theta 10000, no scaling, full head_dim, interleaved pairs, no YaRN / LongRoPE / M-RoPE.
+static_assert(imp::RopeForwardArgs{}.theta == 10000.0f && imp::RopeForwardArgs{}.scaling == 1.0f &&
+              imp::RopeForwardArgs{}.rope_dim == 0 && !imp::RopeForwardArgs{}.neox);
+static_assert(imp::RopeForwardArgs{}.ext_factor == 0.0f && imp::RopeForwardArgs{}.attn_factor == 1.0f &&
+              imp::RopeForwardArgs{}.corr_dims == nullptr && imp::RopeForwardArgs{}.stream == nullptr);
+static_assert(imp::RopeForwardArgs{}.longrope_inv_freqs == nullptr &&
+              imp::RopeForwardArgs{}.mrope.positions == nullptr &&
+              imp::RopeForwardArgs{}.mrope.pos_delta == nullptr);
+// run_moe_decode_nvfp4_host: one row.
+static_assert(imp::MoeDecodeNvfp4HostArgs{}.n_rows == 1);

@@ -170,9 +170,11 @@ template __global__ void rope_forward_kernel<__half>(__half*, __half*, const int
 // --------------------------------------------------------------------------
 // Host dispatch
 // --------------------------------------------------------------------------
-void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, float theta, float scaling,
-                  int rope_dim, bool neox, float ext_factor, float attn_factor, const float* corr_dims,
-                  cudaStream_t stream, const float* longrope_inv_freqs, MRopeParams mrope) {
+void rope_forward(const RopeForwardArgs& a) {
+    const auto& [Q_p, K_p, positions, head_dim, theta, scaling, rope_dim, neox, ext_factor, attn_factor,
+                 corr_dims, stream, longrope_inv_freqs, mrope] = a;
+    Tensor& Q = *Q_p;
+    Tensor& K = *K_p;
     const int batch = static_cast<int>(Q.shape[0]);
     const int seq_len = static_cast<int>(Q.shape[1]);
     const int n_heads = static_cast<int>(Q.shape[2]);

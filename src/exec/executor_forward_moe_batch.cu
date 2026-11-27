@@ -678,15 +678,23 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     if (fp32_gate_logits_ready) {
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
         run_topk(gate_logits_f32);
-    } else if (router_fused_route(router_in, ly.moe_gate, compute_dtype_, n, ne, top_k, use_sigmoid,
-                                  norm_weights, router_bias_ptr,
-                                  RouterFusedGate{grp.active(), model_->profile().moe_router_logit_bias,
-                                                  ly.router_bias.data},
-                                  moe_.routing_buffers, moe_.router_fused_ws.get(),
-                                  moe_.router_fused_ws_bytes,
-                                  RouterDecodeScratch{static_cast<float*>(moe_.gate_logits.data),
-                                                      moe_.router_ticket.get()},
-                                  stream)) {
+    } else if (router_fused_route({.in = &router_in,
+                                   .gate = &ly.moe_gate,
+                                   .compute = compute_dtype_,
+                                   .n = n,
+                                   .ne = ne,
+                                   .top_k = top_k,
+                                   .use_sigmoid = use_sigmoid,
+                                   .norm_weights = norm_weights,
+                                   .score_bias = router_bias_ptr,
+                                   .g = RouterFusedGate{grp.active(), model_->profile().moe_router_logit_bias,
+                                                        ly.router_bias.data},
+                                   .buf = &moe_.routing_buffers,
+                                   .ws = moe_.router_fused_ws.get(),
+                                   .ws_bytes = moe_.router_fused_ws_bytes,
+                                   .dec = RouterDecodeScratch{static_cast<float*>(moe_.gate_logits.data),
+                                                              moe_.router_ticket.get()},
+                                   .stream = stream})) {
         moe_topk_finish(n, ne, top_k, moe_.routing_buffers, routing, stream, will_decode_fast);
     } else if (ne <= grp.fused_expert_cap(kMaxFusedExperts) && n == 1 && compute_dtype_ == QType::F16 &&
                ly.moe_gate.qtype == QType::F16 && moe_.routing_buffers.pool && will_decode_fast) {
@@ -834,11 +842,14 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     }
 }
 
-void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff,
-                                        int top_k, const MoeRoutingResult& routing,
-                                        const Tensor& no, Tensor& h, const Tensor& r,
-                                        bool moe_use_fp32_residual, bool moe_fused_norm_q8,
-                                        bool will_skip_residual_copy, bool& residual_fused) {
+void GraphExecutor::run_moe_decode_fast(const MoeDecodeFastArgs& a) {
+    const auto& [layer, stream, n, d, eff, top_k, routing_p, no_p, h_p, r_p, moe_use_fp32_residual,
+                 moe_fused_norm_q8, will_skip_residual_copy, residual_fused_p] = a;
+    const MoeRoutingResult& routing = *routing_p;
+    const Tensor& no = *no_p;
+    Tensor& h = *h_p;
+    const Tensor& r = *r_p;
+    bool& residual_fused = *residual_fused_p;
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
@@ -871,9 +882,19 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         nvfp4_host_decode_ready(ly, layer, expert_cache_, moe_, top_k)) {
         if (dev_expert_cache_.layer_ready(layer))
             (void)fork_shared_expert_(layer, stream, d, no);  // joined in phase 8
-        run_moe_decode_nvfp4_host(layer, stream, d, eff, top_k, routing, no, h, r,
-                                  moe_use_fp32_residual, will_skip_residual_copy, residual_fused,
-                                  non_gated_experts);
+        run_moe_decode_nvfp4_host({.layer = layer,
+                                   .stream = stream,
+                                   .d = d,
+                                   .eff = eff,
+                                   .top_k = top_k,
+                                   .routing = &routing,
+                                   .no = &no,
+                                   .h = &h,
+                                   .r = &r,
+                                   .moe_use_fp32_residual = moe_use_fp32_residual,
+                                   .will_skip_residual_copy = will_skip_residual_copy,
+                                   .residual_fused = &residual_fused,
+                                   .non_gated_experts = non_gated_experts});
         return;
     }
 

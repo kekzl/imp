@@ -1,12 +1,11 @@
 #pragma once
 
+#include "compute/attention_cublas.h"
 #include "core/dispatch_policy_fwd.h"
 
 #include <cuda_runtime.h>
 
 namespace imp {
-
-struct Tensor;
 
 // Prefill attention tier arguments (audit D-11, B-133), policy and Tensors by pointer.
 // try_fa2_fp16qk_prefill / fa2_prefill_for_replay: their old parameter order; d_kv_len (device
@@ -69,6 +68,25 @@ struct AttnPrefillTierArgs {
             .softcap = a.softcap,
             .q_offset = a.q_offset,
             .stream = a.stream,
+            .sinks = a.sinks};
+}
+
+// The causal cuBLAS S-matrix view of an FA2 call: S is the workspace, the kv length is K's rows.
+[[nodiscard]] inline AttnCublasPrefillArgs cublas_prefill_args(const Fa2PrefillArgs& a, Tensor* S) {
+    return {.Q = a.q,
+            .K = a.k,
+            .V = a.v,
+            .O = a.o,
+            .S = S,
+            .n_heads = a.nh,
+            .n_kv_heads = a.nkv,
+            .head_dim = a.hd,
+            .scale = a.scale,
+            .causal = true,
+            .softcap = a.softcap,
+            .q_offset = a.q_offset,
+            .stream = a.stream,
+            .sliding_window = a.sliding_window,
             .sinks = a.sinks};
 }
 

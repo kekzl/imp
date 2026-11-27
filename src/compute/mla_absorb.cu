@@ -162,10 +162,9 @@ __global__ static void mla_absorbed_decode_kernel(
     }
 }
 
-void mla_absorbed_decode(const half* q, const half* kv_b, const half* cache, half* out,
-                         float* scores, const int* context_lens, int n_heads, int head_dim,
-                         int rope_dim, int nope_dim, int kv_lora_rank, int v_head_dim, int max_seq,
-                         float scale, cudaStream_t stream) {
+void mla_absorbed_decode(const MlaAbsorbedDecodeArgs& a) {
+    const auto& [q, kv_b, cache, out, scores, context_lens, n_heads, head_dim, rope_dim, nope_dim,
+                 kv_lora_rank, v_head_dim, max_seq, scale, stream] = a;
     const int nthreads = 256;
     // sh: q_absorbed[kv_lora] + q_pe[rope] + ctx[kv_lora] + reduce[nthreads]
     size_t shmem = (static_cast<size_t>(2 * kv_lora_rank) + rope_dim + nthreads) * sizeof(float);
