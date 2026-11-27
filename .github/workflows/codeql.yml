@@ -9,7 +9,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: "41 4 * * 1"
+    - cron: "41 4 * * *"  # nightly: c-cpp left the main push (M10)
   workflow_dispatch:
 
 # Push: one group per commit (a shared one queued 63 main push jobs > 60 s, max 723 s).
@@ -31,7 +31,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [c-cpp, python, actions]
+        # c-cpp on PR, nightly and dispatch, not on a main push: analyze median 510 s per push.
+        language: ${{ github.event_name == 'push' && fromJSON('["python","actions"]') || fromJSON('["c-cpp","python","actions"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
