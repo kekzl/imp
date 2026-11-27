@@ -562,7 +562,10 @@ recurrent_snapshot_mb = 256
 # (one H2D of one slab). Sessions beyond the device slot count keep their
 # tail-only prefill. 0 = off. Left unset with kv_cache.host_spill_mb > 0, it
 # rises to host_spill_mb / 2: a spilled hybrid prefix restores only with its
-# snapshot.
+# snapshot. Qwen3.8-27B-NVFP4 2026-11-27 (auto 8192 vs 0, 3 starts each): mix10
+# decode 204.9 vs 204.7 tok/s; 24 chats x 3 turns cache 606048 vs 0 of 610.7k
+# later-turn prompt tokens, TTFT median 589 vs 5244 ms. Inkling: no host tier
+# unless set (B-111 S4).
 recurrent_snapshot_host_mb = 2048
 # OpenTelemetry trace export (OTLP/HTTP, JSON encoding): the full traces
 # URL of a collector, e.g. http://localhost:4318/v1/traces; "" = off. Every

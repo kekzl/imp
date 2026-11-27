@@ -72,6 +72,7 @@ Both pass `--set speculative.ngram=false` now, which `tests/perf_baseline.json` 
 
 - Until #1625 only `verify.sh` did, while the two were documented as one gate.
 - A decode delta worse than -8 % **fails**; a prefill delta worse than -8 % warns (cuBLAS variance).
+- Inkling-2-Mini runs its own forward (B-111) and has its own row, `.extra_models["Inkling-2-Mini"]`: `make verify-inkling` runs `scripts/inkling_perf.sh` after the serve smoke (the gate bench plus the row's `set` flags, 3 processes, median, same thresholds). `verify.sh` does not read the row.
 
 | Rule | Detail |
 |---|---|
