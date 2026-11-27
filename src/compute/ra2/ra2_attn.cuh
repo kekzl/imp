@@ -14,6 +14,7 @@ constexpr float kTau = 0.f;
 constexpr float kLog2Ps = 10.584962500721156f;  // log2(1536): P' = P * 1536 / 2^k <= 6
 
 // Q int8 rows (D bytes): k32 step ks = bytes ks*32 + T0*4 (a0/a1) and +16 (a2/a3), as the FP4 layout.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): lane/tile/smem/counter offsets < 2^24
 template <int D>
 __device__ __forceinline__ void load_q(uint32_t (&qa)[Cfg<D>::KSTEPS][4], const uint8_t* lo,
                                        const uint8_t* hi) {
@@ -327,5 +328,6 @@ __global__ void __launch_bounds__(NW * 32, MB) attn_kernel(const uint8_t* __rest
     const float vg = hs[bhk].v;
     store_rows<D>(O, dm, b, hk, r_lo, T0, o, vg / ol[0], vg / ol[2]);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace ra2

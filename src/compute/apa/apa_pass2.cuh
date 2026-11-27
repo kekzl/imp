@@ -234,6 +234,7 @@ __device__ __forceinline__ int prev_tile(const uint32_t* whot0, int W, int below
 }
 
 // Next step after st (SUB steps of P2Cfg::BT keys per KV tile, -1: start) in the union: the sink tile, then
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): lane/tile/smem/counter offsets < 2^24
 // tiles hi - 1 .. lo (pass-1 order: segments of the KV window chain to one pass over every tile); -1 at the
 // end.
 template <int NW, int SUB>
@@ -793,5 +794,6 @@ __global__ void __launch_bounds__(Launch<D>::NW * 32, 1) apa_kernel(
 #endif
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace apa
