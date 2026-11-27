@@ -126,9 +126,22 @@ struct EngineRuntimeState {
     int max_seq_len = 0;
     QType kv_cache_dtype = QType::F16;
     bool streaming_kv_auto = true;
+    // Quant stack, SSM state, KV block and the planner inputs init derives (B-129: 27 writes left
+    // config_). kv_block_size 0 = auto until resolved; library_reserve_mb -1 = measured default.
+    bool use_fp8_prefill = false;
+    int use_nvfp4_decode = -1;
+    bool dual_path_quant = false;
+    QType ssm_state_dtype = QType::F32;
+    int kv_block_size = 0;
+    int library_reserve_mb = -1;
+    bool use_prefix_caching = false;
+    int swa_shared_tokens = 0;
+    int kv_ceiling_seqs = 0;
+    bool nvfp4_decode_all = false, fp8_lm_head = false, lm_head_source_only = false;
+    bool q8_drop_source = false, q4k_in_place = false;
 };
 
-// Engine::init's seed: every field from the operator's EngineConfig.
+// Engine::init's seed (after bridge_runtime_config): every field from the operator's EngineConfig.
 [[nodiscard]] EngineRuntimeState seed_runtime_state(const EngineConfig& ec);
 // config with rt's resolved fields: what a sizing helper that takes an EngineConfig prices.
 [[nodiscard]] EngineConfig resolved_engine_config(const EngineConfig& config, const EngineRuntimeState& rt);

@@ -66,14 +66,14 @@ void clamp_auto_max_seq_len_to_pool(int& max_seq_len, int pool_blocks, int kv_bs
     max_seq_len = pool_tokens;
 }
 
-// Engine state the init_kv_cache phase helpers read; `ec` is written where a phase turns a feature
-// off (prefix caching, FP8 prefill) or loads the remembered library reserve, `rt` where it resolves
-// batch, context, KV dtype or turns StreamingLLM auto off (C-9);
+// Engine state the init_kv_cache phase helpers read; `ec` is the operator's and read-only (C-9), `rt`
+// is written where a phase resolves batch, context, KV dtype, turns a feature off (prefix caching,
+// FP8 prefill, StreamingLLM auto) or loads the remembered library reserve;
 // `rc` only by snapshot_host_budget_bytes (its host-tier default).
 struct KvInitCtx {
     Model& model;
     const ModelConfig& mcfg;
-    EngineConfig& ec;
+    const EngineConfig& ec;
     EngineRuntimeState& rt;
     RuntimeConfig& rc;
 };
@@ -131,7 +131,7 @@ const char* swa_sizing_off_reason(const KvInitCtx& c, int n_swa_layers, int n_kv
         return "StreamingLLM is enabled";
     if (c.rc.runtime.deterministic)
         return "deterministic mode (unbounded graph loop would be burst-chunked)";
-    if (!c.rc.kv_cache.swa_sizing_wanted(c.ec.use_prefix_caching))
+    if (!c.rc.kv_cache.swa_sizing_wanted(c.rt.use_prefix_caching))
         return "auto mode yields to prefix caching (freed window blocks cannot back "
                "prefix reuse; set kv_cache.swa_snapshot_mb to combine, or "
                "kv_cache.swa_sizing=on to force the KV savings)";
@@ -190,8 +190,8 @@ SwaGate resolve_swa_sizing(const KvInitCtx& c, const std::vector<int>& kv_layer_
     // Prefix caching cannot reuse freed window blocks. With a SWA
     // snapshot budget the two coexist (window restored at reuse
     // boundary); otherwise honor the forced opt-in by disabling it.
-    if (c.ec.use_prefix_caching && c.rc.kv_cache.swa_snapshot_mb <= 0) {
-        c.ec.use_prefix_caching = false;
+    if (c.rt.use_prefix_caching && c.rc.kv_cache.swa_snapshot_mb <= 0) {
+        c.rt.use_prefix_caching = false;
         IMP_LOG_INFO(
             "kv_cache.swa_sizing=on: prefix caching disabled (freed window "
             "blocks cannot back prefix reuse; set kv_cache.swa_snapshot_mb "
@@ -207,14 +207,14 @@ SwaGate resolve_swa_sizing(const KvInitCtx& c, const std::vector<int>& kv_layer_
 // explicit config wins. key_out/path_out name the entry the first forward records.
 void load_library_reserve(const KvInitCtx& c, const std::function<uint64_t()>& fingerprint,
                           LibraryReserveKey& key_out, std::string& path_out) {
-    if (c.ec.library_reserve_mb.value_or(-1) >= 0 || c.rc.vram.library_reserve_cache == "off")
+    if (c.rt.library_reserve_mb >= 0 || c.rc.vram.library_reserve_cache == "off")
         return;
     const std::string path = c.rc.vram.library_reserve_cache.empty() ? library_reserve_cache_default_path()
                                                                      : c.rc.vram.library_reserve_cache;
     LibraryReserveKey key;
     key.model_fingerprint = fingerprint();
-    key.nvfp4_decode_mode = c.ec.use_nvfp4_decode;
-    key.fp8_prefill = c.ec.use_fp8_prefill;
+    key.nvfp4_decode_mode = c.rt.use_nvfp4_decode;
+    key.fp8_prefill = c.rt.use_fp8_prefill;
     // Failure keeps the default 0: matches no cache entry written by a real runtime.
     IMP_CUDA_CHECK_LOG(cudaRuntimeGetVersion(&key.cuda_runtime_version));
     key_out = key;
@@ -224,11 +224,11 @@ void load_library_reserve(const KvInitCtx& c, const std::function<uint64_t()>& f
     if (remembered_found) {
         // A recorded ZERO reserve is valid (not "missing") - models whose
         // first forward claims nothing (AUDIT B70).
-        c.ec.library_reserve_mb = static_cast<int>(remembered >> 20);
+        c.rt.library_reserve_mb = static_cast<int>(remembered >> 20);
         IMP_LOG_INFO(
             "library reserve: %d MiB from the measurement cache (%s) — the default "
             "constant is %zu MiB",
-            *c.ec.library_reserve_mb, path.c_str(), kMeasuredLibraryReserveBytes >> 20);
+            c.rt.library_reserve_mb, path.c_str(), kMeasuredLibraryReserveBytes >> 20);
     } else if (!path.empty()) {
         // No entry: log the constant charge HERE, before pools are sized -
         // reporting only after the first forward would be too late, the KV
@@ -258,7 +258,7 @@ size_t sparse_minmax_plan_bytes(const KvInitCtx& c, int head_dim, bool swa_activ
 // AFTER KV sizing, so charge it here: whole slots of one sequence's
 // state, never more than the budget.
 size_t recurrent_snapshot_plan_bytes(const KvInitCtx& c, size_t ssm_footprint_bytes, int ssm_reserved_slots) {
-    if (c.mcfg.ssm_inner_size <= 0 || !c.ec.use_prefix_caching || c.rc.server.recurrent_snapshot_mb <= 0 ||
+    if (c.mcfg.ssm_inner_size <= 0 || !c.rt.use_prefix_caching || c.rc.server.recurrent_snapshot_mb <= 0 ||
         ssm_footprint_bytes == 0)
         return 0;
     const size_t slots = static_cast<size_t>(c.rt.max_batch_size) +
@@ -293,7 +293,7 @@ ShadowPlanProbe build_shadow_probe(const KvInitCtx& c, const VRAMBudget& vb, con
                                                                    ssm_reserved_slots);
     // Inkling2-Loop: the cross-slot snapshot store's device slots (Engine::inkling_init_snapshots_).
     if (const InklingRuntime* rt = executor ? executor->inkling_runtime() : nullptr;
-        rt && !rt->slots.empty() && c.ec.use_prefix_caching && c.rc.server.recurrent_snapshot_mb > 0) {
+        rt && !rt->slots.empty() && c.rt.use_prefix_caching && c.rc.server.recurrent_snapshot_mb > 0) {
         const size_t e = rt->slots[0]->snapshot_bytes(),
                      budget = static_cast<size_t>(c.rc.server.recurrent_snapshot_mb) << 20;
         probe.recurrent_snapshot_bytes = e > 0 ? budget / e * e : 0;
@@ -312,16 +312,16 @@ ShadowPlanProbe build_shadow_probe(const KvInitCtx& c, const VRAMBudget& vb, con
     }
     probe.kv_growable_ceiling_blocks = c.rc.kv_cache.growable ? vb.kv_max_blocks : 0;
     probe.vision_tower_unmodelled = !c.ec.mmproj_path.value_or("").empty();
-    // Use config_.library_reserve_mb, NOT the runtime-config field: the
+    // Use rt.library_reserve_mb, NOT the runtime-config field: the
     // loader above writes the remembered measurement into the former only
     // (AUDIT B70).
-    probe.library_reserve_bytes = c.ec.library_reserve_mb.value_or(-1) < 0
+    probe.library_reserve_bytes = c.rt.library_reserve_mb < 0
                                       ? kMeasuredLibraryReserveBytes
-                                      : static_cast<size_t>(*c.ec.library_reserve_mb) << 20;
+                                      : static_cast<size_t>(c.rt.library_reserve_mb) << 20;
     probe.n_kv_layers = kv.n_kv_layers;
     probe.n_swa_layers = kv.n_swa_layers;
     probe.swa_live_tokens = kv.swa_live_tokens;
-    probe.swa_shared_tokens = c.ec.swa_shared_tokens;
+    probe.swa_shared_tokens = c.rt.swa_shared_tokens;
     probe.max_batch_size = c.rt.max_batch_size;
     probe.kv_seqs = admitted_batch(c.rt.max_batch_size, c.rc.runtime.max_batch_size);
     probe.max_seq_len = c.rt.max_seq_len;
@@ -397,15 +397,15 @@ void apply_gdn_precision_gates(const KvInitCtx& c, GraphExecutor* executor) {
     // GDN recurrent state accumulates precision errors per token. FP8
     // E4M3's 3-bit mantissa amplifies these through the delta-rule scan,
     // causing degenerate output after ~50 tokens in multi-turn chat.
-    if (c.ec.use_fp8_prefill) {
-        if (c.ec.dual_path_quant) {
+    if (c.rt.use_fp8_prefill) {
+        if (c.rt.dual_path_quant) {
             IMP_LOG_WARN(
                 "GDN + dual-path: attention weights forced to FP16 (not FP8) — "
                 "recurrent state needs FP16 precision. FFN weights still use NVFP4.");
         } else {
             IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
         }
-        c.ec.use_fp8_prefill = false;
+        c.rt.use_fp8_prefill = false;
         executor->disable_fp8_prefill();
     }
 }
@@ -688,7 +688,7 @@ void enable_sparse_key_minmax(const KvInitCtx& c, KVCache& kv_cache) {
 
 void enable_prefix_caching(const KvInitCtx& c, KVCacheManager& kvm,
                            const std::function<uint64_t()>& fingerprint, cudaStream_t stream) {
-    if (!c.ec.use_prefix_caching)
+    if (!c.rt.use_prefix_caching)
         return;
     kvm.set_prefix_caching_enabled(true);
     // cache_control/cache_prompt pin budget: percent of the pool,
@@ -731,7 +731,7 @@ void init_ssm_state_pool(const KvInitCtx& c, int n_ssm, int ssm_reserved_slots, 
     // whole slab either way.
     const bool ssm_pool_ok = out.ssm_state->init(
         n_ssm, c.rt.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd, mcfg.ssm_state_size,
-        c.ec.ssm_state_dtype, alloc, ssm_reserved_slots, c.rc.vram.lazy_commit ? vmm_backend() : nullptr,
+        c.rt.ssm_state_dtype, alloc, ssm_reserved_slots, c.rc.vram.lazy_commit ? vmm_backend() : nullptr,
         batch_verify_spare_slots(c.rc, &c.model, c.rt.max_batch_size), c.model.ple_state_bytes());
     if (ssm_pool_ok && out.ssm_state->lazy() && scheduler)
         scheduler->set_admission_gate(std::move(gate));
@@ -840,7 +840,7 @@ void init_swa_snapshots(const KvInitCtx& c, bool swa_active, KVCacheManager& kvm
     if (store)
         return;
     kvm.set_prefix_caching_enabled(false);
-    c.ec.use_prefix_caching = false;
+    c.rt.use_prefix_caching = false;
     // A budget below one snapshot silently costs prefix caching, worse
     // than swa_snapshot_mb=0 (which keeps caching, drops SWA savings).
     // Name the required size or the two cases are indistinguishable in the log.
@@ -900,9 +900,9 @@ bool Engine::init_kv_cache() {
     // Resolved in init_resolve_kv_block_size_() before the executor sizes its
     // workspaces - anything sized there needs the real value, not kKVBlockSize.
     // Fallback keeps this function correct if that resolver was skipped.
-    if (config_.kv_block_size.value_or(0) <= 0)
-        config_.kv_block_size = kKVBlockSize;
-    const int kv_bs = *config_.kv_block_size;
+    if (rt_.kv_block_size <= 0)
+        rt_.kv_block_size = kKVBlockSize;
+    const int kv_bs = rt_.kv_block_size;
     kv.kv_bs = kv_bs;
     // A decode step's table holds kv_ahead_tokens_ more rows (Inkling lookahead).
     int blocks_per_seq = (rt_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs;
@@ -918,7 +918,7 @@ bool Engine::init_kv_cache() {
     kv.n_swa_layers = swa.n_layers;
     kv.swa_active = swa_sizing_active_;
     kv.swa_live_tokens = swa_sizing_active_ ? swa_window_max_ + swa_slack_tokens_ + swa_burst_cap_tokens_ : 0;
-    config_.swa_shared_tokens = swa_sizing_active_ ? swa.chunk_extra_tokens : 0;
+    rt_.swa_shared_tokens = swa_sizing_active_ ? swa.chunk_extra_tokens : 0;
     kv.layer_block_bytes = kv_block_bytes_layer_mean(mcfg, rt_.kv_cache_dtype, kv_bs, head_dim,
                                                      kv.swa_active);
 
@@ -929,7 +929,7 @@ bool Engine::init_kv_cache() {
 
     // Reserved pool slots: mc verify W-1 + batched-verify spares (recomputed after the clamp).
     int ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), rt_.max_batch_size);
-    config_.kv_ceiling_seqs =
+    rt_.kv_ceiling_seqs =
         kv_ceiling_seqs(admitted_batch(rt_.max_batch_size, runtime_config_.runtime.max_batch_size),
                         experts_on_host_ && executor_ && executor_->expert_cache_nvfp4_slots());
     // MTP draft workspace: allocated at the end of init (take_planned_mtp_workspace_), so both passes
@@ -967,8 +967,7 @@ bool Engine::init_kv_cache() {
     int max_blocks = std::min(kv_blocks_from_plan(resolved_engine_config(config_, rt_), plan, vram_budget),
                               ink_cap);
     kv_replan_arm(kv_replan_, probe, vram_budget, max_blocks, plan.ok,
-                  config_.library_reserve_mb.value_or(-1) < 0 &&
-                      config_.kv_cache_max_blocks.value_or(0) <= 0);
+                  rt_.library_reserve_mb < 0 && config_.kv_cache_max_blocks.value_or(0) <= 0);
     log_sparse_minmax_pool(resolved_engine_config(config_, rt_), kv, max_blocks);
 
     // Weight caches build BEFORE the KV pool (A7 step 6.4): caches have bounded

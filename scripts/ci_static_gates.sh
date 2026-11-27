@@ -223,6 +223,9 @@ if want layering; then
     run "backward layer includes pinned"        python3 tools/check_layering.py
     run "that gate still classifies its cases"  python3 tools/check_layering.py --selftest
     run "make refs still rewrites nvcc for clangd" python3 tools/clangd_refs.py --selftest
+    # C-9 / B-129: init resolves into rt_, config_ keeps the operator's (27 writes on 2026-11-27).
+    run "Engine::config_ written by no one"     python3 tools/check_engine_config_writes.py
+    run "that gate still catches its cases"     python3 tools/check_engine_config_writes.py --selftest
 fi
 
 if want citations; then

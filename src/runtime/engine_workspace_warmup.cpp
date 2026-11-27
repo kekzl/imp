@@ -490,12 +490,10 @@ void Engine::warmup() {
     const size_t whole_init = residual > 0 ? static_cast<size_t>(residual) : 0;
     measured_library_reserve_ =
         engine_internal::library_reserve_measurement(forward_window, residual).value_or(SIZE_MAX);
-    log_library_measurement(forward_window, residual, measured_library_reserve_,
-                            config_.library_reserve_mb.value_or(-1));
+    log_library_measurement(forward_window, residual, measured_library_reserve_, rt_.library_reserve_mb);
     // Only now is there a number to recommend: everything above decides it, and
     // the warning that names it has to come after, not before (#1746).
-    report_library_reserve(measured_library_reserve_, forward_window, whole_init,
-                           config_.library_reserve_mb.value_or(-1));
+    report_library_reserve(measured_library_reserve_, forward_window, whole_init, rt_.library_reserve_mb);
     // Remember it, so the NEXT start on this model charges the measured value instead of the
     // constant (AUDIT B49). A write failure is a warning, never a load failure: refusing to
     // serve a model over a cache file would be absurd.

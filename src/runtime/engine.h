@@ -367,8 +367,8 @@ private:
     // which is what lets it stop including runtime/config.h.
     DispatchPolicy dispatch_policy_;
     std::shared_ptr<Model> model_;
-    EngineConfig config_;  // what the operator set, plus init-time resolution of the fields rt_ does not hold
-    EngineRuntimeState rt_;  // batch, context, KV dtype resolved at init; graph and StreamingLLM flags (C-9)
+    EngineConfig config_;    // what the operator set plus the imp.conf bridge; init writes none of it (C-9)
+    EngineRuntimeState rt_;  // every field init resolves (batch, context, KV, quant stack); serving flags
 
     // compute_native_cache_demand(*model_) is a pure function of the
     // checkpoint's tensor shapes (stable pre- and post-upload by contract).
@@ -1230,7 +1230,7 @@ private:
     [[nodiscard]] bool init_chat_template_(ChatTemplateFamily family, const Tokenizer& tok);
     void warmup();
     // Config-resolution helpers for the front half of init() — each one
-    // mutates config_ / RuntimeConfig in place, then init() executes
+    // mutates rt_ / RuntimeConfig in place, then init() executes
     // init_weights / init_kv_cache / init_features. Order matters: see the
     // call sequence in init() for which flag each one resolves.
     void init_inkling_limits_();

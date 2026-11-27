@@ -27,7 +27,7 @@ void Engine::apply_measured_library_reserve_() {
         (void)kv_cache_raw_->probe_residency();
     }
     const int commit_after = kv_cache_raw_->try_grow_to(r.commit_blocks);
-    if (config_.use_prefix_caching) {
+    if (rt_.use_prefix_caching) {
         const int pin_cfg = config_.prefix_pin_budget_pct.value_or(kPrefixPinBudgetPctDefault);
         const int pin_pct = std::clamp(pin_cfg, 0, 100);
         if (pin_pct > 0)
