@@ -72,9 +72,9 @@ __global__ void pli_gate_mul_kernel(half* __restrict__ gate, const half* __restr
 
 }  // namespace
 
-void pli_project_combine(void* proj, const void* table, const int32_t* ids, const void* norm_w, int n,
-                         int n_layers, int dim, int vocab, int32_t mm_token_id, int32_t pad_id, float eps,
-                         float tok_scale, float out_scale, cudaStream_t stream) {
+void pli_project_combine(const PliProjectCombineArgs& a) {
+    const auto& [proj, table, ids, norm_w, n, n_layers, dim, vocab, mm_token_id, pad_id, eps, tok_scale,
+                 out_scale, stream] = a;
     if (n <= 0 || n_layers <= 0 || dim <= 0)
         return;
     if (dim > 4 * kPliThreads)

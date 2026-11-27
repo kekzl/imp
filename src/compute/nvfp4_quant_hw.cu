@@ -212,11 +212,10 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
     }
 }
 
-bool nvfp4_quant_hw_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, int batch_size, int n_heads,
-                         int n_tokens, int head_dim, int64_t stride_bz_input, int64_t stride_h_input,
-                         int64_t stride_seq_input, int64_t stride_bz_output, int64_t stride_h_output,
-                         int64_t stride_seq_output, int64_t stride_bz_output_sf, int64_t stride_h_output_sf,
-                         int64_t stride_seq_output_sf, cudaStream_t stream) {
+bool nvfp4_quant_hw_fp16(const Nvfp4QuantHwArgs& a) {
+    const auto& [d_input, d_nvfp4, d_sf, batch_size, n_heads, n_tokens, head_dim, stride_bz_input,
+                 stride_h_input, stride_seq_input, stride_bz_output, stride_h_output, stride_seq_output,
+                 stride_bz_output_sf, stride_h_output_sf, stride_seq_output_sf, stream] = a;
     constexpr int BLOCK_SIZE = 64;  // tokens per threadblock
     if (head_dim != 64 && head_dim != 128) {
         IMP_LOG_ERROR("nvfp4_quant_hw: head_dim %d unsupported (only 64 / 128)", head_dim);
@@ -249,11 +248,10 @@ bool nvfp4_quant_hw_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, i
     return cudaGetLastError() == cudaSuccess;
 }
 
-bool nvfp4_dequant_hw_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half* d_output, int batch_size,
-                           int n_heads, int n_tokens, int head_dim, int64_t stride_bz_input,
-                           int64_t stride_h_input, int64_t stride_seq_input, int64_t stride_bz_output,
-                           int64_t stride_h_output, int64_t stride_seq_output, int64_t stride_bz_input_sf,
-                           int64_t stride_h_input_sf, int64_t stride_seq_input_sf, cudaStream_t stream) {
+bool nvfp4_dequant_hw_fp16(const Nvfp4DequantHwArgs& a) {
+    const auto& [d_nvfp4, d_sf, d_output, batch_size, n_heads, n_tokens, head_dim, stride_bz_input,
+                 stride_h_input, stride_seq_input, stride_bz_output, stride_h_output, stride_seq_output,
+                 stride_bz_input_sf, stride_h_input_sf, stride_seq_input_sf, stream] = a;
     constexpr int BLOCK_SIZE = 64;
     if (head_dim != 64 && head_dim != 128)
         return false;

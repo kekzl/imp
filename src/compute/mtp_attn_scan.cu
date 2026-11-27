@@ -617,10 +617,9 @@ void mtp_attn_scan(const void* q, const void* k_cache, const void* v_cache, void
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, void* out, const int* d_slots,
-                         const int* d_pos, int64_t slot_elems, int max_pos, int n_rows, int num_heads,
-                         int num_kv_heads, int head_dim, cudaStream_t stream, int ring, const int* d_hi,
-                         float* split_part) {
+void mtp_attn_scan_slots(const MtpAttnScanSlotsArgs& a) {
+    const auto& [q, k_base, v_base, out, d_slots, d_pos, slot_elems, max_pos, n_rows, num_heads, num_kv_heads,
+                 head_dim, stream, ring, d_hi, split_part] = a;
     (void)mtp_scan_smem_opt_in();
     const int rows = ring > 0 ? std::min(max_pos + 1, ring) : max_pos + 1;
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));

@@ -114,8 +114,21 @@ TEST(GDNScanTest, SingleTokenCPUvsGPU) {
     cudaMemcpy(d_alpha, ha.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_beta, hb.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
 
-    gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt, d_state, d_y, nullptr, n_heads, head_dim,
-                        state_size, n_groups, nullptr);
+    gdn_scan_decode_f32({.x = d_V,
+                         .B = d_K,
+                         .C = d_Q,
+                         .alpha = d_alpha,
+                         .beta = d_beta,
+                         .A_log = d_A,
+                         .dt_bias = d_dt,
+                         .h_state = d_state,
+                         .y = d_y,
+                         .z = nullptr,
+                         .n_heads = n_heads,
+                         .head_dim_ssm = head_dim,
+                         .state_size = state_size,
+                         .n_groups = n_groups,
+                         .stream = nullptr});
     cudaDeviceSynchronize();
 
     std::vector<half> hy(inner);
@@ -204,8 +217,21 @@ TEST(GDNScanTest, MultiTokenSequential) {
         }
         cudaMemcpy(d_alpha, ha.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
         cudaMemcpy(d_beta, hb.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
-        gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt, d_state, d_y, nullptr, n_heads,
-                            head_dim, state_size, n_groups, nullptr);
+        gdn_scan_decode_f32({.x = d_V,
+                             .B = d_K,
+                             .C = d_Q,
+                             .alpha = d_alpha,
+                             .beta = d_beta,
+                             .A_log = d_A,
+                             .dt_bias = d_dt,
+                             .h_state = d_state,
+                             .y = d_y,
+                             .z = nullptr,
+                             .n_heads = n_heads,
+                             .head_dim_ssm = head_dim,
+                             .state_size = state_size,
+                             .n_groups = n_groups,
+                             .stream = nullptr});
         cudaDeviceSynchronize();
     }
 
@@ -313,8 +339,21 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
         cudaMemcpy(d_V, row + 2 * BC_size, inner * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(d_a1, h_alpha_h.data() + t * n_heads, n_heads * sizeof(half), cudaMemcpyHostToDevice);
         cudaMemcpy(d_b1, h_beta_h.data() + t * n_heads, n_heads * sizeof(half), cudaMemcpyHostToDevice);
-        gdn_scan_decode_f32(d_V, d_K, d_Q, d_a1, d_b1, d_A, d_dt, d_state2, d_y2 + t * inner, nullptr,
-                            n_heads, head_dim, state_size, n_groups, nullptr);
+        gdn_scan_decode_f32({.x = d_V,
+                             .B = d_K,
+                             .C = d_Q,
+                             .alpha = d_a1,
+                             .beta = d_b1,
+                             .A_log = d_A,
+                             .dt_bias = d_dt,
+                             .h_state = d_state2,
+                             .y = d_y2 + t * inner,
+                             .z = nullptr,
+                             .n_heads = n_heads,
+                             .head_dim_ssm = head_dim,
+                             .state_size = state_size,
+                             .n_groups = n_groups,
+                             .stream = nullptr});
         cudaDeviceSynchronize();
     }
 
@@ -1043,8 +1082,21 @@ TEST(GDNScanTest, ZeroState) {
     cudaMemcpy(d_alpha, ha.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_beta, hb.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
 
-    gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt, d_state, d_y, nullptr, n_heads, head_dim,
-                        state_size, n_groups, nullptr);
+    gdn_scan_decode_f32({.x = d_V,
+                         .B = d_K,
+                         .C = d_Q,
+                         .alpha = d_alpha,
+                         .beta = d_beta,
+                         .A_log = d_A,
+                         .dt_bias = d_dt,
+                         .h_state = d_state,
+                         .y = d_y,
+                         .z = nullptr,
+                         .n_heads = n_heads,
+                         .head_dim_ssm = head_dim,
+                         .state_size = state_size,
+                         .n_groups = n_groups,
+                         .stream = nullptr});
     cudaDeviceSynchronize();
 
     std::vector<half> hy(inner);

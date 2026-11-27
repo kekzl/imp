@@ -692,10 +692,9 @@ __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float*
     y[(h * head_dim_ssm) + d] = __float2half(y_partial * scale);
 }
 
-void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
-                         const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
-                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                         int grouped_layout) {
+void gdn_scan_decode_f32(const GdnScanDecodeArgs& a) {
+    const auto& [x, B, C, alpha, beta, A_log, dt_bias, h_state, y, z, n_heads, head_dim_ssm, state_size,
+                 n_groups, stream, grouped_layout] = a;
     size_t smem = (static_cast<int64_t>(2) * state_size * sizeof(float)) + (2 * sizeof(float));
     gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(x, B, C, alpha, beta, A_log, dt_bias,
                                                                     h_state, y, z, n_heads, head_dim_ssm,

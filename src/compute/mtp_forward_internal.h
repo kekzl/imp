@@ -43,10 +43,26 @@ void mtp_attn_scan(const void* q, const void* k_cache, const void* v_cache, void
 // Multi-slot rows: row r at d_pos[r] attends its window of slot d_slots[r] (k/v base + slot * slot_elems,
 // ring and d_hi[slot] as mtp_attn_scan); max_pos = max over d_pos sizes the scores. split_part
 // (ws.d_scan_part) and n_rows <= kMtpScanSlotSplitRows: kMtpScanSlotSplits CTAs per (row, head) + combine.
-void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, void* out, const int* d_slots,
-                         const int* d_pos, int64_t slot_elems, int max_pos, int n_rows, int num_heads,
-                         int num_kv_heads, int head_dim, cudaStream_t stream, int ring = 0,
-                         const int* d_hi = nullptr, float* split_part = nullptr);
+// Arguments in the old parameter order (audit D-11); ring 0 / d_hi / split_part nullptr are the old defaults.
+struct MtpAttnScanSlotsArgs {
+    const void* q = nullptr;
+    const void* k_base = nullptr;
+    const void* v_base = nullptr;
+    void* out = nullptr;
+    const int* d_slots = nullptr;
+    const int* d_pos = nullptr;
+    int64_t slot_elems = 0;
+    int max_pos = 0;
+    int n_rows = 0;
+    int num_heads = 0;
+    int num_kv_heads = 0;
+    int head_dim = 0;
+    cudaStream_t stream = nullptr;
+    int ring = 0;
+    const int* d_hi = nullptr;
+    float* split_part = nullptr;
+};
+void mtp_attn_scan_slots(const MtpAttnScanSlotsArgs& a);
 // The kernels mtp_attn_scan_slots launches with window-sized smem (direct, split): the funcs of their nodes
 // in a captured graph (mtp_scan_nodes_find).
 const void* mtp_attn_scan_rows_fn();

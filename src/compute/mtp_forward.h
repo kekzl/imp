@@ -276,20 +276,46 @@ inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
 // mtp_pos/slot_pos. post_norm (optional): apply target's final norm before feed
 // (upstream convention). h_tokens may be a device pointer (cudaMemcpyDefault):
 // the bound verify's chained second draft feeds draft 1 without a sync.
-[[nodiscard]] bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
-                             int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
-                             const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
-                             cudaStream_t stream, const Tensor* post_norm = nullptr,
-                             float post_norm_eps = 1e-6f, float post_norm_offset = 0.0f);
+// Arguments in the old parameter order (audit D-11); mtp, main_tok_emb and ws by pointer, required. The
+// post_norm trio keeps the old defaults (none, 1e-6, 0).
+struct MtpFeedRowsArgs {
+    const int32_t* h_tokens = nullptr;
+    const void* d_hidden_all = nullptr;
+    const int* h_src_rows = nullptr;
+    int n_rows = 0;
+    const int* h_slots = nullptr;
+    const int* h_pos = nullptr;
+    const MtpHead* mtp = nullptr;
+    const Tensor* main_tok_emb = nullptr;
+    MtpDraftWorkspace* ws = nullptr;
+    int hidden_dim = 0;
+    cudaStream_t stream = nullptr;
+    const Tensor* post_norm = nullptr;
+    float post_norm_eps = 1e-6f;
+    float post_norm_offset = 0.0f;
+};
+[[nodiscard]] bool mtp_feed_rows_multislot(const MtpFeedRowsArgs& a);
 // Same feed with every table already on the device in stream order (d_tokens [n_rows] ids, d_src_rows,
 // d_slots, d_pos); max_pos = the largest h_pos, checked by mtp_feed_tables_valid. No copy, no host read.
-[[nodiscard]] bool mtp_feed_rows_multislot_dev(const int32_t* d_tokens, const void* d_hidden_all,
-                                               const int* d_src_rows, int n_rows, const int* d_slots,
-                                               const int* d_pos, int max_pos, const MtpHead& mtp,
-                                               const Tensor& main_tok_emb, MtpDraftWorkspace& ws,
-                                               int hidden_dim, cudaStream_t stream,
-                                               const Tensor* post_norm = nullptr, float post_norm_eps = 1e-6f,
-                                               float post_norm_offset = 0.0f);
+// Arguments in the old parameter order (audit D-11), defaults as MtpFeedRowsArgs.
+struct MtpFeedRowsDevArgs {
+    const int32_t* d_tokens = nullptr;
+    const void* d_hidden_all = nullptr;
+    const int* d_src_rows = nullptr;
+    int n_rows = 0;
+    const int* d_slots = nullptr;
+    const int* d_pos = nullptr;
+    int max_pos = 0;
+    const MtpHead* mtp = nullptr;
+    const Tensor* main_tok_emb = nullptr;
+    MtpDraftWorkspace* ws = nullptr;
+    int hidden_dim = 0;
+    cudaStream_t stream = nullptr;
+    const Tensor* post_norm = nullptr;
+    float post_norm_eps = 1e-6f;
+    float post_norm_offset = 0.0f;
+};
+[[nodiscard]] bool mtp_feed_rows_multislot_dev(const MtpFeedRowsDevArgs& a);
 // Every row's slot in [0, n_kv_slots) and position >= 0 (the head KV is a ring); *max_pos = the largest
 // position.
 [[nodiscard]] bool mtp_feed_tables_valid(const MtpDraftWorkspace& ws, const int* h_slots, const int* h_pos,

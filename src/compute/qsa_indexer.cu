@@ -345,10 +345,9 @@ void qsa_select(const half* q, const int* positions, const half* block_keys, flo
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void qsa_gather_kv(const half* k_cache, const half* v_cache, const int* bt, int block_size,
-                   int n_kv, int hd, const int32_t* sel_tokens, const int32_t* sel_count,
-                   int cap, half* k_scratch, half* v_scratch, int blocks_per_row,
-                   int32_t* scratch_ctx, int rows, cudaStream_t stream) {
+void qsa_gather_kv(const QsaGatherKvArgs& a) {
+    const auto& [k_cache, v_cache, bt, block_size, n_kv, hd, sel_tokens, sel_count, cap, k_scratch, v_scratch,
+                 blocks_per_row, scratch_ctx, rows, stream] = a;
     if (rows <= 0)
         return;
     const int vec_per_token = n_kv * hd / 8;
