@@ -1179,6 +1179,8 @@ if(IMP_BUILD_TESTS)
         tests/test_view_or_owned.cpp
         # Weight-cache entries: owned buffers released once, a viewed slab slice never (I5).
         tests/test_weight_cache_entries.cpp
+        # FP8 decode sidecar targets (gemm.fp8_attn_proj / fp8_ffn_proj) and their byte charge (B-141).
+        tests/test_fp8_decode_sidecar.cpp
         # MoE routing result and MTP workspace: DeviceOwned owners, each buffer released once (I5).
         tests/test_routing_mtp_owners.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.

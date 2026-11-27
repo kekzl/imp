@@ -9,6 +9,7 @@
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "core/dispatch_policy.h"
+#include "exec/fp8_decode_sidecar.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_quant.h"
@@ -251,56 +252,22 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
     // gemm.fp8_attn_proj (#984): decode-only per-row-scale sidecar for full-precision
     // attention projections. "auto" = q/k/v/o on gpt-oss and Qwen4Exp (BF16 dense projections get
-    // no NVFP4 decode cache and decode as FP16 GEMVs). Teacher-forced PPL is unaffected by
-    // construction (no FP8 GEMV kernels run during --perplexity). "qo" restricts the sidecar
-    // to q/o as a conservative middle mode; "on" forces full q/k/v/o for any full-precision
-    // attention weights.
-    const std::string& ap = dispatch_policy().gemm.fp8_attn_proj;
-    const bool attn_full = ap == "on" || (ap == "auto" && model_->profile().fp8_attn_proj_full);
-    const bool attn_qo = attn_full || ap == "qo";
-    const bool attn_kv = attn_full;
-    const bool attn_on = attn_qo || attn_kv;
-
-    struct Entry {
-        const void* ptr;
-        size_t n_elems;
-        int rows;
-        int cols;
-    };
-    std::vector<Entry> entries;
-    size_t total_bytes = 0;
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model_->layer(i);
-        // At decode the fused GDN input pack ([ssm_in | gate | alpha | beta] row-concat) replaces
-        // the ssm_in dispatch entirely (run_gdn n==1 fused_input path); the sidecar must target
-        // the pack where it exists, and ssm_in then only serves prefill. Without a pack
-        // (quantized GGUF sources never build one), decode runs ssm_in AND gdn_gate GEMVs
-        // separately, so both are sidecar targets there.
-        const Tensor* in_side = L.gdn_input_packed.data ? &L.gdn_input_packed : &L.ssm_in;
-        const Tensor* gate_side = L.gdn_input_packed.data ? nullptr : &L.gdn_gate;
-        const Tensor* ssm_out_side = &L.ssm_out;
-        const Tensor* q_side = attn_qo ? &L.wq : nullptr;
-        const Tensor* k_side = attn_kv ? &L.wk : nullptr;
-        const Tensor* v_side = attn_kv ? &L.wv : nullptr;
-        const Tensor* o_side = attn_qo ? &L.wo : nullptr;
-        for (const Tensor* w :
-             {in_side, gate_side, ssm_out_side, q_side, k_side, v_side, o_side}) {
-            if (!w || !w->data || !w->on_device)
-                continue;
-            // F16 only (native residents; BF16 converted at upload): quantized straight from the
-            // resident weight, the calibration kernel reads __half.
-            if (w->qtype != QType::F16)
-                continue;
-            if (wcache_->fp8.contains(w->data) || wcache_->nvfp4.contains(w->data) ||
-                wcache_->nvfp4_sfatom.contains(w->data))
-                continue;
-            size_t n = static_cast<size_t>(w->shape[0]) * w->shape[1];
-            if (n == 0 || (w->shape[1] % 16) != 0)
-                continue;
-            entries.push_back({w->data, n, static_cast<int>(w->shape[0]), static_cast<int>(w->shape[1])});
-            total_bytes += n;
-        }
-    }
+    // no NVFP4 decode cache and decode as FP16 GEMVs). "qo" restricts the sidecar to q/o as a
+    // conservative middle mode; "on" forces full q/k/v/o for any full-precision attention weights.
+    // gemm.fp8_ffn_proj (B-141): the same for the dense w_gate / w_up / w_down, default off.
+    // Selection and byte charge: exec/fp8_decode_sidecar.h.
+    const auto& gp = dispatch_policy().gemm;
+    const Fp8SidecarScope scope = fp8_sidecar_scope(gp.fp8_attn_proj, model_->profile().fp8_attn_proj_full,
+                                                    gp.fp8_ffn_proj);
+    const bool attn_on = scope.attn_qo || scope.attn_kv;
+    const Fp8SidecarPlan plan = plan_fp8_sidecar(
+        cfg.n_layers, [&](int i) -> const TransformerLayer& { return model_->layer(i); }, scope,
+        [&](const void* p) {
+            return wcache_->fp8.contains(p) || wcache_->nvfp4.contains(p) ||
+                   wcache_->nvfp4_sfatom.contains(p);
+        });
+    const std::vector<Fp8SidecarEntry>& entries = plan.entries;
+    const size_t total_bytes = plan.bytes;
     if (entries.empty())
         return;
 
@@ -318,9 +285,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // Per-ROW scales, one per output channel: a single per-tensor scale measurably hurts PPL
     // because the fused GDN input pack concatenates row blocks with very different
     // magnitudes (conv | gate | alpha | beta); one amax wastes e4m3 range on most rows.
-    size_t total_rows = 0;
-    for (const auto& e : entries)
-        total_rows += static_cast<size_t>(e.rows);
+    const size_t total_rows = plan.rows;
     auto row_scales_own = DeviceOwned<float>::allocate_plain(total_rows * sizeof(float));
     float* d_row_scales = row_scales_own.get();
     if (!d_row_scales) {
@@ -358,9 +323,10 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     wcache_->fp8_ssm_sidecar_row_scales = std::move(row_scales_own);
 
     IMP_LOG_INFO(
-        "fp8 decode sidecar: %zu projections%s%s (%.1f MiB, %zu per-row scales; "
+        "fp8 decode sidecar: %zu projections%s%s%s (%.1f MiB, %zu per-row scales; "
         "full-precision source retained for prefill)",
-        entries.size(), " [ssm]", attn_on ? " [attn]" : "", total_bytes / (1024.0 * 1024.0), total_rows);
+        entries.size(), " [ssm]", attn_on ? " [attn]" : "", scope.ffn ? " [ffn]" : "",
+        total_bytes / (1024.0 * 1024.0), total_rows);
 }
 
 }  // namespace imp
