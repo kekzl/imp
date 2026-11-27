@@ -182,11 +182,14 @@
                                        ? *hw->payload.nvfp4.tensor_scale
                                        : 1.0f;
                 tmp.N = static_cast<int>(hw->shape[0]);
-                tmp.K = static_cast<int>(hw->shape[1]) * 2;
+                tmp.K = hw->shape[1] * 2;
                 return tmp;
             };
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             NvFP4QuantResult nv_q = nv_q_secondary ? NvFP4QuantResult(*nv_q_e) : from_handle(mxfp4_hwq);
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             NvFP4QuantResult nv_k = nv_k_secondary ? NvFP4QuantResult(*nv_k_e) : from_handle(mxfp4_hwk);
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             NvFP4QuantResult nv_v = nv_v_secondary ? NvFP4QuantResult(*nv_v_e) : from_handle(mxfp4_hwv);
             int q_rows = nv_q.N;
             int k_rows = nv_k.N;

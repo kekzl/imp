@@ -19,6 +19,7 @@ __device__ __forceinline__ int iq4_dp4a_group(const uint32_t (&w)[4], const int*
 }
 
 // IQ4_NL: 18-B block = fp16 d + qs[16]; val = d * kvalues_iq4nl[nibble]. Blocks are 2-aligned.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): GGUF block/lane/smem offsets < 2^20
 template <>
 struct DequantTraits<DPQTag::IQ4_NL> {
     static constexpr int kBlockBytes = 18;
@@ -65,6 +66,7 @@ struct DequantTraits<DPQTag::IQ4_XS> {
         return d * static_cast<float>(ls - 32) * dq * static_cast<float>(iq4_dp4a_group(w, xi));
     }
 };
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 using IQ4_NL_Traits = DequantTraits<DPQTag::IQ4_NL>;
 using IQ4_XS_Traits = DequantTraits<DPQTag::IQ4_XS>;

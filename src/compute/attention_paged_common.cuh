@@ -45,10 +45,7 @@ __device__ __forceinline__ half ldcs_half(const half* p) {
 }
 
 __device__ __forceinline__ half2 ldcs_half2(const half2* p) {
-    unsigned int v = __ldcs(reinterpret_cast<const unsigned int*>(p));
-    half2 r;
-    memcpy(&r, &v, 4);
-    return r;
+    return __ldcs(p);  // cuda_fp16 overload; memcpy into half2 (not trivially copyable) was UB
 }
 
 __device__ __forceinline__ void stcs_half(half* p, half v) {

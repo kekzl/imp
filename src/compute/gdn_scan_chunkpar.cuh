@@ -118,6 +118,7 @@ __device__ __forceinline__ F16A f16_split_a(const float* a8) {
     F16A r;
 #pragma unroll
     for (int i = 0; i < 4; i++)
+        // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): reg index < 16
         split_f16x2(a8[2 * i], a8[2 * i + 1], r.hi[i], r.lo[i]);
     return r;
 }
@@ -125,6 +126,7 @@ __device__ __forceinline__ F16B f16_split_b(const float* b4) {
     F16B r;
 #pragma unroll
     for (int i = 0; i < 2; i++)
+        // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): reg index < 16
         split_f16x2(b4[2 * i], b4[2 * i + 1], r.hi[i], r.lo[i]);
     return r;
 }

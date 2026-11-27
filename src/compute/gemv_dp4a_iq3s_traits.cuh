@@ -27,7 +27,9 @@ struct DequantTraits<DPQTag::IQ3_S> {
 
     static __device__ __forceinline__ Block decode(const uint8_t* bp, int sub) {
         uint32_t qw[2], sw[1];
+        // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): IQ3_S block offset < 110
         ldg_words_2a(bp + 2 + (8 * sub), qw);
+        // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): IQ3_S block offset < 110
         ldg_words_2a(bp + 74 + (4 * sub), sw);
         const uint32_t qh = __ldg(bp + 66 + sub);
         const uint32_t sc = (__ldg(bp + 106 + (sub >> 1)) >> (4 * (sub & 1))) & 0xFu;

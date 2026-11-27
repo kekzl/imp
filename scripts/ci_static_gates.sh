@@ -64,6 +64,7 @@ if want filesize; then
     run "that gate still counts what it must"   python3 tools/check_complexity.py --selftest
     run "CCN pins only shrink vs the base"      ccn_pins_vs_base
     run "tidy findings gate still counts"       python3 tools/check_tidy_findings.py --selftest
+    run "tidy lane still maps a header to its TUs" bash scripts/tidy_lane.sh --selftest
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "that gate still catches its drift"     python3 tools/check_determinism_sites.py --selftest
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py
@@ -114,6 +115,12 @@ if want deps; then
     echo "== Dependency pins =="
     run "cmake/imp-deps.cmake vs Dockerfile (offline)" bash scripts/check_dep_pins.sh
     run "that gate still names its violations"        bash scripts/check_dep_pins.sh --selftest
+fi
+
+# The path rule of verify-fast's Inkling leg (B-142): Inkling and KV/BlockPool/scheduler/memory on, docs off.
+if want inkling-leg; then
+    echo "== Inkling leg rule =="
+    run "verify-fast Inkling leg path rule" bash scripts/inkling_leg.sh --selftest
 fi
 
 # The Sanitizers PR path filter reads tools/untrusted_input_sources.txt. As a regex in ci.yml it

@@ -362,6 +362,7 @@ struct DequantTraits<DPQTag::Q5_K> {
     }
 };
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): GGUF block/lane/smem offsets < 2^20
 template <>
 struct DequantTraits<DPQTag::Q2_K> {
     static constexpr int kBlockBytes = 84;
@@ -496,6 +497,7 @@ struct DequantTraits<DPQTag::Q3_K> {
         return dot(decode(bp, sub), xi, dq);
     }
 };
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Q5_1: 24 bytes per 32 elements: [2B delta_fp16] [2B min_fp16] [4B high_bits] [16B low_nibbles]; element e <
 // 16 = low nibble of qs[e], e + 16 = high nibble. Dequant: val = q5 * delta + min, q5 = low4 | (hi1 << 4),
@@ -801,6 +803,7 @@ __global__ void gemv_dp4a_kpar_gate_up_kernel(const uint8_t* __restrict__ gate_w
 // Template kernel #1: Basic + Residual (replaces 10 hand-written kernels)
 // ============================================================================
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): GGUF block/lane/smem offsets < 2^20
 template <typename QT, int N_ROWS, bool ADD_RESIDUAL>
 __global__ void gemv_dp4a_kernel(const uint8_t* __restrict__ W, const block_q8_1* __restrict__ q8_1,
                                  const float* __restrict__ d8, half* y, const half* residual, int M, int K) {
@@ -1650,6 +1653,7 @@ __global__ void gemv_dp4a_moe_gate_up_kernel(
         y_up[out_idx] = __float2half(sum_up);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <typename QT>
 static void launch_gemv_dp4a_moe_gate_up(const uint8_t* gate_weights, const uint8_t* up_weights,

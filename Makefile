@@ -570,17 +570,22 @@ verify: build $(VERIFY_INTERPOSE) check-gpu
 # Measured on an unchanged tree: 3 s cached build + 37 s script. A source
 # change adds the full image build (#1587).
 # Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
+# Last leg (B-142): `make verify-inkling` when the diff touches Inkling, KV, BlockPool, scheduler or
+# src/memory/ paths (scripts/inkling_leg.sh), else one SKIP line; IMP_VERIFY_INKLING=1 forces it.
 verify-fast: build $(VERIFY_INTERPOSE) check-gpu
 	@$(GPU_LOCKED) scripts/verify.sh fast
+	@MAKE="$(MAKE)" bash scripts/inkling_leg.sh run
 
 # verify-inkling: verify-fast's Inkling-2-Mini serve smoke (scripts/inkling_smoke.sh, ~25 GB) plus its perf row:
 # 2 sequence slots, 2 replies past 256 tokens, then 9 new requests; 11 of 11 served and coherent.
-# Then the perf row: scripts/inkling_perf.sh against .extra_models["Inkling-2-Mini"] of tests/perf_baseline.json.
+# Then the perf row: scripts/inkling_perf.sh against .extra_models["Inkling-2-Mini"] of $(INKLING_BASELINE).
+INKLING_MODELS ?= $(HOME)/models
+INKLING_BASELINE ?= tests/perf_baseline.json
 verify-inkling: build check-gpu
 	@$(GPU_LOCKED) docker run --rm --gpus all -v "$(CURDIR)":/src -w /src \
-	 -v "$(HOME)/models":"$(HOME)/models":ro --entrypoint bash $(DOCKER_IMG) -c \
-	 'bash scripts/inkling_smoke.sh /usr/local/bin/imp-server "$(HOME)/models/Inkling-2-Mini" && \
-	  bash scripts/inkling_perf.sh /usr/local/bin/imp-cli "$(HOME)/models/Inkling-2-Mini"'
+	 -v "$(INKLING_MODELS)":"$(INKLING_MODELS)":ro --entrypoint bash $(DOCKER_IMG) -c \
+	 'bash scripts/inkling_smoke.sh /usr/local/bin/imp-server "$(INKLING_MODELS)/Inkling-2-Mini" && \
+	  bash scripts/inkling_perf.sh /usr/local/bin/imp-cli "$(INKLING_MODELS)/Inkling-2-Mini" "$(INKLING_BASELINE)"'
 
 # vram-touch-audit: MiB held against MiB written per pool for one model (docs/VRAM_AUDIT.md). The
 # acceptance step of a model port and of any change to what a model allocates.

@@ -33,6 +33,3 @@ Checks: >
   -bugprone-use-after-move,
   -bugprone-suspicious-missing-comma,
   -clang-analyzer-cplusplus.Move
-
-# The root filter plus the tests' own headers (*.h, *.cuh helpers shared by test TUs).
-HeaderFilterRegex: '((src|include/imp)/.*\.(h|hpp)|tests/.*\.(h|hpp|cuh))$'
