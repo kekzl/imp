@@ -108,8 +108,8 @@ jobs:
             IMP_BUILD_BENCH=ON
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No type=gha cache: its export cost 317-424 s (v0.69.1, v0.70.0) and CI's ccache entries
+          # evicted it from the 10 GB repo cache before the next release, which built cold anyway.
           # SPDX SBOM + full SLSA provenance as attestation manifests in the image index (#2428).
           sbom: true
           provenance: mode=max
@@ -139,7 +139,8 @@ jobs:
           echo "SBOM ${#sbom} bytes, provenance ${#prov} bytes"
           [ "${#sbom}" -gt 100 ] && [ "${#prov}" -gt 100 ] || { echo "::error::SBOM or provenance missing on $IMAGE"; exit 1; }
 
-      # Binary tarball without Docker (roadmap row 55): the builder layers come from the gha cache.
+      # Binary tarball without Docker (roadmap row 55): same build-args and context as above, so
+      # the builder stages come from this job's buildx builder (log: `[builder 4/4]` CACHED).
       - name: Build the release tarball
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -148,7 +149,6 @@ jobs:
           build-args: |
             IMP_BUILD_BENCH=ON
           outputs: type=local,dest=dist
-          cache-from: type=gha
 
       # The runner has no driver: everything but libcuda.so.1 must resolve from the tarball's lib/.
       - name: Check the release tarball
