@@ -496,6 +496,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_sampling_stop.cpp
     src/runtime/engine_kv_swap.cpp
     src/runtime/stop_mask.cpp
+    src/runtime/banned_tokens.cpp
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
     src/runtime/suffix_shadow.cpp
@@ -1178,6 +1179,8 @@ if(IMP_BUILD_TESTS)
         tests/test_view_or_owned.cpp
         # Weight-cache entries: owned buffers released once, a viewed slab slice never (I5).
         tests/test_weight_cache_entries.cpp
+        # FP8 decode sidecar targets (gemm.fp8_attn_proj / fp8_ffn_proj) and their byte charge (B-141).
+        tests/test_fp8_decode_sidecar.cpp
         # MoE routing result and MTP workspace: DeviceOwned owners, each buffer released once (I5).
         tests/test_routing_mtp_owners.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
@@ -1446,6 +1449,7 @@ if(IMP_BUILD_TESTS)
         tests/test_chat_template.cpp
         tests/test_chat_template_continue.cpp
         tests/test_transcript_ids.cpp
+        tests/test_banned_tokens.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp
         tests/test_ling3_chat_template.cpp

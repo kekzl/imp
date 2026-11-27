@@ -2,7 +2,9 @@
 // expert FFN and the miss gather run beside the
 // routed GEMVs; joins keep the add order, so output bits match the serial path.
 #include "exec/executor.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/diagnostics.h"
+#include "core/config/moe.h"  // kMoeExpertPrefetch*
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
 #include "core/logging.h"
@@ -77,7 +79,7 @@ void GraphExecutor::init_gather_overlap_() {
     // imp::cfg::kMoeExpertPrefetch keys issue prefetches; diagnostics.moe_expert_trace alone records the
     // predictions (main stream, in trace order) without prefetching.
     const int budget = std::clamp(imp::cfg::kMoeExpertPrefetch, 0, kDevExpertPrefetchMax);
-    const bool trace = !dispatch_policy().diagnostics.moe_expert_trace.empty();
+    const bool trace = !diagnostics_section(dispatch_policy()).moe_expert_trace.empty();
     if ((budget > 0 || trace) &&
         !dev_expert_cache_.enable_prefetch(budget > 0 ? budget : 1, imp::cfg::kMoeExpertPrefetchBlocks))
         IMP_LOG_WARN("expert_prefetch: tables not allocated, no next-layer prediction");

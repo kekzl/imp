@@ -225,16 +225,16 @@ bool Engine::init_weights() {
     executor_->set_dispatch_policy(dispatch_policy_);
     // Before init(): allocate_workspaces() sizes the sparse decode budget in
     // BLOCKS, and the conversion from a token count needs the real block size.
-    executor_->set_kv_block_size(config_.kv_block_size.value_or(0));
+    executor_->set_kv_block_size(rt_.kv_block_size);
     executor_->set_kv_cache_dtype(rt_.kv_cache_dtype);
     executor_->set_prefill_chunk(resolve_prefill_chunk_size_());
     {
         int eff_batch = rt_.max_batch_size;
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, rt_.max_seq_len,
-                             config_.use_fp8_prefill, config_.use_nvfp4_decode))
+                             rt_.use_fp8_prefill, rt_.use_nvfp4_decode))
             return false;
 
-        if (config_.dual_path_quant) {
+        if (rt_.dual_path_quant) {
             executor_->set_dual_path_quant(true);
             IMP_LOG_INFO("Dual-path quant: attention weights → FP8, FFN weights → NVFP4");
         }

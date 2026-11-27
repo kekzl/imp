@@ -2,7 +2,6 @@
 // registration, and the MXFP4->FP16 decode fallback. Split out to keep each .cu under
 // the kernel file-size threshold.
 
-#include "core/dispatch_policy.h"
 #include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it

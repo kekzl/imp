@@ -4,6 +4,7 @@
 // CPU diff.
 
 #include "compute/attention_dispatch_decision.h"
+#include "core/dispatch_policy.h"
 #include "exec/moe_prefill_decision.h"
 #include "exec/moe_imbalance.h"
 

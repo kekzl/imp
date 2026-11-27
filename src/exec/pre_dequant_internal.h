@@ -17,7 +17,7 @@
 #include "model/model.h"
 #include "model/layer_host_keep.h"
 #include "model/model_config.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
 #include "core/config/lm_head_mode.h"
 #include "quant/dequant_gpu.h"
 
@@ -94,9 +94,8 @@ struct Fp8CacheBuffers {
 }
 
 // This load builds the FP8 head: fp8, or auto with a 16-bit source (#2224), and the head is eligible.
-[[nodiscard]] inline bool fp8_lm_head_wanted(const DispatchPolicy& rc, const Model& m) {
-    return lm_head_mode_fp8(lm_head_mode(rc.gemm.nvfp4_lm_head), m.output_proj().qtype) &&
-           fp8_lm_head_eligible(m);
+[[nodiscard]] inline bool fp8_lm_head_wanted(LmHeadMode mode, const Model& m) {
+    return lm_head_mode_fp8(mode, m.output_proj().qtype) && fp8_lm_head_eligible(m);
 }
 
 // #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head: auto/on/off/fp8,
@@ -109,9 +108,10 @@ struct Fp8CacheBuffers {
 // quantized hybrids, so auto defers to nvfp4_lm_head_gdn via is_gdn_hybrid.
 // NATIVE (F16/BF16) heads: auto -> ON unconditionally (cuBLAS GEMV alternative, NVFP4
 // cache wins on bytes; GOAL-listed).
-[[nodiscard]] inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, QType head_qtype,
-                                  bool is_dense, int d_model, bool is_gdn_hybrid, bool fp8_head) {
-    const LmHeadMode mode = lm_head_mode(rc.gemm.nvfp4_lm_head);
+// `mode`: lm_head_mode(gemm.nvfp4_lm_head), so this header needs no core/config/gemm.h (B-123).
+[[nodiscard]] inline bool nvfp4_lm_head_enabled(LmHeadMode mode, bool quantized_source, QType head_qtype,
+                                                bool is_dense, int d_model, bool is_gdn_hybrid,
+                                                bool fp8_head) {
     if (mode == LmHeadMode::Nvfp4)
         return true;
     if (mode == LmHeadMode::Source || mode == LmHeadMode::Fp8 || fp8_head ||
@@ -161,72 +161,47 @@ inline bool has_f16_experts(const Model& m) {
     return m.output_proj().qtype == QType::MXFP4;
 }
 
-// Infer StorageTier from which wcache_ map the source pointer landed in.
-inline StorageTier infer_tier_from_wcache(const WeightCaches& wc, const void* src_ptr) {
-    if (wc.nvfp4_sfatom.contains(src_ptr))
-        return StorageTier::NVFP4_SFATOM;
-    if (wc.mxfp4_sfatom.contains(src_ptr))
-        return StorageTier::MXFP4;
-    if (wc.nvfp4.contains(src_ptr))
-        return StorageTier::NVFP4_LINEAR;
-    if (wc.fp8.contains(src_ptr))
-        return StorageTier::FP8;
-    if (wc.fp16.contains(src_ptr))
-        return StorageTier::FP16;
-    return StorageTier::Undefined;
-}
-
-// Fill a handle's payload by borrowing pointers from wcache_ entries.
-inline void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc, const void* src_ptr) {
+// Fill a handle's payload by borrowing pointers from its bound cache entries (h.entries).
+inline void borrow_payload_from_entries(WeightHandle& h) {
+    const WeightCacheRefs& e = h.entries;
     switch (h.primary_tier) {
-        case StorageTier::FP16: {
-            auto it = wc.fp16.find(src_ptr);
-            if (it != wc.fp16.end()) {
-                h.payload.fp16.data = static_cast<half*>(it->second.data);
+        case StorageTier::FP16:
+            if (e.fp16 != nullptr)
+                h.payload.fp16.data = static_cast<half*>(e.fp16->data);
+            break;
+        case StorageTier::FP8:
+            if (e.fp8 != nullptr) {
+                h.payload.fp8.data = static_cast<__nv_fp8_e4m3*>(e.fp8->weight.data);
+                h.payload.fp8.d_scale = e.fp8->d_scale;
+                h.payload.fp8.d_act_scale = e.fp8->d_act_scale;
             }
             break;
-        }
-        case StorageTier::FP8: {
-            auto it = wc.fp8.find(src_ptr);
-            if (it != wc.fp8.end()) {
-                h.payload.fp8.data = static_cast<__nv_fp8_e4m3*>(it->second.weight.data);
-                h.payload.fp8.d_scale = it->second.d_scale;
-                h.payload.fp8.d_act_scale = it->second.d_act_scale;
-            }
-            break;
-        }
-        case StorageTier::NVFP4_LINEAR: {
-            auto it = wc.nvfp4.find(src_ptr);
-            if (it != wc.nvfp4.end()) {
-                h.payload.nvfp4.data = static_cast<uint8_t*>(it->second.packed_data);
-                h.payload.nvfp4.block_scales = static_cast<uint8_t*>(it->second.micro_scales);
+        case StorageTier::NVFP4_LINEAR:
+            if (e.nvfp4 != nullptr) {
+                h.payload.nvfp4.data = static_cast<uint8_t*>(e.nvfp4->packed_data);
+                h.payload.nvfp4.block_scales = static_cast<uint8_t*>(e.nvfp4->micro_scales);
                 // Borrow a pointer to the host tensor_scale stored in the wcache entry (stable address in
                 // unordered_map). Callers must NOT pass this to cudaMemcpyDeviceToHost: it's a host
                 // float, not a device pointer. Read as *tensor_scale.
-                h.payload.nvfp4.tensor_scale = const_cast<float*>(&it->second.tensor_scale);
+                h.payload.nvfp4.tensor_scale = const_cast<float*>(&e.nvfp4->tensor_scale);
                 h.payload.nvfp4.tensor_scale_2 = nullptr;
             }
             break;
-        }
-        case StorageTier::NVFP4_SFATOM: {
-            auto it = wc.nvfp4_sfatom.find(src_ptr);
-            if (it != wc.nvfp4_sfatom.end()) {
-                h.payload.nvfp4_sfatom.weight = const_cast<void*>(it->second.data);
-                h.payload.nvfp4_sfatom.sf = it->second.scale_factors;
-                h.payload.nvfp4_sfatom.global_scale = const_cast<float*>(&it->second.tensor_scale);
+        case StorageTier::NVFP4_SFATOM:
+            if (e.nvfp4_sfatom != nullptr) {
+                h.payload.nvfp4_sfatom.weight = const_cast<void*>(e.nvfp4_sfatom->data);
+                h.payload.nvfp4_sfatom.sf = e.nvfp4_sfatom->scale_factors;
+                h.payload.nvfp4_sfatom.global_scale = const_cast<float*>(&e.nvfp4_sfatom->tensor_scale);
             }
             break;
-        }
-        case StorageTier::MXFP4: {
-            auto it = wc.mxfp4_sfatom.find(src_ptr);
-            if (it != wc.mxfp4_sfatom.end()) {
-                h.payload.mxfp4.weight = const_cast<void*>(it->second.data);
-                h.payload.mxfp4.scales = it->second.scale_factors;
-                h.payload.mxfp4.linear_scales = it->second.linear_scales;
-                h.payload.mxfp4.hadamard_bs = it->second.hadamard_bs;
+        case StorageTier::MXFP4:
+            if (e.mxfp4_sfatom != nullptr) {
+                h.payload.mxfp4.weight = const_cast<void*>(e.mxfp4_sfatom->data);
+                h.payload.mxfp4.scales = e.mxfp4_sfatom->scale_factors;
+                h.payload.mxfp4.linear_scales = e.mxfp4_sfatom->linear_scales;
+                h.payload.mxfp4.hadamard_bs = e.mxfp4_sfatom->hadamard_bs;
             }
             break;
-        }
         default:
             break;
     }

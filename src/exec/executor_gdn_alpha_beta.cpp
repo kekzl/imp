@@ -10,7 +10,6 @@
 #include "compute/gemm.h"
 #include "compute/gemv_dp4a_multi.h"
 #include "compute/layernorm.h"
-#include "core/dispatch_policy.h"
 #include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"

@@ -35,7 +35,7 @@ Both layers ultimately call kernels from `src/quant/` and `src/compute/` (`dequa
 Pure orchestration; calls `src/quant/` kernels for the actual format work.
 
 - `executor_pre_dequant.cpp` - 76 LOC orchestrator that calls each phase in order
-- `pre_dequant_internal.h` - 6 shared helpers (`borrow_payload_from_wcache`, `for_each_dense_weight`, etc.)
+- `pre_dequant_internal.h` - 6 shared helpers (`borrow_payload_from_entries`, `for_each_dense_weight`, etc.)
 - `pre_dequant_phase0_nvfp4_loader.cpp` - Phase 0 + 0b: NVFP4 sidecar promotion + `StorageTier::NVFP4_LINEAR` decode-cache registration (Phase 3b adds the `StorageTier::NVFP4_SFATOM` entry the own tile GEMM reads; both tiers serve SafeTensors and GGUF-requantized weights, they differ in the scale layout). The fused-projection scale split is gated on provenance recorded by `weight_map.cpp` and asserted afterwards (`nvfp4_merged_scale_guard.h`, pure); the checkpoint's `quantization_config.ignore` partition is reconstructed and enforced in `safetensors_loader.cpp` via `model/nvfp4_module_policy.h` (also the role list `imp-quantize` writes against). A compressed-tensors W4A16 checkpoint (`input_activations: null`, never read) is served A16 at `n == 1` and W4A4 from M >= 2: the small-M kernel up to M = 32, the own NVFP4 x NVFP4 tile GEMM (`src/quant/nvfp4_gemm_tile.cu`) above.
 - `pre_dequant_phase1_fp16_cache.cpp` - Phase 1: GGUF Q*_K -> FP16 device cache (used by Q4_K_M, Q5_K_M, Q6_K, Q8_0, ...)
 - `pre_dequant_phase2_fp8_cache.cpp` - Phase 2: FP16 -> FP8 device tensors for the `fp8_prefill` path

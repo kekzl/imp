@@ -48,14 +48,15 @@
         "runtime.max_seq_len=81920",
         "runtime.deterministic=true"
       ],
-      "commit": "70848eb5",
-      "timestamp": "2026-11-27T09:21:54Z",
+      "commit": "63ebac13",
+      "timestamp": "2026-11-27T18:20:35Z",
+      "_note": "Re-pin 2026-11-27 on main 63ebac13 (image imp:g4-main, tree 19721159), 3 runs of scripts/inkling_perf.sh at load 2.64 / 3.81 / 3.01, clocks SM 2737-2765 / mem 13801 MHz, median of the run medians: tg128 386.82 -> 403.05 (runs 403.05 / 400.65 / 408.44), pp512 6291.27 -> 6674.69 (6657.97 / 6674.69 / 6679.13). Why: main read +3.6 to +5.6 % tg128 and +5.8 to +6.2 % pp512 above the 70848eb5 row (#3358); 13 commits since (170 src files, none on an Inkling path), drift and those commits not separated. Mutant tg128 x 1.10 = 443.36: make verify-inkling read 411.33 (-7.22 %) and passed; of the 4 run medians 2 fall past -8 %: the 8 % threshold resolves +10 % only half the time.",
       "methodology": "scripts/inkling_perf.sh (make verify-inkling): median of 3 imp-cli --bench processes, pp512 + tg128 in one process, chunk 0, speculative.ngram=false, lookahead on; runtime.deterministic because the lookahead acceptance follows a non-deterministic token stream: tg128 spread 7.99 % and 23.99 % without it, 1.55 % with it (2026-11-27, 3 processes each)",
       "decode_tps": {
-        "tg128": 386.82
+        "tg128": 403.05
       },
       "prefill_tps": {
-        "pp512": 6291.27
+        "pp512": 6674.69
       }
     }
   }

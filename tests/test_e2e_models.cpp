@@ -347,6 +347,28 @@ TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
     EXPECT_GT(len, 0u);
 }
 
+TEST_F(Gemma4ModelTest, CallsTheDeclaredToolNatively) {
+    // B-143: <|tool_call> (id 48) banned = 0 of 20 auto tool calls; this prompt then gave
+    // `<channel|><call:get_weather city="Paris"/>`. Prompt = HF apply_chat_template(tools, no thinking).
+    const char* prompt =
+        "<bos><|turn>system\n<|tool>declaration:get_weather{description:<|\"|>Get the current weather for a "
+        "city.<|\"|>,parameters:{properties:{city:{type:<|\"|>STRING<|\"|>}},required:[<|\"|>city<|\"|>],"
+        "type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nWhat's the weather in "
+        "Paris?<turn|>\n<|turn>model\n";
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 32;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 0;
+
+    char output[4096];
+    size_t len = 0;
+    ASSERT_EQ(imp_generate(ctx_, prompt, &params, output, sizeof(output), &len), IMP_SUCCESS);
+    const std::string text(output, len);
+    EXPECT_NE(text.find("<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>"),
+              std::string::npos)
+        << text;
+}
+
 TEST_F(Gemma4ModelTest, PrefillRoutesSwaToFa2_Hd512ToSplitDFa2) {
     // Executed-kernel gate, Gemma-4's 5:1 SWA:global pattern (30 layers): hd=256 SWA layers on FA2,
     // hd=512 global layers on the split-D FA2 (attention_fa2_hd512.cu, #2900; was cuBLAS, pp4096
