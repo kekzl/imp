@@ -82,7 +82,8 @@ void start_kv_grow_ahead(KVCache* kv, int idle_release_s) {
 void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept { delete ws; }
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
 
-Engine::Engine() = default;
+Engine::Engine()
+    : runtime_config_owner_(std::make_unique<RuntimeConfig>()), runtime_config_(*runtime_config_owner_) {}
 
 Engine::~Engine() {
     // The last step's work can still be queued (a pipelined decode step), and VMM-backed
@@ -126,7 +127,7 @@ Engine::~Engine() {
     if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled() &&
         !ssm_state_) {
         kv_manager_->save_prefix_cache(config_.prefix_cache_path,
-                                       prefix_cache_fingerprint(model_fingerprint_(), config_.kv_cache_dtype,
+                                       prefix_cache_fingerprint(model_fingerprint_(), rt_.kv_cache_dtype,
                                                                 runtime_config_),
                                        stream_);
     }
@@ -697,9 +698,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     model_ = std::move(model);
     config_ = config;
-    rt_ = {.cuda_graphs = config_.use_cuda_graphs,
-           .streaming_kv = config_.streaming_kv_enabled,
-           .streaming_kv_window = config_.streaming_kv_window};
+    rt_ = seed_runtime_state(config_);  // what init resolves goes here, config_ keeps the operator's (C-9)
 
     // Takes the pending RuntimeConfig stashed by tool main (imp-cli/imp-server)
     // via set_pending_runtime_config(), or a freshly loaded env-seeded default
@@ -794,12 +793,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // scratch is sized from min(the configured cap, max_seq_len), and is
         // charged only when speculation can actually take that path.
         const int capture_cap = runtime_config_.speculative.capture
-                                    ? (config_.max_seq_len > 0
-                                           ? std::min(cfg::kSpecCaptureCtxCap, config_.max_seq_len)
+                                    ? (rt_.max_seq_len > 0
+                                           ? std::min(cfg::kSpecCaptureCtxCap, rt_.max_seq_len)
                                            : cfg::kSpecCaptureCtxCap)
                                     : 0;
         const auto d = exec_t2_demand(
-            *model_, config_.max_seq_len, config_.max_batch_size,
+            *model_, rt_.max_seq_len, rt_.max_batch_size,
             fp8_act_scratch_needed(*model_, config_.use_fp8_prefill), runtime_config_.attention.mla_absorb,
             capture_cap, config_.kv_block_size.value_or(0), runtime_config_.attention.ra2_prefill,
             engine_internal::apa_eps_for(*model_, runtime_config_.attention.apa_eps) > 0.0f,
@@ -820,7 +819,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // unknown yet; assume true, guessing high costs nothing, low exhausts the arena.
         const int kv_bs = config_.kv_block_size.value_or(0) > 0 ? *config_.kv_block_size : 16;
         const size_t batch_pool_bytes = GPUBatchPool::demand_bytes(
-            config_.max_batch_size, (config_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs,
+            rt_.max_batch_size, (rt_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs,
             /*with_swa_tables=*/true);
         // *9/8 for 256-byte alignment padding across the arena's takes (integer
         // identical to t + t/8, just one expression instead of two).
@@ -857,7 +856,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                                  engine_arena().high_water());
     }
     // T2 slot pool for the conditional graph loop (A7 step 5.3).
-    graph_slot_pool_open_for(cuda_malloc_backend(), config_.max_seq_len,
+    graph_slot_pool_open_for(cuda_malloc_backend(), rt_.max_seq_len,
                              runtime_config_.diagnostics.graph_slot_pool);
     gemm_init();
     // grouped-3x prewarm takes grouped NVFP4 staging + workspace slices from the T2
@@ -869,7 +868,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // bound now rather than letting the GEMM climb a staircase of takes later,
     // each intermediate one stranded in a bump arena with no free.
     {
-        const auto imma = exec_imma_scratch_shape(*model_, config_.max_seq_len);
+        const auto imma = exec_imma_scratch_shape(*model_, rt_.max_seq_len);
         mmq_q8_imma_preallocate(imma.rows, imma.k);
     }
     if (model_->profile().is_moe) {
@@ -883,13 +882,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // smaller, rows admitted beyond it hold KV and never decode until a head row finishes.
     // Admission clamps to whichever is smaller. Names stay as-is: one is the
     // C-API field, the other a documented imp.conf key; renaming either breaks a published surface.
-    const int admit_cap = admitted_batch(config_.max_batch_size, runtime_config_.runtime.max_batch_size);
-    if (admit_cap < config_.max_batch_size) {
+    const int admit_cap = admitted_batch(rt_.max_batch_size, runtime_config_.runtime.max_batch_size);
+    if (admit_cap < rt_.max_batch_size) {
         IMP_LOG_INFO(
             "admission capped at %d to match runtime.max_batch_size (EngineConfig::max_batch_size "
             "is %d). Admitting more than the decode batch can serve parks the extra rows on their "
             "KV until a head row finishes.",
-            admit_cap, config_.max_batch_size);
+            admit_cap, rt_.max_batch_size);
     }
     scheduler_ = std::make_unique<Scheduler>(admit_cap);
     if (!engine_internal::open_engine_stream(stream_))
@@ -906,8 +905,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
         auto ews = std::make_unique<imp::EncoderWorkspace>();
         int cap = model_->config_.max_seq_len > 0 ? model_->config_.max_seq_len : 2048;
-        if (config_.max_seq_len > 0)
-            cap = std::min(cap, config_.max_seq_len);
+        if (rt_.max_seq_len > 0)
+            cap = std::min(cap, rt_.max_seq_len);
         if (!imp::encoder_workspace_init(*ews, *model_, cap, stream_))
             return false;
         const size_t pool_before = release_on_free_pool_reserved(ReleasePool::Q8Sources);
@@ -951,11 +950,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!runtime_config_.runtime.warmup) {
         IMP_LOG_INFO("Warmup SKIPPED (runtime.warmup=false)");
         // kv_cache.fp8_scale=calibrate still needs its static scale.
-        calibrate_fp8_kv_scales(*this, config_.kv_cache_dtype, config_.prefill_chunk_size, true);
+        calibrate_fp8_kv_scales(*this, rt_.kv_cache_dtype, config_.prefill_chunk_size, true);
     } else {
         warmup();
         // Warns when warmup skipped its forward (MXFP4); the calibration itself ran inside warmup().
-        calibrate_fp8_kv_scales(*this, config_.kv_cache_dtype, config_.prefill_chunk_size, false);
+        calibrate_fp8_kv_scales(*this, rt_.kv_cache_dtype, config_.prefill_chunk_size, false);
     }
     // Last thing before the guard arms: the speculative verify path's one-shot
     // capacity resolutions (A7 step 5.4), which otherwise land mid-serving.
@@ -995,6 +994,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     caps_ = derive_capabilities({.model_loaded = true,
                                  .layer_loop_replaced = executor_->inkling_slots() != nullptr,
                                  .own_forward_lora = executor_->inkling_slots() != nullptr,
+                                 .own_forward_rewind = executor_->inkling_slots() != nullptr,
                                  .gated_residual = model_->profile().gated_residual,
                                  .recurrent_state = ssm_state_ != nullptr,
                                  .batched_recurrent_decode = static_cast<bool>(d_ssm_seq_slots_)});

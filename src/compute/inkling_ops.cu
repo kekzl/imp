@@ -5,6 +5,7 @@
 
 #include "compute/inkling_detail.cuh"
 #include "compute/inkling_fused.cuh"
+#include "compute/rms_norm_rows.h"
 #include "core/logging.h"
 
 #include <cfloat>
@@ -57,22 +58,6 @@ __global__ void embed_rows_k(const half* table, const int32_t* ids, float* out, 
     float* o = out + (size_t)blockIdx.x * H;
     for (int i = threadIdx.x; i < H; i += blockDim.x)
         o[i] = __half2float(row[i]);
-}
-
-__global__ void rms_norm_k(const float* x, const float* w, float* of, half* oh, int H, float eps) {
-    __shared__ float sh[kThreads / 32];
-    const float* xr = x + (size_t)blockIdx.x * H;
-    float ss = 0.0f;
-    for (int i = threadIdx.x; i < H; i += blockDim.x)
-        ss += xr[i] * xr[i];
-    const float r = rsqrtf(block_sum(ss, sh) / H + eps);
-    for (int i = threadIdx.x; i < H; i += blockDim.x) {
-        const float v = xr[i] * r * (w ? w[i] : 1.0f);
-        if (of)
-            of[(size_t)blockIdx.x * H + i] = v;
-        if (oh)
-            oh[(size_t)blockIdx.x * H + i] = __float2half(v);
-    }
 }
 
 constexpr int kRouteMaxH = 2304, kRouteWarps = 4;
@@ -241,15 +226,12 @@ void embed_rows(const half* table, const int32_t* ids, float* out, int T, int H,
 }
 void rms_norm(const float* x, const float* w, float* out_f, half* out_h, int T, int H, float eps,
               cudaStream_t s) {
-    rms_norm_k<<<T, kThreads, 0, s>>>(x, w, out_f, out_h, H, eps);
-    IMP_CUDA_CHECK_LAUNCH();
+    rms_norm_rows(x, w, out_f, out_h, T, H, eps, s);  // compute/rms_norm_rows.h, shared with DSpark (D-14)
 }
 void route_topk(const half* x, const float* w, const float* bias, float* logits, int32_t* idx, float* weights,
                 int T, int H, int n_experts, int top_k, float route_scale, cudaStream_t s) {
-    if (n_experts > 128 || top_k > 16) {
-        IMP_LOG_ERROR("inkling router: %d experts / top %d out of range", n_experts, top_k);
-        return;
-    }
+    if (n_experts > 128 || top_k > 16)
+        throw_runtime_error("inkling router: %d experts / top %d out of range", n_experts, top_k);
     const int bpt = (n_experts + kRouteWarps - 1) / kRouteWarps;
     if (H == kRouteFixH && detail::fixed_shape_kernels()) {
         route_scores_fixed_k<<<T * bpt, kRouteWarps * 32, 0, s>>>(x, w, logits, n_experts, bpt);

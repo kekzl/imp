@@ -16,6 +16,7 @@
 #include "exec/executor.h"
 #include "model/model.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/engine_internal.h"
 #include "runtime/request.h"
 #include "runtime/spec_batch_verify_state.h"  // mtp_bound_verify_rows
@@ -605,7 +606,7 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
         s.prenorm_rows = std::max(1, executor_ ? executor_->max_tokens() : s.max_seq_len);
     // NVFP4 body copy for the bound verify lane only (Qwen3.8-27B 1 chat 226.88 -> 234.03 tok/s; the
     // mtp_k=2 chain measured neutral with a quantized body).
-    if (mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size) > 0) {
+    if (mtp_bound_verify_rows(runtime_config_, model_.get(), rt_.max_batch_size) > 0) {
         s.body_nvfp4_bytes = imp::mtp_body_nvfp4_bytes(head);
         s.body_nvfp4_ws_bytes = imp::mtp_body_nvfp4_ws_bytes(head);
     }

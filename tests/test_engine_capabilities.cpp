@@ -19,7 +19,10 @@ using imp::ForwardFacts;
 
 constexpr ForwardFacts kDense{.model_loaded = true};
 // Engine::init on an Inkling2-Loop checkpoint: the executor holds sequence slots, no ssm_state_.
-constexpr ForwardFacts kInkling{.model_loaded = true, .layer_loop_replaced = true, .own_forward_lora = true};
+constexpr ForwardFacts kInkling{.model_loaded = true,
+                                .layer_loop_replaced = true,
+                                .own_forward_lora = true,
+                                .own_forward_rewind = true};
 
 }  // namespace
 
@@ -38,11 +41,25 @@ TEST(EngineCapabilities, InklingForwardRefusesWhatHooksIntoTheLayerLoop) {
     EXPECT_FALSE(c.logit_lens);
     EXPECT_FALSE(c.sae);
     EXPECT_FALSE(c.control_vector);
-    EXPECT_FALSE(c.phrase_ban);
     // Each guidance row decodes on its own sequence slot: the pair works.
     EXPECT_TRUE(c.cfg);
     // B-111 S5: InklingForward::delta_ applies an adapter's q / k / v / o deltas.
     EXPECT_TRUE(c.lora);
+    // B-111 S6: a ban rewinds the slot through InklingForward::seek.
+    EXPECT_TRUE(c.phrase_ban);
+}
+
+TEST(EngineCapabilities, OwnForwardWithoutSeekRefusesPhraseBan) {
+    ForwardFacts f = kInkling;
+    f.own_forward_rewind = false;
+    EXPECT_FALSE(derive_capabilities(f).phrase_ban);
+    // The generic loop rewinds through KVCacheManager::rollback and the ssm_state_ slabs itself.
+    f = kDense;
+    f.own_forward_rewind = true;
+    EXPECT_EQ(derive_capabilities(f), derive_capabilities(kDense));
+    f = kInkling;
+    f.model_loaded = false;
+    EXPECT_FALSE(derive_capabilities(f).phrase_ban);
 }
 
 TEST(EngineCapabilities, OwnForwardWithoutLoraDeltasRefusesLora) {

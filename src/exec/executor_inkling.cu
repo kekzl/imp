@@ -122,8 +122,6 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
     if (!inkling_)
         return model_->config().n_layers;
     InklingRuntime& rt = *inkling_;
-    if (!rt.draft_tried)
-        inkling_attach_draft_(stream);
     const size_t N = static_cast<size_t>(n);
     rt.logit_src = nullptr;
     // Host reads of the rows' positions and tokens: this path is eager. Slots are keyed by request
@@ -272,7 +270,9 @@ bool InklingRuntime::bind_kv(KVCache& kv) {
 
 // The checkpoint's draft model behind every slot's decode lookahead; without it (no mtp.safetensors,
 // no FP8 view of the LM head, speculative.mtp_k = 0, no VRAM) the slots decode one row per step.
-void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
+void GraphExecutor::inkling_attach_draft(cudaStream_t stream) {
+    if (!inkling_ || inkling_->draft_tried)
+        return;
     InklingRuntime& rt = *inkling_;
     rt.draft_tried = true;
     const Tensor& emb = model_->token_embedding();

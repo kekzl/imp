@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/scheduler.h"
 #include "batching_engine.h"
 #include <pthread.h>

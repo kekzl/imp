@@ -21,6 +21,3 @@ src/compute/gdn_scan_chunkpar.cu::attr_once  log-once: not a log latch, sets the
 src/compute/gdn_scan_chunkpar_pass.cu::attr_once  log-once: not a log latch, sets the kernel smem attribute once per process
 src/model/hf_fetch.cpp::once  log-once: not a log latch, curl_global_init once per process
 src/compute/json_constrain.cu::once  log-once: follow-up, as LogOnce its ERROR + return trips the log-and-return gate (B-108, list only shrinks)
-src/runtime/engine_prefill.cpp::logged_no_prefill_capture  log-once: follow-up, file owned by the in-flight Inkling KV slice
-src/runtime/engine_scheduler.cpp::entered_logged  log-once: follow-up, file owned by the in-flight Inkling KV slice
-src/runtime/engine_scheduler.cpp::s_gate_logged  log-once: follow-up, file owned by the in-flight Inkling KV slice

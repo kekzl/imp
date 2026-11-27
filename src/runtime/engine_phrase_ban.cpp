@@ -2,7 +2,8 @@
 // a completed phrase rewinds output_tokens and the KV to the token the phrase starts in and bans
 // that token at that position. Position 0 resamples from the prefill's saved logits instead of a
 // second forward over the prompt's last token. Hybrids restore a recurrent slab saved after the
-// prefill or every kPhraseSnapEvery tokens and re-forward the kept tokens after it.
+// prefill or every kPhraseSnapEvery tokens and re-forward the kept tokens after it. Inkling does the same
+// with its slot's conv state (B-111 S6), or its own grid checkpoint when that is closer.
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
@@ -11,10 +12,13 @@
 #include "runtime/request.h"
 #include "core/logging.h"
 #include "exec/executor.h"
+#include "exec/inkling_forward.h"
 #include "model/model.h"
 #include "model/tokenizer.h"
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace imp {
 
@@ -27,6 +31,37 @@ void phrase_bias_at(Request& req, size_t pos) {
     for (const auto& [p, id] : s.bans)
         if (p == static_cast<int>(pos))
             req.logit_bias.emplace_back(id, -1e30f);
+}
+
+// The request's Inkling slot: its conv state is the recurrent state a rewind restores. null = not Inkling.
+InklingForward* inkling_slot_of(const GraphExecutor* ex, int req_id) {
+    InklingRuntime* rt = ex ? ex->inkling_runtime() : nullptr;
+    const int s = rt ? rt->table.find(req_id) : -1;
+    return s >= 0 ? rt->slots[static_cast<size_t>(s)].get() : nullptr;
+}
+
+PhraseRestore inkling_restore_for(const PhraseBanState& s, const InklingForward& f, int n_in, size_t pos) {
+    return phrase_pick_restore(
+        s.snap_consumed, pos, n_in, InklingForward::kGrid, [&](int c) { return f.reaches(n_in + c); },
+        [&](int c) { return f.checkpoint_state(n_in + c) != nullptr; });
+}
+
+// The state a rewind to pos restores: output tokens folded in and where it lives (a slab, or Inkling's own
+// checkpoint). Hybrids take the latest slab at or before pos - 1, slot 0 always holds 0.
+struct PhraseSource {
+    int consumed = -1;
+    const void* src = nullptr;
+};
+PhraseSource phrase_source(const PhraseBanState& s, const InklingForward* ink,
+                           const std::array<VramOwned<uint8_t>, kPhraseSnapSlots>& slabs, int n_in,
+                           size_t pos, int req_id) {
+    const PhraseRestore r = ink ? inkling_restore_for(s, *ink, n_in, pos) : PhraseRestore{};
+    const int slot = ink ? r.slot : pos > 0 ? std::max(phrase_pick_snapshot(s.snap_consumed, pos), 0) : 0;
+    const int consumed = ink ? r.consumed : s.snap_consumed[static_cast<size_t>(slot)];
+    if (consumed < 0)  // Inkling: phrase_after_append_ let the phrase through instead
+        throw std::runtime_error("phrase ban: req " + std::to_string(req_id) + " has no state to rewind to");
+    return {consumed, slot >= 0 ? static_cast<const void*>(slabs[static_cast<size_t>(slot)].get())
+                                : ink->checkpoint_state(n_in + consumed)};
 }
 
 }  // namespace
@@ -89,7 +124,7 @@ void Engine::phrase_save_logits_(Request& req, const Tensor& logits, cudaStream_
     req.phrase->first_logits.resize(v);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(req.phrase->first_logits.data(), logits.data, v * sizeof(float),
                                        cudaMemcpyDeviceToHost, stream));
-    if (ssm_state_)
+    if (ssm_state_ || inkling_slot_of(executor_.get(), req.id))
         phrase_snapshot_(req, 0, 0, stream);  // the prefill's final state, no output token in it yet
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 }
@@ -99,12 +134,16 @@ void Engine::phrase_save_logits_(Request& req, const Tensor& logits, cudaStream_
 void Engine::phrase_snapshot_(Request& req, int slot, int consumed, cudaStream_t stream) {
     PhraseRecurrent& rec = phrase_rec_of_(req.id);
     auto& slab = rec.slab[static_cast<size_t>(slot)];
-    const size_t bytes = ssm_state_->per_seq_bytes();
-    if (slab.count() < bytes)
+    InklingForward* ink = ssm_state_ ? nullptr : inkling_slot_of(executor_.get(), req.id);
+    const size_t bytes = ssm_state_ ? ssm_state_->per_seq_bytes() : ink ? ink->conv_state_bytes() : 0;
+    // Inkling: the slot must stand at the state's position (no step of this request in flight).
+    const bool at = !ink || ink->position() == static_cast<int>(req.input_tokens.size()) + consumed;
+    if (slab.count() < bytes && at)
         slab = VramOwned<uint8_t>(vram_alloc_, bytes, "phrase_ban_recurrent");
-    if (!slab) {
-        IMP_LOG_WARN("phrase ban: req %d, no VRAM for a %.1f MiB recurrent snapshot%s", req.id,
-                     static_cast<double>(bytes) / (1024.0 * 1024.0), slot == 0 ? ", ban dropped" : "");
+    if (!slab || bytes == 0 || !at) {
+        IMP_LOG_WARN("phrase ban: req %d, no %.1f MiB recurrent snapshot after %d tokens%s", req.id,
+                     static_cast<double>(bytes) / (1024.0 * 1024.0), consumed,
+                     slot == 0 ? ", ban dropped" : "");
         req.phrase->snap_consumed[static_cast<size_t>(slot)] = -1;
         if (slot == 0) {
             phrase_rec_.erase(req.id);
@@ -112,8 +151,11 @@ void Engine::phrase_snapshot_(Request& req, int slot, int consumed, cudaStream_t
         }
         return;
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slab.get(), ssm_state_->seq_base(recurrent_slot_for_(req.id)), bytes,
-                                       cudaMemcpyDeviceToDevice, stream));
+    if (ink)
+        ink->conv_snapshot(reinterpret_cast<float*>(slab.get()), stream);
+    else
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slab.get(), ssm_state_->seq_base(recurrent_slot_for_(req.id)),
+                                           bytes, cudaMemcpyDeviceToDevice, stream));
     req.phrase->snap_consumed[static_cast<size_t>(slot)] = consumed;
 }
 
@@ -181,7 +223,8 @@ bool Engine::phrase_after_append_(Request& req, cudaStream_t stream) {
     s.text += model_->tokenizer()->decode_token(req.output_tokens.back());
     s.tok_end.push_back(static_cast<uint32_t>(s.text.size()));
     const size_t n_out = req.output_tokens.size();
-    if (ssm_state_ && n_out > 1 &&
+    const InklingForward* ink = ssm_state_ ? nullptr : inkling_slot_of(executor_.get(), req.id);
+    if ((ssm_state_ || ink) && n_out > 1 &&
         (n_out - 1) % kPhraseSnapEvery == 0)  // the forward just run read n_out - 1
         phrase_snapshot_(req, phrase_snapshot_slot(s.snap_consumed), static_cast<int>(n_out - 1), stream);
     if (s.replaying()) {  // a kept token re-forwarded: its original logprobs and lens, no new match
@@ -201,7 +244,13 @@ bool Engine::phrase_after_append_(Request& req, cudaStream_t stream) {
     }
     const auto hit = s.rewinds < kMaxPhraseRewinds ? phrase_hit(s, s.text, prev) : std::optional<size_t>{};
     const size_t pos = hit ? phrase_token_at(s.tok_end, *hit) : 0;
-    if (!hit || pos < s.safe) {  // a delivered token is never taken back
+    const int n_in = static_cast<int>(req.input_tokens.size());
+    // Inkling: no slab or own checkpoint its rings still reach lets the phrase through.
+    const bool stuck = hit && pos >= s.safe && ink && inkling_restore_for(s, *ink, n_in, pos).consumed < 0;
+    if (stuck)
+        IMP_LOG_WARN("phrase ban: req %d, no Inkling state reaches token %zu, phrase let through", req.id,
+                     pos);
+    if (!hit || pos < s.safe || stuck) {  // a delivered token is never taken back
         s.safe = std::max(s.safe, phrase_safe_tokens(s.tok_end, s.text.size(), s.max_len));
         phrase_bias_at(req, req.output_tokens.size());
         return false;
@@ -217,17 +266,19 @@ bool Engine::phrase_after_append_(Request& req, cudaStream_t stream) {
 void Engine::phrase_rewind_(Request& req, size_t pos, cudaStream_t stream) {
     PhraseBanState& s = *req.phrase;
     drain_decode_pipeline();
-    // Hybrids: the recurrent state cannot step back, so restore the latest slab at or before
+    // Hybrids and Inkling: the recurrent state cannot step back, so restore the latest slab at or before
     // pos - 1 and re-forward the kept tokens after it (replay) before sampling pos.
     size_t keep = pos;
-    if (ssm_state_) {
-        const int slot = pos > 0 ? std::max(phrase_pick_snapshot(s.snap_consumed, pos), 0) : 0;  // 0 holds 0
-        const int consumed = s.snap_consumed[static_cast<size_t>(slot)];
+    const int n_in = static_cast<int>(req.input_tokens.size());
+    InklingForward* ink = ssm_state_ ? nullptr : inkling_slot_of(executor_.get(), req.id);
+    if (ssm_state_ || ink) {
+        auto& rec = phrase_rec_of_(req.id);
+        const PhraseSource from = phrase_source(s, ink, rec.slab, n_in, pos, req.id);
+        const int consumed = from.consumed;
         keep = pos > 0 ? static_cast<size_t>(consumed) + 1 : 0;
         s.replay.assign(req.output_tokens.begin() + static_cast<std::ptrdiff_t>(keep),
                         req.output_tokens.begin() + static_cast<std::ptrdiff_t>(pos));
         s.replay_at = 0;
-        auto& rec = phrase_rec_of_(req.id);
         rec.replay_lp.clear();
         rec.replay_lens.clear();
         for (size_t i = keep; i < pos && i < req.output_logprobs.size(); i++)
@@ -237,9 +288,13 @@ void Engine::phrase_rewind_(Request& req, size_t pos, cudaStream_t stream) {
         for (auto& c : s.snap_consumed)  // a slab past pos folded tokens that are gone
             if (c > static_cast<int>(pos))
                 c = -1;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(recurrent_slot_for_(req.id)),
-                                           rec.slab[static_cast<size_t>(slot)].get(),
-                                           ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
+        if (!ink)
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(recurrent_slot_for_(req.id)), from.src,
+                                               ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice,
+                                               stream));
+        else if (!ink->seek(n_in + consumed, static_cast<const float*>(from.src), stream))
+            throw std::runtime_error("phrase ban: req " + std::to_string(req.id) +
+                                     ", Inkling slot cannot seek to " + std::to_string(n_in + consumed));
         IMP_LOG_DEBUG("phrase ban: req %d restores the slab after %d tokens, replays %zu", req.id, consumed,
                       s.replay.size());
     }
@@ -269,7 +324,6 @@ void Engine::phrase_rewind_(Request& req, size_t pos, cudaStream_t stream) {
         track_think_state(req, t);
         (void)should_stop(req, t);  // its think side effects; a kept token never stopped
     }
-    const int n_in = static_cast<int>(req.input_tokens.size());
     if (pos > 0) {
         // The next step re-forwards output[keep - 1] at its position; after the replay it samples
         // pos with the ban.

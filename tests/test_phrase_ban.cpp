@@ -5,7 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -62,6 +64,35 @@ TEST(PhraseBan, RecurrentSnapshotPickAndSlot) {
     EXPECT_EQ(phrase_snapshot_slot({0, 32, -1}), 2);
     EXPECT_EQ(phrase_snapshot_slot({0, 32, 64}), 1);
     EXPECT_EQ(phrase_snapshot_slot({0, 96, 64}), 2);
+}
+
+// Inkling (B-111 S6): the slab or own grid checkpoint (every 256 positions) with the most output tokens at
+// or before pos - 1 that the slot's sliding rings still reach; none = the phrase is let through.
+TEST(PhraseBan, InklingRestorePicksTheClosestReachableState) {
+    const std::array<int, kPhraseSnapSlots> c = {0, 32, 64};
+    const auto all = [](int) { return true; };
+    const auto none = [](int) { return false; };
+    const auto pick = [&](size_t pos, int n_in, const std::function<bool(int)>& reach,
+                          const std::function<bool(int)>& held) {
+        const PhraseRestore r = phrase_pick_restore(c, pos, n_in, 256, reach, held);
+        return std::pair(r.slot, r.consumed);
+    };
+    // Prompt 300: the next checkpoint (512) is 212 output tokens on.
+    EXPECT_EQ(pick(70, 300, all, all), std::pair(2, 64));
+    EXPECT_EQ(pick(65, 300, all, all), std::pair(2, 64));
+    EXPECT_EQ(pick(64, 300, all, all), std::pair(1, 32));
+    EXPECT_EQ(pick(0, 300, all, all), std::pair(0, 0));
+    // A slab the rings no longer reach is skipped.
+    EXPECT_EQ(pick(70, 300, [](int k) { return k < 64; }, all), std::pair(1, 32));
+    EXPECT_EQ(pick(70, 300, none, all), std::pair(-1, -1));
+    // Prompt 200: the checkpoint at 256 holds 56 output tokens, more than slab 1, fewer than slab 2.
+    EXPECT_EQ(pick(63, 200, all, all), std::pair(-1, 56));
+    EXPECT_EQ(pick(63, 200, all, none), std::pair(1, 32));
+    EXPECT_EQ(pick(70, 200, all, all), std::pair(2, 64));
+    EXPECT_EQ(pick(70, 200, none, all), std::pair(-1, 56));
+    // Prompt 512 ends on the grid: its checkpoint stands in for slab 0.
+    EXPECT_EQ(pick(0, 512, none, all), std::pair(-1, 0));
+    EXPECT_EQ(pick(0, 512, all, all), std::pair(0, 0));
 }
 
 TEST(PhraseBan, RegexCompileRejectsBadAndEmptyMatching) {
