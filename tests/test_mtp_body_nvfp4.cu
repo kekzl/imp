@@ -96,7 +96,17 @@ struct Head {
 };
 
 void allocate(imp::MtpDraftWorkspace& ws) {
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq}));
     ws.rope_theta = 10000.0f;
     ws.rope_dim = 8;
     ws.mrope_sec0 = 2;
@@ -197,8 +207,16 @@ TEST_F(MtpBodyNvfp4Test, OneRowStepsAndMultiRowFeedsReadTheCopy) {
             } else {
                 for (int j = 0; j < kPairs; ++j) {
                     const void* h_j = static_cast<const char*>(s.d_hidden) + size_t(j) * kH * sizeof(__half);
-                    ASSERT_TRUE(imp::mtp_draft_step(s.tokens[j], h_j, s.head, s.tok_emb, s.tok_emb, *ws, kH,
-                                                    kVocab, nullptr, nullptr));
+                    ASSERT_TRUE(imp::mtp_draft_step({.prev_token_id = s.tokens[j],
+                                                     .d_h_prev = h_j,
+                                                     .mtp = &s.head,
+                                                     .main_tok_emb = &s.tok_emb,
+                                                     .main_lm_head = &s.tok_emb,
+                                                     .ws = ws,
+                                                     .hidden_dim = kH,
+                                                     .vocab_size = kVocab,
+                                                     .out_token_id = nullptr,
+                                                     .stream = nullptr}));
                 }
             }
             ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);

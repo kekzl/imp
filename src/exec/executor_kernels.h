@@ -3,6 +3,7 @@
 #include "core/tensor.h"
 #include "model/model_config.h"  // QType (Q6_K, Q4_0, etc.)
 #include "compute/gemm.h"        // block_q8_1
+#include "exec/decode_pipeline_advance.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -86,16 +87,6 @@ void elementwise_add_pdl_register();
 // this WSL2 host). Use for per-layer copies on the decode hot path; falls back to cudaMemcpyAsync for
 // unaligned buffers.
 void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t stream);
-
-// Pipelined batched-decode chain advance: token_ids[i]=slot i's sampled
-// token, positions[i]++, context_lens[i]++, per-row penalty history
-// append, plus n_patches block-table scatter writes. Patch/pos arrays must be device-readable (mapped pinned
-// memory).
-void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
-                             int32_t* d_token_ids, int* d_positions, int* d_context_lens,
-                             int* d_block_tables, int n_patches, const int* d_patch_offsets,
-                             const int* d_patch_values, int32_t* d_hist_base, int hist_stride,
-                             const int* d_hist_pos, cudaStream_t stream);
 
 void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
 

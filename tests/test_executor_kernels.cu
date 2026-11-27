@@ -494,9 +494,20 @@ TEST(ExecutorKernelsTest, DecodePipelineAdvance) {
     h_hp[1] = 5;
     h_hp[2] = 31;
 
-    decode_pipeline_advance(n, reinterpret_cast<const int32_t*>(d_slots), kSlotStride, d_tok, d_pos,
-                            d_ctx, d_bt, /*n_patches=*/2, d_off, d_val, d_hist, kHistStride, d_hp,
-                            /*stream=*/nullptr);
+    decode_pipeline_advance({.n_rows = n,
+                             .slot_tokens = reinterpret_cast<const int32_t*>(d_slots),
+                             .slot_stride_bytes = kSlotStride,
+                             .d_token_ids = d_tok,
+                             .d_positions = d_pos,
+                             .d_context_lens = d_ctx,
+                             .d_block_tables = d_bt,
+                             .n_patches = 2,
+                             .d_patch_offsets = d_off,
+                             .d_patch_values = d_val,
+                             .d_hist_base = d_hist,
+                             .hist_stride = kHistStride,
+                             .d_hist_pos = d_hp,
+                             .stream = nullptr});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     cudaMemcpy(h_tok.data(), d_tok, n * sizeof(int32_t), cudaMemcpyDeviceToHost);

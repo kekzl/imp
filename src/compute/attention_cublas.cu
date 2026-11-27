@@ -234,10 +234,14 @@ __global__ void softcap_fp32_kernel(float* S, int64_t n, float softcap) {
 
 // cuBLAS batched attention for prefill. Q:[seq,n_heads*hd], K/V:[seq,n_kv*hd], O:[seq,n_heads*hd],
 // S:[n_heads,seq,seq] workspace. cuBLASLt strided batches, one per KV head under GQA.
-void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
-                              int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
-                              float softcap, int q_offset, cudaStream_t stream, int sliding_window,
-                              const void* sinks) {
+void attention_cublas_prefill(const AttnCublasPrefillArgs& a) {
+    const auto& [Q_p, K_p, V_p, O_p, S_p, n_heads, n_kv_heads, head_dim, scale, causal, softcap, q_offset,
+                 stream, sliding_window, sinks] = a;
+    const Tensor& Q = *Q_p;
+    const Tensor& K = *K_p;
+    const Tensor& V = *V_p;
+    Tensor& O = *O_p;
+    Tensor& S = *S_p;
     s_cublas_prefill_calls.fetch_add(1, std::memory_order_relaxed);
     const half* sinks_h = static_cast<const half*>(sinks);
     int q_len = static_cast<int>(Q.shape[0]);
@@ -377,10 +381,12 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     }
 }
 
-bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-                                     Tensor& S, int n_heads, int n_kv_heads, int head_dim, float scale,
-                                     bool causal, float softcap, int q_offset, cudaStream_t stream,
-                                     int sliding_window, const void* sinks) {
+bool attention_cublas_prefill_sliced(const AttnCublasPrefillArgs& a) {
+    const auto& [Q_p, K_p, V_p, O_p, S_p, n_heads, n_kv_heads, head_dim, scale, causal, softcap, q_offset,
+                 stream, sliding_window, sinks] = a;
+    const Tensor& Q = *Q_p;
+    const Tensor& K = *K_p;
+    const Tensor& S = *S_p;
     const int n = static_cast<int>(Q.shape[0]);
     const int kv_len = static_cast<int>(K.shape[0]);
     if (n == 0)
@@ -396,15 +402,28 @@ bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Ten
     if (ns < 16)
         return false;  // workspace too degraded — caller picks the O(n) FMHA fallback
     const half* Q_base = static_cast<const half*>(Q.data);
-    half* O_base = static_cast<half*>(O.data);
+    half* O_base = static_cast<half*>(O_p->data);
     const int64_t row = static_cast<int64_t>(n_heads) * head_dim;
     for (int off = 0; off < n; off += ns) {
         const int m = std::min(ns, n - off);
         int64_t q2[2] = {m, row};
         Tensor Qs(const_cast<half*>(Q_base) + (off * row), QType::F16, 2, q2, true);
         Tensor Os(O_base + (off * row), QType::F16, 2, q2, true);
-        attention_cublas_prefill(Qs, K, V, Os, S, n_heads, n_kv_heads, head_dim, scale, causal, softcap,
-                                 q_offset + off, stream, sliding_window, sinks);
+        attention_cublas_prefill({.Q = &Qs,
+                                  .K = &K,
+                                  .V = V_p,
+                                  .O = &Os,
+                                  .S = S_p,
+                                  .n_heads = n_heads,
+                                  .n_kv_heads = n_kv_heads,
+                                  .head_dim = head_dim,
+                                  .scale = scale,
+                                  .causal = causal,
+                                  .softcap = softcap,
+                                  .q_offset = q_offset + off,
+                                  .stream = stream,
+                                  .sliding_window = sliding_window,
+                                  .sinks = sinks});
     }
     return true;
 }

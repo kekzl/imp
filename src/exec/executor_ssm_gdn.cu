@@ -681,12 +681,22 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             throw std::runtime_error("run_gdn: grouped verify chunk incompatible with gdn.ref_kernel");
         if (use_ref) {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            gdn_scan_reference_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                                   static_cast<const half*>(beta_proj_out.data),
-                                   static_cast<const float*>(ly.ssm_a.data),
-                                   static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
-                                   static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                                   stream, gl, state.d_chunk_len);
+            gdn_scan_reference_f32({.conv_f32 = conv_f32,
+                                    .conv_channels = conv_channels,
+                                    .alpha = static_cast<const half*>(alpha_proj_out.data),
+                                    .beta = static_cast<const half*>(beta_proj_out.data),
+                                    .A_log = static_cast<const float*>(ly.ssm_a.data),
+                                    .dt_bias = static_cast<const float*>(ly.ssm_dt_b.data),
+                                    .h_state = static_cast<float*>(h_st),
+                                    .y = static_cast<half*>(y_buf.data),
+                                    .n_tokens = n,
+                                    .n_heads = n_heads,
+                                    .head_dim_ssm = head_dim_ssm,
+                                    .state_size = ssize,
+                                    .n_groups = n_groups,
+                                    .stream = stream,
+                                    .grouped_layout = gl,
+                                    .d_real_n = state.d_chunk_len});
         } else if ((state.ssm_seq_slots && state.ssm_n_seq > 1) || state.ssm_grouped_chunk()) {
             // Batched over independent sequences. Two callers: batched decode (n rows
             // = n sequences, one token each) and ragged cross-sequence prefill (rows =

@@ -1306,8 +1306,22 @@ TEST(GDNScanTest, PaddedChunkDeviceLength) {
                                /*chunk_size=*/64);
     });
     check_variant("reference", [&](int n_tok, const int* d_rn, float* d_state, half* d_y) {
-        gdn_scan_reference_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
-                               n_heads, head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0, d_rn);
+        gdn_scan_reference_f32({.conv_f32 = d_conv,
+                                .conv_channels = conv_channels,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_A,
+                                .dt_bias = d_dt,
+                                .h_state = d_state,
+                                .y = d_y,
+                                .n_tokens = n_tok,
+                                .n_heads = n_heads,
+                                .head_dim_ssm = head_dim,
+                                .state_size = state_size,
+                                .n_groups = n_groups,
+                                .stream = nullptr,
+                                .grouped_layout = 0,
+                                .d_real_n = d_rn});
     });
 
     cudaFree(d_real_n);

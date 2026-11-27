@@ -717,12 +717,10 @@ void launch_select_topk(int n_seq, const float* scores, const int* block_tables,
 
 }  // namespace
 
-void sparse_select_blocks(const half* q, const void* minmax_base, const int* block_tables,
-                          const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
-                          int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
-                          int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
-                          int* sparse_block_tables, int* sparse_context_lens, float std_coef,
-                          cudaStream_t stream) {
+void sparse_select_blocks(const SparseSelectBlocksArgs& a) {
+    const auto& [q, minmax_base, block_tables, context_lens, n_seq, n_heads, n_kv_heads, head_dim, block_size,
+                 max_blocks_per_seq, budget_blocks, sink_blocks, recent_blocks, engage_blocks, table_blocks,
+                 scores_scratch, sparse_block_tables, sparse_context_lens, std_coef, stream] = a;
     // Fixed grid.x: work distribution adapts device-side via grid-stride, so a captured
     // graph stays correct while the context grows during replay. 256 CTAs: fewer leaves the
     // kernel latency-bound at low SM occupancy; the grid-stride loop makes the extra CTAs

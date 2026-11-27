@@ -6,6 +6,8 @@
 // parity-alternated so a set is never overwritten mid-read. Own TU (split
 // from executor_elementwise.cu) so an edit here doesn't re-ptxas that file.
 
+#include "exec/decode_pipeline_advance.h"
+
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -38,11 +40,10 @@ __global__ void decode_pipeline_advance_kernel(int n_rows, const char* __restric
     }
 }
 
-void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
-                             int32_t* d_token_ids, int* d_positions, int* d_context_lens,
-                             int* d_block_tables, int n_patches, const int* d_patch_offsets,
-                             const int* d_patch_values, int32_t* d_hist_base, int hist_stride,
-                             const int* d_hist_pos, cudaStream_t stream) {
+void decode_pipeline_advance(const DecodePipelineAdvanceArgs& a) {
+    const auto& [n_rows, slot_tokens, slot_stride_bytes, d_token_ids, d_positions, d_context_lens,
+                 d_block_tables, n_patches, d_patch_offsets, d_patch_values, d_hist_base, hist_stride,
+                 d_hist_pos, stream] = a;
     int threads = n_rows + n_patches;
     if (threads <= 0)
         return;

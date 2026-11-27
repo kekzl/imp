@@ -678,9 +678,19 @@ int banned_count(const int32_t* d_ban, bool mask, const StopMask& stop_mask,
 bool verify_argmax(GraphExecutor& ex, const Request& req, int chunk_len, int32_t* d_argmax,
                    const int32_t* d_hist, int n_hist, const int32_t* d_draft, int32_t* d_topm, int recycle_m,
                    const int32_t* d_ban, int n_ban, int32_t* h_argmax, int chunk_cap, cudaStream_t stream) {
-    ex.greedy_argmax_all(chunk_len, d_argmax, stream, d_hist, n_hist, d_draft, req.repetition_penalty,
-                         req.frequency_penalty, req.presence_penalty, recycle_m > 0 ? d_topm : nullptr,
-                         recycle_m, d_ban, n_ban);
+    ex.greedy_argmax_all({.n_rows = chunk_len,
+                          .d_out = d_argmax,
+                          .stream = stream,
+                          .d_hist = d_hist,
+                          .n_hist = n_hist,
+                          .d_draft = d_draft,
+                          .rep_pen = req.repetition_penalty,
+                          .freq_pen = req.frequency_penalty,
+                          .pres_pen = req.presence_penalty,
+                          .d_topm = recycle_m > 0 ? d_topm : nullptr,
+                          .topm = recycle_m,
+                          .d_banned = d_ban,
+                          .n_banned = n_ban});
     ex.set_verify_sampling(nullptr);
     const size_t d2h_ints = recycle_m > 0 ? static_cast<size_t>(chunk_cap) +
                                                 (static_cast<size_t>(chunk_len) * recycle_m)

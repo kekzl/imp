@@ -26,9 +26,25 @@ struct RouterDecodeScratch {
     void* ticket;
 };
 
-[[nodiscard]] bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int n, int ne,
-                                      int top_k, bool use_sigmoid, bool norm_weights, const void* score_bias,
-                                      const RouterFusedGate& g, MoeRoutingBuffers& buf, void* ws,
-                                      size_t ws_bytes, const RouterDecodeScratch& dec, cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); Tensors and buffers by pointer, gate and scratch by
+// value.
+struct RouterFusedRouteArgs {
+    const Tensor* in = nullptr;
+    const Tensor* gate = nullptr;
+    QType compute{};
+    int n = 0;
+    int ne = 0;
+    int top_k = 0;
+    bool use_sigmoid = false;
+    bool norm_weights = false;
+    const void* score_bias = nullptr;
+    RouterFusedGate g{};
+    MoeRoutingBuffers* buf = nullptr;
+    void* ws = nullptr;
+    size_t ws_bytes = 0;
+    RouterDecodeScratch dec{};
+    cudaStream_t stream = nullptr;
+};
+[[nodiscard]] bool router_fused_route(const RouterFusedRouteArgs& a);
 
 }  // namespace imp

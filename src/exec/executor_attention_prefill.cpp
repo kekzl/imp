@@ -203,26 +203,26 @@
             // ChunkedPrefillTest.LongContext_Chunk_Invariance). Declines (hd!=128)
             // fall through to the tiled FP16 WMMA dispatch; fp8-QK stays opt-in only (#511). cuBLAS below the
             // threshold.
+            // Replay: the captured KV capacity plus the live device length; else the host length.
+            const Fa2PrefillArgs fa2{.rcfg = &dispatch_policy(), .q = &seq_q, .k = &k_full_t, .v = &v_full_t,
+                                     .o = &seq_ao, .n = seq_n,
+                                     .kv_len = cap_replay ? state.ctx_capacity : att_ctx, .nh = nh,
+                                     .nkv = nkv, .hd = hd, .scale = scale, .sliding_window = layer_sliding_window,
+                                     .softcap = cfg.attn_logit_softcap, .q_offset = att_off, .stream = stream,
+                                     .d_kv_len = cap_replay ? state.context_lens : nullptr,
+                                     .sinks = attn_sinks};
             if (cap_replay) {
                 // Replay mode is FA2-only; a decline throws rather than record a stale-length fallback.
-                fa2_prefill_for_replay(dispatch_policy(), seq_q, k_full_t, v_full_t, seq_ao, seq_n, state.ctx_capacity,
-                                       nh, nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
-                                       att_off, stream, state.context_lens, attn_sinks);
+                fa2_prefill_for_replay(fa2);
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
-            } else if (const AttnPrefillOuter fp4 = try_fp4_prefill(
-                           dispatch_policy(), seq_q, k_full_t, v_full_t, seq_ao, seq_n, att_ctx, nh, nkv, hd, scale,
-                           layer_sliding_window, cfg.attn_logit_softcap, att_off, stream, attn_sinks);
+            } else if (const AttnPrefillOuter fp4 = try_fp4_prefill(prefill_tier_args(fa2));
                        fp4 != AttnPrefillOuter::UNSET) {
                 dispatch_record::set_attn_prefill_outer(fp4);
-            } else if (try_fa2_fp16qk_prefill(dispatch_policy(), seq_q, k_full_t, v_full_t, seq_ao, seq_n, att_ctx, nh,
-                                              nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
-                                              att_off, stream, /*d_kv_len=*/nullptr, attn_sinks)) {
+            } else if (try_fa2_fp16qk_prefill(fa2)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise); declines exactly where
                 // chunk_fa2_serves is false (fa2_serves_head_dim).
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
-            } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, seq_q, k_full_t, v_full_t, seq_ao, seq_n,
-                                                       att_ctx, nh, nkv, scale, layer_sliding_window,
-                                                       cfg.attn_logit_softcap, att_off, stream, attn_sinks)) {
+            } else if (try_hd512_row_invariant_prefill(prefill_tier_args(fa2))) {
                 // Same kernel as the single-shot prefill: a row matches in every chunk (#2167).
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
             } else if (smatrix_fits && !prefer_fmha) {
@@ -231,13 +231,9 @@
                 // the SMEM-capped fused hd=512 kernel). hd=256 SWA layers took FA2 above; only hd=512 layers
                 // land here.
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
-                attention_cublas_prefill(seq_q, k_full_t, v_full_t, seq_ao, attn_scores_, nh, nkv, hd, scale,
-                                         /*causal=*/true, cfg.attn_logit_softcap, att_off, stream,
-                                         layer_sliding_window, attn_sinks);
+                attention_cublas_prefill(cublas_prefill_args(fa2, &attn_scores_));
             } else if (hd == 512 && !prefer_fmha && s_cap > 0 &&
-                       attention_cublas_prefill_sliced(seq_q, k_full_t, v_full_t, seq_ao, attn_scores_, nh, nkv, hd,
-                                                       scale, /*causal=*/true, cfg.attn_logit_softcap,
-                                                       att_off, stream, layer_sliding_window, attn_sinks)) {
+                       attention_cublas_prefill_sliced(cublas_prefill_args(fa2, &attn_scores_))) {
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
                 // hd=512 S-matrix overflow (long ctx): cuBLAS in workspace-sized q-row
                 // slices, faster than the whole-chunk FMHA hd=512 fallback (the FMHA's
@@ -298,20 +294,18 @@
         // softmax mask); the historic hd=256+window failure was root-caused to
         // the deleted fp8-QK kernel's raw e4m3 conversion (#511); the
         // FP16 WMMA kernel serving hd=256 is PPL-identical to cuBLAS.
-        if (const AttnPrefillOuter fp4 = try_fp4_prefill(dispatch_policy(), seq_q, seq_k, seq_v, seq_ao, seq_n, seq_n, nh, nkv, hd,
-                                                         scale, layer_sliding_window, cfg.attn_logit_softcap,
-                                                         /*q_offset=*/0, stream, attn_sinks);
+        const Fa2PrefillArgs fa2{.rcfg = &dispatch_policy(), .q = &seq_q, .k = &seq_k, .v = &seq_v,
+                                 .o = &seq_ao, .n = seq_n, .kv_len = seq_n, .nh = nh, .nkv = nkv, .hd = hd,
+                                 .scale = scale,
+                                 .sliding_window = layer_sliding_window, .softcap = cfg.attn_logit_softcap,
+                                 .q_offset = 0, .stream = stream, .sinks = attn_sinks};
+        if (const AttnPrefillOuter fp4 = try_fp4_prefill(prefill_tier_args(fa2));
             fp4 != AttnPrefillOuter::UNSET) {
             dispatch_record::set_attn_prefill_outer(fp4);
-        } else if (try_fa2_fp16qk_prefill(dispatch_policy(), seq_q, seq_k, seq_v, seq_ao, seq_n, seq_n, nh, nkv, hd, scale,
-                                          layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
-                                          stream,
-                                          /*d_kv_len=*/nullptr, attn_sinks)) {
+        } else if (try_fa2_fp16qk_prefill(fa2)) {
             // handled by FA2 f16 — no S-matrix needed (hd 128/256, incl. Gemma-4 SWA)
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
-        } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, seq_q, seq_k, seq_v, seq_ao, seq_n, seq_n, nh, nkv,
-                                                   scale, layer_sliding_window, cfg.attn_logit_softcap,
-                                                   /*q_offset=*/0, stream, attn_sinks)) {
+        } else if (try_hd512_row_invariant_prefill(prefill_tier_args(fa2))) {
             // Deterministic mode: cuBLAS picks its algorithm by n, so a row changed with its chunk (#2167).
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
         } else if (s_matrix_fits && !prefer_fmha) {
@@ -320,14 +314,9 @@
             // S-matrix fits (faster than the SMEM-capped fused hd=512 kernel). hd=256 SWA layers took FA2
             // above.
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
-            attention_cublas_prefill(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
-                                     /*causal=*/true, cfg.attn_logit_softcap,
-                                     /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
+            attention_cublas_prefill(cublas_prefill_args(fa2, &attn_scores_));
         } else if (hd == 512 && !prefer_fmha && attn_scores_buf_.get() != nullptr &&
-                   attention_cublas_prefill_sliced(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
-                                                   /*causal=*/true, cfg.attn_logit_softcap,
-                                                   /*q_offset=*/0, stream, layer_sliding_window,
-                                                   attn_sinks)) {
+                   attention_cublas_prefill_sliced(cublas_prefill_args(fa2, &attn_scores_))) {
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
             // hd=512 S-matrix overflow: cuBLAS in workspace-sized q-row slices, faster
             // than the whole-prompt FMHA hd=512 fallback. False only when even a

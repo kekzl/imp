@@ -33,9 +33,24 @@ void mla_latent_cache_write(const half* latent, const half* k_assembled, half* c
 //   scores: [n_heads,max_seq] FP32 scratch
 //   context_lens: [1] INT32 device, cached tokens incl. the current one
 //   scale: attention logit scale (1/sqrt(qk_head_dim) * MLA mscale^2)
-void mla_absorbed_decode(const half* q, const half* kv_b, const half* cache, half* out,
-                         float* scores, const int* context_lens, int n_heads, int head_dim,
-                         int rope_dim, int nope_dim, int kv_lora_rank, int v_head_dim,
-                         int max_seq, float scale, cudaStream_t stream = nullptr);
+// Arguments in the old parameter order (audit D-11).
+struct MlaAbsorbedDecodeArgs {
+    const half* q = nullptr;
+    const half* kv_b = nullptr;
+    const half* cache = nullptr;
+    half* out = nullptr;
+    float* scores = nullptr;
+    const int* context_lens = nullptr;
+    int n_heads = 0;
+    int head_dim = 0;
+    int rope_dim = 0;
+    int nope_dim = 0;
+    int kv_lora_rank = 0;
+    int v_head_dim = 0;
+    int max_seq = 0;
+    float scale = 0.0f;
+    cudaStream_t stream = nullptr;
+};
+void mla_absorbed_decode(const MlaAbsorbedDecodeArgs& a);
 
 }  // namespace imp

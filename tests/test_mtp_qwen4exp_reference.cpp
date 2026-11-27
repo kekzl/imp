@@ -201,9 +201,20 @@ TEST(MtpQwen4ExpReference, TwoDraftStepsMatchVllmMath) {
     const imp::Tensor lm = bf16_rows_to_device(lm_bf16, kVocab, allocs);
 
     imp::MtpDraftWorkspace ws{};
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws, kD, kVocab, kExperts, kTopK, kEff, /*shared_d_ff=*/kEff, kHeads,
-                                            kKvHeads, kHeadDim, /*max_seq_len=*/16, /*n_kv_slots=*/1, kHc,
-                                            kLowrank));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws,
+                                             .hidden_dim = kD,
+                                             .vocab_size = kVocab,
+                                             .n_experts = kExperts,
+                                             .top_k = kTopK,
+                                             .expert_d_ff = kEff,
+                                             .shared_d_ff = kEff,
+                                             .num_heads = kHeads,
+                                             .num_kv_heads = kKvHeads,
+                                             .head_dim = kHeadDim,
+                                             .max_seq_len = 16,
+                                             .n_kv_slots = 1,
+                                             .hc_count = kHc,
+                                             .hc_lowrank = kLowrank}));
     ws.rope_theta = 1.0e7f;
     ws.rope_dim = 64;
     ws.mrope_sec0 = 11, ws.mrope_sec1 = 11, ws.mrope_sec2 = 10;
@@ -225,7 +236,16 @@ TEST(MtpQwen4ExpReference, TwoDraftStepsMatchVllmMath) {
         ASSERT_EQ(r.token, kTokens[s]);
         ASSERT_EQ(ws.mtp_pos, r.pos);
         int tok = -1;
-        ASSERT_TRUE(imp::mtp_draft_step(r.token, h_prev, head, emb, lm, ws, kD, kVocab, &tok, nullptr));
+        ASSERT_TRUE(imp::mtp_draft_step({.prev_token_id = r.token,
+                                         .d_h_prev = h_prev,
+                                         .mtp = &head,
+                                         .main_tok_emb = &emb,
+                                         .main_lm_head = &lm,
+                                         .ws = &ws,
+                                         .hidden_dim = kD,
+                                         .vocab_size = kVocab,
+                                         .out_token_id = &tok,
+                                         .stream = nullptr}));
         const std::vector<float> lg = d2h_f16(ws.d_logits, kVocab);
         const std::vector<float> sample = d2h_f16(ws.d_h_final, kD);
         std::vector<int32_t> experts(kTopK);
