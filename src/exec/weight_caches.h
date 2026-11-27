@@ -103,13 +103,14 @@ struct WeightCaches {
     // gemm.mxfp8_gdn_proj_prefill resolved to fp8rows: prefill reads the FP8 sidecar rows, so
     // Phase 4b frees the F16 in/gate/out with VRAM-resident experts too.
     bool gdn_fp8rows = false;
-    // Released ssm_in: FP8 view into its pack's sidecar rows, keyed by the freed pointer.
-    std::unordered_map<const void*, FP8CacheEntry> released_fp8_view;
+    // Released sources (Phase 4b): the FP8 view each rebuilds from, keyed by handle id, not by the
+    // freed pointer (audit D-3).
+    std::unordered_map<TensorID, FP8CacheEntry> released_fp8_view;
     // F16 rebuild target for released sources (released_source_gemm_), sized for the largest.
     DeviceOwned<void> released_f16_scratch;  // VRAMAllocator
-    // Phase 4c: dense Q8_0 weights whose source is freed, keyed by the freed
-    // pointer; their IMMA planes are the only 8-bit copy until mmq_q8_imma_release_all (teardown).
-    std::unordered_set<const void*> q8_planes_only;
+    // Phase 4c: dense Q8_0 handles whose source is freed, by handle id; their IMMA planes are the
+    // only 8-bit copy until mmq_q8_imma_release_all (teardown).
+    std::unordered_set<TensorID> q8_planes_only;
     size_t q8_source_freed_bytes = 0;
 
     // --- NVFP4 decode weight cache ---

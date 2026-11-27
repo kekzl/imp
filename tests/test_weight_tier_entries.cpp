@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "core/weight_handle.h"
+#include "exec/moe_ffn_context.h"
 #include "exec/weight_caches.h"
 #include "exec/weight_tier_entries.h"
 
@@ -54,7 +55,7 @@ TEST(WeightTierEntries, BindTakesTheMapNodesOfTheSource) {
 }
 
 // Slice 2: the SfAtom / prefill-copy maps and the Phase 4b / 4c release maps bind too; a bind
-// taken before 4b / 4c keyed the released source sees none of them until the rebind.
+// taken before 4b / 4c keyed the released handle sees none of them until the rebind.
 TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
     WeightCaches wc;
     wc.nvfp4_sfatom.emplace(&g_src_a, imp::NvFP4SfAtomCacheEntry{});
@@ -70,12 +71,22 @@ TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
     EXPECT_EQ(h.entries.released_fp8, nullptr);
     EXPECT_FALSE(h.entries.q8_planes_only);
 
-    wc.released_fp8_view.emplace(&g_src_a, imp::FP8CacheEntry{});
-    wc.q8_planes_only.insert(&g_src_a);
+    // Phase 4b / 4c key the release maps by handle id; the rebind after 4c binds only those.
+    h.id = 7;
+    wc.released_fp8_view.emplace(7, imp::FP8CacheEntry{});
+    wc.q8_planes_only.insert(7);
     EXPECT_EQ(h.entries.released_fp8, nullptr);  // stale until the rebind after Phase 4c
-    imp::bind_cache_entries(h, wc);
-    EXPECT_EQ(h.entries.released_fp8, &wc.released_fp8_view.at(&g_src_a));
+    imp::bind_release_entries(h, wc);
+    EXPECT_EQ(h.entries.released_fp8, &wc.released_fp8_view.at(7));
     EXPECT_TRUE(h.entries.q8_planes_only);
+    EXPECT_EQ(h.entries.nvfp4_sfatom, &wc.nvfp4_sfatom.at(&g_src_a));  // source-keyed binds kept
+
+    // Another handle on the same (freed, reused) source pointer inherits no release (audit D-3).
+    WeightHandle reuse = handle(&g_src_a, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
+    reuse.id = 8;
+    imp::bind_cache_entries(reuse, wc);
+    EXPECT_EQ(reuse.entries.released_fp8, nullptr);
+    EXPECT_FALSE(reuse.entries.q8_planes_only);
 
     // Another source sees none of them.
     WeightHandle other = handle(&g_src_b, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
@@ -119,6 +130,72 @@ TEST(WeightTierEntries, EveryReadTierNeedsItsEntry) {
     // FP16 prefill without an fp16 entry: the source is the weight, a designed state.
     EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::FP16, U, U)), nullptr);
     EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::Undefined, U, U)), nullptr);
+}
+
+// Phase 4 reads a handle's tiers from its bound entries, not from which map holds the source.
+TEST(WeightTierEntries, TiersComeFromTheBoundEntries) {
+    using imp::QType;
+    constexpr auto U = StorageTier::Undefined, F16 = StorageTier::FP16, F8 = StorageTier::FP8;
+    constexpr auto SF = StorageTier::NVFP4_SFATOM, LIN = StorageTier::NVFP4_LINEAR;
+    const imp::Fp16CacheEntry fp16;
+    imp::FP8CacheEntry fp8;
+    const imp::NvFP4CacheEntry nvfp4;
+    const imp::NvFP4SfAtomCacheEntry sfatom;
+    const imp::MxFP4SfAtomCacheEntry mxfp4;
+    const float row_scales[1] = {1.0f};
+    auto expect = [](const imp::HandleTiers& t, StorageTier p, StorageTier f, StorageTier d) {
+        EXPECT_EQ(t.primary, p);
+        EXPECT_EQ(t.prefill, f);
+        EXPECT_EQ(t.decode, d);
+    };
+    imp::WeightCacheRefs e;
+    expect(imp::plan_handle_tiers(e, QType::Q4_K, true), U, U, U);
+    e.fp16 = &fp16;
+    expect(imp::plan_handle_tiers(e, QType::Q4_K, true), F16, F16, F16);
+    // GGUF source: a per-tensor FP8 entry is primary, a per-row one a decode sidecar.
+    e = {};
+    e.fp8 = &fp8;
+    expect(imp::plan_handle_tiers(e, QType::Q4_K, true), F8, F8, F8);
+    fp8.d_row_scales = row_scales;
+    expect(imp::plan_handle_tiers(e, QType::Q4_K, true), F16, F16, F8);
+    expect(imp::plan_handle_tiers(e, QType::NVFP4, false), F8, F8, F8);
+    fp8.d_row_scales = nullptr;
+    // F16 source: always the sidecar.
+    expect(imp::plan_handle_tiers(e, QType::F16, false), F16, F16, F8);
+    // Native FP8 source: primary alone, the sidecar beside an FP16 copy.
+    fp8.native_source = true;
+    expect(imp::plan_handle_tiers(e, QType::FP8_E4M3, false), F8, F8, F8);
+    e.fp16 = &fp16;
+    expect(imp::plan_handle_tiers(e, QType::FP8_E4M3, false), F16, F16, F8);
+    fp8.native_source = false;
+    // SfAtom NVFP4 leads; its FP16 copy takes prefill, else FP8 both, else NVFP4 decode.
+    e = {};
+    e.nvfp4_sfatom = &sfatom;
+    e.mxfp4_sfatom = &mxfp4;
+    e.nvfp4 = &nvfp4;
+    expect(imp::plan_handle_tiers(e, QType::NVFP4, false), SF, SF, LIN);
+    e.fp8 = &fp8;
+    expect(imp::plan_handle_tiers(e, QType::NVFP4, false), SF, F8, F8);
+    e.fp16 = &fp16;
+    expect(imp::plan_handle_tiers(e, QType::NVFP4, false), SF, F16, SF);
+    e.nvfp4_sfatom = nullptr;
+    expect(imp::plan_handle_tiers(e, QType::MXFP4, false), StorageTier::MXFP4, StorageTier::MXFP4,
+           StorageTier::MXFP4);
+    e.mxfp4_sfatom = nullptr;
+    expect(imp::plan_handle_tiers(e, QType::Q4_K, true), LIN, LIN, LIN);
+}
+
+// The legacy MoE fallback reads the packed-stack entry Phase 4 bound per projection.
+TEST(WeightTierEntries, MoeEntryIsTheLayersBoundProjection) {
+    imp::TransformerLayer ly;
+    EXPECT_EQ(imp::nvfp4_moe_entry(ly, imp::ExpertProj::Up), nullptr);
+    const imp::NvFP4MoEQuantResult gate, up, down;
+    ly.nvfp4_moe_gate_ptr = &gate;
+    ly.nvfp4_moe_up_ptr = &up;
+    ly.nvfp4_moe_down_ptr = &down;
+    EXPECT_EQ(imp::nvfp4_moe_entry(ly, imp::ExpertProj::Gate), &gate);
+    EXPECT_EQ(imp::nvfp4_moe_entry(ly, imp::ExpertProj::Up), &up);
+    EXPECT_EQ(imp::nvfp4_moe_entry(ly, imp::ExpertProj::Down), &down);
 }
 
 }  // namespace

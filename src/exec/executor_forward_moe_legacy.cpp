@@ -186,18 +186,16 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // experts: H2D to a staging buffer, then fused GEMV on staging, eliminating a separate
         // dequant_gpu+cuBLAS round trip.
         auto expert_gemm = [&](const Tensor& a, Tensor& c, const Tensor& packed, QType qtype,
-                               const std::vector<Tensor>& fallback,
-                               const std::vector<TensorID>& fallback_ids, int eidx,
-                               ExpertProj proj) {
+                               const std::vector<Tensor>& fallback, const std::vector<TensorID>& fallback_ids,
+                               int eidx, ExpertProj proj) {
             // NVFP4 MoE batch cache path (Nemotron-H non-gated, or any NVFP4 MoE model
             // when batch_dequant_buf is too small): after cache_moe_native_nvfp4
             // builds the contiguous buffer and frees per-expert allocs,
             // fallback[eidx].data is nullptr, so dequant_expert can't dispatch NVFP4; slice the cached MoE
-            // result instead.
+            // result instead (the entry Phase 4 bound to the layer for this projection).
             if (qtype == QType::NVFP4) {
-                auto it = wcache_.nvfp4_moe.find(packed.data);
-                if (it != wcache_.nvfp4_moe.end()) {
-                    const auto& moe_cache = it->second;
+                if (const NvFP4MoEQuantResult* moe_entry = nvfp4_moe_entry(ly, proj)) {
+                    const auto& moe_cache = *moe_entry;
                     size_t pkd_off = static_cast<size_t>(eidx) *
                                      moe_cache.expert_stride_packed;
                     size_t ms_off = static_cast<size_t>(eidx) *

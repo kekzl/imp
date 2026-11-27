@@ -266,9 +266,10 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // --- Phase 4c: dense Q8_0 keeps its IMMA planes and NVFP4 overlay, not the source ---
     pre_dequant_phase4c_q8_planes_only_(cfg, stream);
 
-    // 4b / 4c keyed released_fp8_view and q8_planes_only after registration: rebind (audit D-3).
+    // 4b / 4c keyed released_fp8_view and q8_planes_only by handle id after registration: bind
+    // those; the source-keyed entries stay as Phase 4 bound them, no lookup by a freed pointer (D-3).
     for (TensorID id = 0; id < static_cast<TensorID>(registry_->size()); ++id)
-        bind_cache_entries(registry_->handle(id), *wcache_);
+        bind_release_entries(registry_->handle(id), *wcache_);
 
     // MemAccount per-pool attribution (vram_audit diagnostic): the caches
     // above allocate via raw cudaMallocAsync, invisible to VRAMAllocator, so
