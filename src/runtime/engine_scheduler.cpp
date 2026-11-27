@@ -636,6 +636,11 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
                 new_block = kv_manager_->append_block(req->id);
             }
         }
+        // A step that crosses a block boundary on a full pool (a speculative verify can fill it to the
+        // last row) reaches here before the valve below ran: arm it and evict first, cancel only
+        // if that frees nothing (int17: 24-block FP8 pool, ctx 385, cancelled with the valve unarmed).
+        if (new_block < 0 && kv_valve_rescues_(*req, kv_bs))
+            new_block = kv_manager_->append_block(req->id);
         if (new_block < 0) {
             return decode_kv_exhausted_(req, blocks_needed, blocks_have, ctx_len);
         }
@@ -658,6 +663,18 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         }
     }
 
+    kv_valve_check_();
+    streaming_evict_(*req, kv_bs);
+    return true;
+}
+
+bool Engine::kv_valve_rescues_(Request& req, int kv_bs) {
+    if (!rt_.streaming_kv)
+        kv_valve_check_();
+    return rt_.streaming_kv && streaming_evict_(req, kv_bs) > 0;
+}
+
+void Engine::kv_valve_check_() {
     // Auto-activate StreamingLLM when KV cache is nearly exhausted.
     // Only fires once (guards on !streaming_kv_enabled). Every KV dtype's
     // decode kernels skip the -1 sentinels (#1704), so every pool has the valve.
@@ -725,32 +742,33 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
             promote_graphs_();
         }
     }
+}
 
+int Engine::streaming_evict_(Request& req, int kv_bs) {
     // StreamingLLM smart KV cache: once context exceeds the threshold,
     // free middle blocks while keeping sinks + window. The decode kernel
     // skips the freed (-1 sentinel) slots via its own n_sinks logic.
-    if (rt_.streaming_kv) {
-        int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
-        int win = (rt_.streaming_kv_window > 0) ? rt_.streaming_kv_window : model_->config().sliding_window;
-        if (n_sinks > 0 && win > 0) {
-            int threshold = (config_.streaming_kv_threshold > 0) ? config_.streaming_kv_threshold
-                                                                 : (n_sinks + win + (2 * kv_bs));
-            if (req->context_len() > threshold) {
-                // Idempotent: returns 0 once this sequence is fully
-                // streamed, so accumulating gives the total context this
-                // request lost — which is what the caller is told.
-                const int freed = kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
-                if (freed > 0) {
-                    req->evicted_kv_tokens += freed * kv_bs;
-                    // Pins the graph demotion while this sequence lives: a
-                    // sentinel now sits in its block table (graph_eligibility.h).
-                    streaming_kv_evicted_blocks_.fetch_add(static_cast<uint64_t>(freed),
-                                                           std::memory_order_relaxed);
-                }
-            }
-        }
+    if (!rt_.streaming_kv)
+        return 0;
+    int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
+    int win = (rt_.streaming_kv_window > 0) ? rt_.streaming_kv_window : model_->config().sliding_window;
+    if (n_sinks <= 0 || win <= 0)
+        return 0;
+    int threshold = (config_.streaming_kv_threshold > 0) ? config_.streaming_kv_threshold
+                                                         : (n_sinks + win + (2 * kv_bs));
+    if (req.context_len() <= threshold)
+        return 0;
+    // Idempotent: returns 0 once this sequence is fully
+    // streamed, so accumulating gives the total context this
+    // request lost — which is what the caller is told.
+    const int freed = kv_manager_->evict_middle_blocks(req.id, n_sinks, win);
+    if (freed > 0) {
+        req.evicted_kv_tokens += freed * kv_bs;
+        // Pins the graph demotion while this sequence lives: a
+        // sentinel now sits in its block table (graph_eligibility.h).
+        streaming_kv_evicted_blocks_.fetch_add(static_cast<uint64_t>(freed), std::memory_order_relaxed);
     }
-    return true;
+    return freed;
 }
 
 void Engine::step_decode(cudaStream_t dec_stream) {

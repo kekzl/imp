@@ -117,11 +117,12 @@ TEST(Q8PlanesOnly, DeclineFallbackComputesFromThePlanes) {
     ASSERT_EQ(cudaMemcpy(x, hx.data(), hx.size() * sizeof(__half), cudaMemcpyHostToDevice), cudaSuccess);
 
     WeightCaches wc;
-    wc.q8_planes_only.insert(w.src);
+    wc.q8_planes_only.insert(0);  // Phase 4c keys by handle id
     QuantScratch qs;
     qs.dequant.adopt(scratch, kElems * sizeof(__half), nullptr);  // plain family: qs releases it
     qs.dequant_size = kElems * sizeof(__half);
     WeightHandle h;
+    h.id = 0;
     h.source_data = w.src;
     h.source_qtype = QType::Q8_0;
     h.shape[0] = kN;

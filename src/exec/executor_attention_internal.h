@@ -21,7 +21,8 @@
 #include "exec/inference_state.h"
 #include "memory/kv_cache.h"
 #include "core/tensor.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/attention.h"
 #include "core/kv_fp8_scale.h"
 #include "core/process_diag.h"
 
@@ -161,7 +162,7 @@ struct ApaPagedPrefillArgs {
 [[nodiscard]] static bool try_apa_paged_prefill(const ApaPagedPrefillArgs& args) {
     const auto& [rcfg, cap_replay, q, cache, kv_layer, past_bt, kv_bs, kk, vv, att_off, o, n, nh, nkv, hd,
                  scale, sliding_window, softcap, stream, sinks, owner] = args;
-    const auto& a = rcfg->attention;
+    const auto& a = attention_section(*rcfg);
     if (cap_replay || cache->qtype() != QType::F16 || !apa_serves(a, n, att_off + n) || sliding_window > 0 ||
         softcap != 0.0f || sinks != nullptr || process_diag_deterministic())
         return false;
@@ -199,7 +200,7 @@ struct ApaPagedPrefillArgs {
     const Tensor& k = *k_p;
     const Tensor& v = *v_p;
     Tensor& o = *o_p;
-    const auto& a = rcfg_p->attention;
+    const auto& a = attention_section(*rcfg_p);
     if ((!a.ra2_prefill && a.apa_eps <= 0.0f) || sliding_window > 0 || softcap != 0.0f || sinks != nullptr ||
         process_diag_deterministic())
         return AttnPrefillOuter::UNSET;

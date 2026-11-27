@@ -6,6 +6,7 @@
 #include "exec/expert_cache.h"           // kExpertProjCount
 #include "exec/gemm_mode.h"              // GemmMode
 #include "exec/nvfp4_expert_offload.h"  // StagedProj
+#include "model/model_config.h"         // TransformerLayer
 #include <cstddef>
 
 namespace imp {
@@ -74,6 +75,19 @@ struct MoeFfnContext {
 [[nodiscard]] inline bool moe_scatter_can_add_down_bias(const MoeFfnContext& ctx, QType compute_dtype) {
     return ctx.routing.token_to_expanded != nullptr && compute_dtype == QType::F16 &&
            ctx.routing.expert_indices.data != nullptr;
+}
+
+// The packed-stack NVFP4 MoE entry Phase 4 bound for one projection (audit D-3); null = none.
+[[nodiscard]] inline const NvFP4MoEQuantResult* nvfp4_moe_entry(const TransformerLayer& ly, ExpertProj p) {
+    switch (p) {
+        case ExpertProj::Gate:
+            return ly.nvfp4_moe_gate_ptr;
+        case ExpertProj::Up:
+            return ly.nvfp4_moe_up_ptr;
+        case ExpertProj::Down:
+            return ly.nvfp4_moe_down_ptr;
+    }
+    return nullptr;
 }
 
 }  // namespace imp

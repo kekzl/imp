@@ -317,15 +317,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     } else if (rt_.kv_cache_dtype == QType::NVFP4) {
         IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
-        if (config_.use_fp8_prefill) {
+        if (rt_.use_fp8_prefill) {
             IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
-            config_.use_fp8_prefill = false;
+            rt_.use_fp8_prefill = false;
         }
     } else if (rt_.kv_cache_dtype == QType::MXFP4_KV) {
         IMP_LOG_INFO("KV cache dtype: MXFP4_KV (FP4 E2M1 + UE8M0 per-16-elem scales, ~3.6× compression)");
-        if (config_.use_fp8_prefill) {
+        if (rt_.use_fp8_prefill) {
             IMP_LOG_INFO("MXFP4_KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
-            config_.use_fp8_prefill = false;
+            rt_.use_fp8_prefill = false;
         }
     }
 
@@ -430,7 +430,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // Sliding-window layers hold a fixed live span per slot (window + slack + burst: 721 tokens at
             // window 513 on Flint), priced here at 2x the window instead of kRefCtxTokens.
             int swa_layers = 0, swa_window = 0;
-            if (runtime_config_.kv_cache.swa_sizing_wanted(config_.use_prefix_caching))
+            if (runtime_config_.kv_cache.swa_sizing_wanted(rt_.use_prefix_caching))
                 for (int l = 0; l < mcfg.n_layers; ++l)
                     if (const int w = layer_swa_window(mcfg, model_->profile(), l);
                         w > 0 && !mcfg.layer_kv_shared(l)) {
@@ -550,8 +550,8 @@ void Engine::init_resolve_prefill_graph_() {
 void Engine::init_resolve_ssm_dtype_() {
     const auto& mcfg = model_->config();
     const bool has_gdn_for_dtype = (mcfg.ssm_state_size > 0) && model_->profile().is_gdn;
-    if (config_.ssm_state_dtype == QType::F32 && mcfg.ssm_state_size > 0 && !has_gdn_for_dtype) {
-        config_.ssm_state_dtype = QType::F16;
+    if (rt_.ssm_state_dtype == QType::F32 && mcfg.ssm_state_size > 0 && !has_gdn_for_dtype) {
+        rt_.ssm_state_dtype = QType::F16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)", mcfg.ssm_state_size);
     }
     // runtime.deterministic: FP32 state + token-sequential fused scan, so output does not
@@ -583,7 +583,7 @@ void Engine::init_resolve_ssm_dtype_() {
             IMP_LOG_WARN("gdn.state_bf16 ignored: no BF16 kernel for HD=%d SS=%d", hd,
                          mcfg.ssm_state_size);
         } else {
-            config_.ssm_state_dtype = QType::BF16;
+            rt_.ssm_state_dtype = QType::BF16;
             IMP_LOG_INFO("SSM state dtype: BF16 (gdn.state_bf16; fused scan route, chunkwise off)");
         }
     }
@@ -596,9 +596,9 @@ void Engine::init_resolve_ssm_dtype_() {
 void Engine::init_resolve_fp8_prefill_() {
     const bool no_fp8_prefill = (runtime_config_.attention.fp8_prefill == "never");
     const bool is_nvfp4_native = model_->config().is_nvfp4_prequant;
-    if (is_nvfp4_native && !config_.use_fp8_prefill) {
+    if (is_nvfp4_native && !rt_.use_fp8_prefill) {
         IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (NVFP4 tile GEMM used instead)");
-    } else if (!config_.use_fp8_prefill && !no_fp8_prefill) {
+    } else if (!rt_.use_fp8_prefill && !no_fp8_prefill) {
         int sm_major = 0;
         int sm_minor = 0;
         const bool sm_ok = cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, 0) == cudaSuccess &&
@@ -613,7 +613,7 @@ void Engine::init_resolve_fp8_prefill_() {
                 "use --set attention.fp8_prefill=always to force)",
                 sm);
         } else {
-            config_.use_fp8_prefill = true;
+            rt_.use_fp8_prefill = true;
             IMP_LOG_INFO("FP8 prefill: auto → enabled");
         }
     } else if (no_fp8_prefill) {
@@ -644,20 +644,19 @@ void Engine::init_resolve_quant_flags_() {
     }
 
     // NVFP4 decode mode
-    config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
-    config_.q8_drop_source = true;  // Phase 4c frees dense Q8_0 sources behind their IMMA planes
-    config_.q4k_in_place = true;    // dense Q4_K prefills on IMMA from the GGUF blocks, no FP16 copy
+    rt_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
+    rt_.q8_drop_source = true;  // Phase 4c frees dense Q8_0 sources behind their IMMA planes
+    rt_.q4k_in_place = true;    // dense Q4_K prefills on IMMA from the GGUF blocks, no FP16 copy
     const LmHeadMode head_mode = lm_head_mode(runtime_config_.gemm.nvfp4_lm_head);
     const bool head_fp8_rows = model_->output_proj_row_scales().data != nullptr;  // #2479
-    config_.fp8_lm_head = lm_head_builds_fp8(head_mode, model_->output_proj().qtype, head_fp8_rows);
-    config_.lm_head_source_only = lm_head_serves_source(head_mode, model_->output_proj().qtype,
-                                                        head_fp8_rows);
+    rt_.fp8_lm_head = lm_head_builds_fp8(head_mode, model_->output_proj().qtype, head_fp8_rows);
+    rt_.lm_head_source_only = lm_head_serves_source(head_mode, model_->output_proj().qtype, head_fp8_rows);
 
-    if (config_.use_nvfp4_decode < 0) {
+    if (rt_.use_nvfp4_decode < 0) {
         const auto wq_qtype = model_->layer(0).wq.qtype;
         const bool is_iquant = (wq_qtype == QType::IQ3_S || wq_qtype == QType::IQ4_NL ||
                                 wq_qtype == QType::IQ4_XS);
-        const bool nvfp4_beneficial_qtype = nvfp4_beneficial(wq_qtype, config_.nvfp4_decode_all);
+        const bool nvfp4_beneficial_qtype = nvfp4_beneficial(wq_qtype, rt_.nvfp4_decode_all);
         const bool is_moe = model_->profile().is_moe;
         const bool is_gdn = model_->profile().is_gdn;
 
@@ -670,24 +669,24 @@ void Engine::init_resolve_quant_flags_() {
             // and degenerates output for 8-bit GGUF (mode 2 is reserved for
             // sub-8-bit weights below). docs/GOAL.md ranks decode #1 for the
             // north-star, so dense Q*_K defaults to decode-first mode 1.
-            config_.use_nvfp4_decode = 1;
+            rt_.use_nvfp4_decode = 1;
             IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (dense Q*_K — decode-first)");
         } else if (nvfp4_beneficial_qtype && !is_moe && !is_gdn && sub8bit_qtype) {
             // Sub-8-bit with nvfp4_decode_all: mode 2 (NVFP4 only). Mode 1
             // wastes budget on FP16 cache that starves the NVFP4 decode cache.
-            config_.use_nvfp4_decode = 2;
+            rt_.use_nvfp4_decode = 2;
             IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (sub-8-bit Q*_K + decode_all)");
         } else if (is_gdn) {
             // GDN models with large d_model: enable NVFP4 for attention + FFN weights,
             // but SSM/GDN projections (ssm_in/ssm_out) will be excluded in
             // pre_dequant_weights to preserve recurrent state precision.
-            config_.use_nvfp4_decode = 2;
+            rt_.use_nvfp4_decode = 2;
             IMP_LOG_INFO(
                 "NVFP4 decode: auto → mode 2 (GDN model — "
                 "ssm_in/ssm_out excluded for precision)");
         } else {
             const char* why = is_moe ? "MoE" : "non-Q*_K-6-8bit";
-            config_.use_nvfp4_decode = 2;
+            rt_.use_nvfp4_decode = 2;
             IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (%s)", why);
         }
     }
@@ -696,27 +695,27 @@ void Engine::init_resolve_quant_flags_() {
     // per weight element, compounding into degenerate output over many
     // attention layers. The dequant fallback (#431) handles these models by
     // dequanting Q4_K->FP16 on each forward.
-    if (config_.use_fp8_prefill) {
+    if (rt_.use_fp8_prefill) {
         auto qtype = model_->layer(0).wq.qtype;
         bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K || qtype == QType::Q5_0 ||
                          qtype == QType::Q5_K || qtype == QType::Q3_K || qtype == QType::Q2_K ||
                          qtype == QType::Q4_1 || qtype == QType::Q5_1);
         if (sub_8bit) {
-            config_.use_fp8_prefill = false;
+            rt_.use_fp8_prefill = false;
             IMP_LOG_INFO("FP8 prefill cache: auto-disabled (sub-8-bit weights → dequant fallback)");
         }
     }
 
     // Dual-path quant validation: requires NVFP4 decode + FP8 prefill.
     // If either is missing, auto-enable or warn.
-    if (config_.dual_path_quant) {
-        if (config_.use_nvfp4_decode <= 0) {
+    if (rt_.dual_path_quant) {
+        if (rt_.use_nvfp4_decode <= 0) {
             IMP_LOG_WARN("Dual-path quant requires NVFP4 decode — enabling mode 2 (NVFP4 only)");
-            config_.use_nvfp4_decode = 2;
+            rt_.use_nvfp4_decode = 2;
         }
-        if (!config_.use_fp8_prefill) {
+        if (!rt_.use_fp8_prefill) {
             IMP_LOG_INFO("Dual-path quant: auto-enabling FP8 prefill for attention weight quality");
-            config_.use_fp8_prefill = true;
+            rt_.use_fp8_prefill = true;
         }
     }
 
@@ -728,9 +727,9 @@ void Engine::init_resolve_quant_flags_() {
     // Decided BEFORE executor_->init() so fp8_activation scratch buffers
     // aren't allocated and never used. Dual-path quant keeps FP8 for FFN
     // even on GDN; only attention drops to FP16.
-    if (config_.use_fp8_prefill && !config_.dual_path_quant && model_->profile().is_gdn) {
+    if (rt_.use_fp8_prefill && !rt_.dual_path_quant && model_->profile().is_gdn) {
         IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
-        config_.use_fp8_prefill = false;
+        rt_.use_fp8_prefill = false;
     }
     // DENSE Gemma (3 and 4) from GGUF: no longer capped to mode 1 (#514/#516
     // fixed by #539). Dense Gemma follows the same sub-8-bit mode-2 auto-pick
@@ -746,7 +745,7 @@ void Engine::init_resolve_quant_flags_() {
         // is prefill-neutral with a long-context advantage, and FP8 halves
         // the activation cache (helps VRAM at long context). Opt out via
         // [attention] fp8_prefill = "never" for max prefill at medium pp.
-        if (config_.use_nvfp4_decode) {
+        if (rt_.use_nvfp4_decode) {
             // Prequant SafeTensors NVFP4 weights are already NVFP4 on disk:
             // Phase 3a/3b (Q*_K->NVFP4->SfAtom cache) iterate `wcache_.nvfp4`,
             // which stays empty here, so they are no-ops. Phase 3-MoE
@@ -760,12 +759,11 @@ void Engine::init_resolve_quant_flags_() {
             // per-layer head_dim (256 SWA / 512 global) is handled uniformly
             // since each entry carries its own (N, K) shape.
             IMP_LOG_INFO("Gemma 4: NVFP4 decode cache enabled (use_nvfp4_decode=%d, prequant=%d)",
-                         config_.use_nvfp4_decode,
-                         (int)model_->config().is_nvfp4_prequant);
+                         rt_.use_nvfp4_decode, (int)model_->config().is_nvfp4_prequant);
         }
-        if (config_.dual_path_quant) {
+        if (rt_.dual_path_quant) {
             IMP_LOG_INFO("Gemma 4: disabling dual_path_quant");
-            config_.dual_path_quant = false;
+            rt_.dual_path_quant = false;
         }
         // FP8 KV is safe on Gemma-4: the original bug (FP8 KV calibration
         // reading garbage past the per-layer K/V region, since Gemma-4 has
@@ -817,22 +815,21 @@ void Engine::init_resolve_quant_flags_() {
 // init_kv_cache a reader.
 void Engine::init_resolve_kv_block_size_() {
     const auto& mcfg = model_->config();
-    if (config_.kv_block_size.value_or(0) > 0) {
+    if (rt_.kv_block_size > 0) {
         // Explicit kv_cache.block_size (or EngineConfig from the C++ API).
         // Refused here, at load, rather than at dispatch: the FP8 tile kernel
         // silently falls back on a block it cannot tile, and a value the
         // kernels never see would otherwise measure the fallback.
-        if (const char* why = kv_block_size_error(*config_.kv_block_size))
-            throw std::runtime_error("kv_cache.block_size=" + std::to_string(*config_.kv_block_size) + " " +
-                                     why);
-        IMP_LOG_INFO("KV block size: %d (kv_cache.block_size, n_kv_heads=%d)", *config_.kv_block_size,
+        if (const char* why = kv_block_size_error(rt_.kv_block_size))
+            throw std::runtime_error("kv_cache.block_size=" + std::to_string(rt_.kv_block_size) + " " + why);
+        IMP_LOG_INFO("KV block size: %d (kv_cache.block_size, n_kv_heads=%d)", rt_.kv_block_size,
                      mcfg.n_kv_heads);
         return;
     }
     // 16 for every model: the old n_kv_heads<=4 -> 32 rule never won and
     // lost tg128 on the class it targeted (docs/audit/PERF_LOG.md,
     // tools/analysis/kv_block_size_ab.sh). kv_cache.block_size overrides.
-    config_.kv_block_size = kKVBlockSize;
+    rt_.kv_block_size = kKVBlockSize;
     IMP_LOG_INFO("KV block size: auto -> %d (n_kv_heads=%d)", kKVBlockSize, mcfg.n_kv_heads);
 }
 
@@ -867,7 +864,7 @@ void Engine::init_resolve_sparse_attention_() {
 void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
     if (const int mb = cfg::swa_snapshot_auto_mb(runtime_config_.was_set("kv_cache.swa_snapshot_mb"),
-                                                 config_.use_prefix_caching,
+                                                 rt_.use_prefix_caching,
                                                  model_->profile().swa_snapshot_default_mb);
         mb > 0) {
         runtime_config_.kv_cache.swa_snapshot_mb = mb;
@@ -916,7 +913,7 @@ void Engine::init_compute_max_seq_len_() {
         // (use_prefix_caching is final before this resolver runs). The final
         // gate is resolved in init_kv_cache; a decline there clamps
         // conservatively, never OOMs.
-        if (runtime_config_.kv_cache.swa_sizing_wanted(config_.use_prefix_caching)) {
+        if (runtime_config_.kv_cache.swa_sizing_wanted(rt_.use_prefix_caching)) {
             int swa_layers = 0;
             for (int l = 0; l < mcfg.n_layers; l++)
                 if (layer_swa_window(mcfg, model_->profile(), l) > 0 && !mcfg.layer_kv_shared(l))

@@ -1,5 +1,6 @@
 #include "exec/executor.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/diagnostics.h"
 #include "memory/device_alloc_all.h"
 #include "exec/workspace.h"
 #include "exec/workspace_sizes.h"
@@ -58,7 +59,7 @@ void GraphExecutor::dump_moe_expert_hist_() {
     moe_.imb_layers = 0;
     if (moe_.expert_hist.get() == nullptr)
         return;
-    const std::string& path = dispatch_policy().diagnostics.moe_expert_hist;
+    const std::string& path = diagnostics_section(dispatch_policy()).moe_expert_hist;
     size_t n = static_cast<size_t>(moe_.hist_layers) * moe_.hist_experts;
     std::vector<unsigned int> h(n, 0u);
     cudaError_t rc = cudaMemcpy(h.data(), moe_.expert_hist.get(), n * sizeof(unsigned int),
@@ -109,7 +110,7 @@ void GraphExecutor::dump_moe_expert_hist_() {
 void GraphExecutor::dump_moe_expert_trace_() {
     if (moe_.expert_trace.get() == nullptr)
         return;
-    const std::string& path = dispatch_policy().diagnostics.moe_expert_trace;
+    const std::string& path = diagnostics_section(dispatch_policy()).moe_expert_trace;
     unsigned int used = 0;
     cudaError_t rc = cudaMemcpy(&used, moe_.trace_cursor.get(), sizeof(unsigned int), cudaMemcpyDeviceToHost);
     if (rc == cudaSuccess) {
