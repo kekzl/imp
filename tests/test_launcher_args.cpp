@@ -397,3 +397,27 @@ TEST(PliProjectCombineArgs, CarriesEveryFieldInDeclarationOrder) {
 }
 
 }  // namespace
+
+// B-133 slice 8: a field swap in each struct fails the build at its src call site (designated
+// initializers), so only the omitted-field defaults are pinned, at compile time.
+#include "compute/gemm.h"
+#include "exec/attention_prefill_args.h"
+#include "exec/greedy_argmax_args.h"
+
+static_assert(std::is_aggregate_v<imp::MoeDp4aGateUpArgs> && imp::MoeDp4aGateUpArgs{}.stream == nullptr);
+static_assert(std::is_aggregate_v<imp::SparseSelectBlocksArgs>);
+// try_fa2_fp16qk_prefill's old trailing defaults: no device kv length, no sinks.
+static_assert(imp::Fa2PrefillArgs{}.d_kv_len == nullptr && imp::Fa2PrefillArgs{}.sinks == nullptr);
+static_assert(std::is_aggregate_v<imp::AttnPrefillTierArgs>);
+// greedy_argmax_all's old trailing defaults: no penalties, no top-m, no bans, GEMV LM head.
+static_assert(imp::GreedyArgmaxArgs{}.d_hist == nullptr && imp::GreedyArgmaxArgs{}.n_hist == 0 &&
+              imp::GreedyArgmaxArgs{}.d_draft == nullptr);
+static_assert(imp::GreedyArgmaxArgs{}.rep_pen == 1.0f && imp::GreedyArgmaxArgs{}.freq_pen == 0.0f &&
+              imp::GreedyArgmaxArgs{}.pres_pen == 0.0f);
+static_assert(imp::GreedyArgmaxArgs{}.d_topm == nullptr && imp::GreedyArgmaxArgs{}.topm == 0 &&
+              imp::GreedyArgmaxArgs{}.d_banned == nullptr && imp::GreedyArgmaxArgs{}.n_banned == 0);
+static_assert(!imp::GreedyArgmaxArgs{}.allow_cutlass && imp::GreedyArgmaxArgs{}.d_banned_alt == nullptr &&
+              imp::GreedyArgmaxArgs{}.n_banned_alt == 0 && imp::GreedyArgmaxArgs{}.h_row_alt == nullptr);
+static_assert(imp::GreedyArgmaxArgs{}.h_row_hist == nullptr &&
+              imp::GreedyArgmaxArgs{}.h_row_hist_n == nullptr &&
+              imp::GreedyArgmaxArgs{}.h_row_pens == nullptr);

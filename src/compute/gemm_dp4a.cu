@@ -587,96 +587,27 @@ void gemv_q5_1_q8_1_moe_decode(const void* packed_weights, const int32_t* expert
 }
 
 // ---------------------------------------------------------------------------
-// dp4a MoE gate+up fused wrappers (4 functions)
+// dp4a MoE gate+up fused wrappers (8 functions)
 // ---------------------------------------------------------------------------
 
-void gemv_q6k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                     const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                     half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                     size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                     cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q6_K_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
+template <typename Traits>
+static void moe_gate_up_dp4a(const MoeDp4aGateUpArgs& a) {
+    const auto& [gate_weights, up_weights, expert_indices, q8_1, d8, y_gate, y_up, rows, K, gate_stride_bytes,
+                 up_stride_bytes, q8_1_stride, d8_stride, top_k, stream] = a;
+    launch_gemv_dp4a_moe_gate_up<Traits>(static_cast<const uint8_t*>(gate_weights),
+                                         static_cast<const uint8_t*>(up_weights), expert_indices, q8_1, d8,
+                                         y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
+                                         q8_1_stride, d8_stride, top_k, stream);
 }
 
-void gemv_q8_0_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q8_0_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
-}
-
-void gemv_q4_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q4_K_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
-}
-
-void gemv_q5_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q5_K_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
-}
-
-void gemv_q4_0_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q4_0_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
-}
-
-void gemv_q2_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q2_K_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
-}
-
-void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q3_K_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
-}
-
-void gemv_q5_1_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream) {
-    launch_gemv_dp4a_moe_gate_up<Q5_1_Traits>(static_cast<const uint8_t*>(gate_weights),
-                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
-                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
-                                              q8_1_stride, d8_stride, top_k, stream);
-}
+void gemv_q6k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q6_K_Traits>(a); }
+void gemv_q8_0_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q8_0_Traits>(a); }
+void gemv_q4_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q4_K_Traits>(a); }
+void gemv_q5_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q5_K_Traits>(a); }
+void gemv_q4_0_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q4_0_Traits>(a); }
+void gemv_q2_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q2_K_Traits>(a); }
+void gemv_q3_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q3_K_Traits>(a); }
+void gemv_q5_1_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a) { moe_gate_up_dp4a<Q5_1_Traits>(a); }
 
 // L1 carveout for the dp4a GEMV template instantiations, called from GraphExecutor::init()
 // next to mxfp4_gemv_set_l1_carveout(), PDL or not. Was gemv_pdl_register()

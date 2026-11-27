@@ -1029,9 +1029,21 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                 moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, d8, up_buf, eff, d, up_stride_bytes,
                                                  /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
             } else {
-                moe_dp4a_gate_up_kernel(up_qtype)(gate_base, up_base, expert_indices, q8, d8, gate_buf,
-                                                  up_buf, eff, d, gate_stride, up_stride_bytes,
-                                                  /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                moe_dp4a_gate_up_kernel(up_qtype)({.gate_weights = gate_base,
+                                                   .up_weights = up_base,
+                                                   .expert_indices = expert_indices,
+                                                   .q8_1 = q8,
+                                                   .d8 = d8,
+                                                   .y_gate = gate_buf,
+                                                   .y_up = up_buf,
+                                                   .rows = eff,
+                                                   .K = d,
+                                                   .gate_stride_bytes = gate_stride,
+                                                   .up_stride_bytes = up_stride_bytes,
+                                                   .q8_1_stride = 0,
+                                                   .d8_stride = 0,
+                                                   .top_k = top_k,
+                                                   .stream = stream});
             }
         } else {
             moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, d8, up_buf, eff, d, up_stride_bytes,

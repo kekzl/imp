@@ -28,6 +28,7 @@
 #include "compute/qsa_indexer.h"
 #include "exec/ffn_graph_cache.h"
 #include "exec/gemma_pli_state.h"
+#include "exec/greedy_argmax_args.h"
 #include "exec/sae.h"
 #include "exec/buffer_stamp.h"
 #include "exec/smallm_xq_tag.h"
@@ -196,16 +197,7 @@ public:
         verify_sampling_.reset();
         verify_rows_.assign(rows, rows + n);
     }
-    void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
-                           const int32_t* d_hist = nullptr, int n_hist = 0,
-                           const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
-                           float freq_pen = 0.0f, float pres_pen = 0.0f,
-                           int32_t* d_topm = nullptr, int topm = 0,
-                           const int32_t* d_banned = nullptr, int n_banned = 0,
-                           bool allow_cutlass = false, const int32_t* d_banned_alt = nullptr,
-                           int n_banned_alt = 0, const uint8_t* h_row_alt = nullptr,
-                           const int32_t* const* h_row_hist = nullptr, const int* h_row_hist_n = nullptr,
-                           const float* h_row_pens = nullptr);
+    void greedy_argmax_all(const GreedyArgmaxArgs& a);
 
     // LM head + argmax over EXTERNAL, already-normed rows ([n_rows,d_model]
     // FP16, e.g. MTP head output): draft_nvfp4 (W4A16, one weight pass per 4 rows) when given, else the

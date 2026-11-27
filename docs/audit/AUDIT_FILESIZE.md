@@ -464,3 +464,12 @@ Ten launchers take one args struct; clang-format breaks a wrapped designated lis
 |---|---:|---:|---|
 | `src/compute/mtp_forward.cu` | 1762 | 1789 | 1435 -> 1462 |
 | `tests/test_gdn.cu` | 1613 | 1665 | 1372 -> 1424 |
+
+## 2026-11-27: B-133 slice 8 call sites (D-11)
+
+Fourteen launchers take one args struct; clang-format breaks a wrapped designated list one field per line.
+
+| file | raw LOC before | raw LOC after | `[allow]` pin (code LOC) |
+|---|---:|---:|---|
+| `src/exec/executor_forward_moe_batch.cu` | 1200 | 1212 | 964 -> 977 |
+| `tests/test_sparse_attn_select.cu` | 998 | 1100 | 860 -> 962 |
