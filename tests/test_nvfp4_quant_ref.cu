@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 #include "compute/nvfp4_quant_ref.h"
+#include "core/tensor.h"
+#include "quant/nvfp4_owned.h"
+#include "quant/nvfp4_quant.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <vector>
 #include <random>
 #include <cmath>
@@ -118,6 +122,64 @@ TEST(Nvfp4QuantRefTest, RepresentableValuesAreBitExact) {
         float b = __half2float(h_output[i]);
         EXPECT_NEAR(a, b, 0.01f) << "idx " << i << ": in=" << a << " out=" << b;
     }
+}
+
+// quantize_fp16_to_nvfp4 (Modelopt layout, value = e2m1 * FP8 micro * tensor_scale) stores
+// tensor_scale = absmax / 6; a wrong divisor cancels in its own round trip (M-NV1), so the dequant
+// uses the host scale. Blocks are e2m1 * 0.5 * {1, 1/2, 1/4, 1/8}: every step is exact.
+TEST(Nvfp4QuantRefTest, Fp16ToNvfp4TensorScaleIsAbsmaxOverSix) {
+    constexpr int N = 2;
+    constexpr int K = 64;  // 8 micro-blocks of 16
+    constexpr float kE2M1[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    constexpr float kBlockMult[4] = {1.0f, 0.5f, 0.25f, 0.125f};
+
+    std::vector<half> h_input(static_cast<size_t>(N) * K);
+    float absmax = 0.0f;
+    for (size_t i = 0; i < h_input.size(); ++i) {
+        const size_t j = i % 16;
+        float v = kE2M1[j % 8] * kBlockMult[(i / 16) % 4] * 0.5f;
+        if (j >= 8)
+            v = -v;
+        h_input[i] = __float2half(v);
+        absmax = std::max(absmax, std::fabs(__half2float(h_input[i])));
+    }
+
+    half* d_input = nullptr;
+    half* d_output = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_input, h_input.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_output, h_input.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_input, h_input.data(), h_input.size() * sizeof(half), cudaMemcpyHostToDevice),
+              cudaSuccess);
+
+    const int64_t shape[2] = {N, K};
+    Tensor t(d_input, QType::F16, 2, shape, /*on_device=*/true);
+    NvFP4Owned q;
+    quantize_fp16_to_nvfp4(t, q, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    // calibrate_nvfp4_scales runs the same host float division: exact compare.
+    const float want_scale = absmax / 6.0f;
+    EXPECT_EQ(q.tensor_scale, want_scale);
+
+    NvFP4QuantResult view = q;
+    view.tensor_scale = want_scale;
+    dequantize_nvfp4_to_fp16(view, d_output, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<half> h_output(h_input.size());
+    ASSERT_EQ(cudaMemcpy(h_output.data(), d_output, h_output.size() * sizeof(half), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    cudaFree(d_input);
+    cudaFree(d_output);
+
+    int mismatches = 0;
+    for (size_t i = 0; i < h_input.size(); ++i) {
+        const float a = __half2float(h_input[i]);
+        const float b = __half2float(h_output[i]);
+        if (a != b && mismatches++ < 4)
+            ADD_FAILURE() << "idx " << i << ": in=" << a << " out=" << b;
+    }
+    EXPECT_EQ(mismatches, 0);
 }
 
 }  // namespace
