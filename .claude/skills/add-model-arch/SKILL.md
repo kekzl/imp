@@ -11,6 +11,20 @@ Diff `config.json` against a supported sibling before estimating. Qwen3.8 shippe
 
 Start with `scripts/check_model.sh <hf-repo> [--nvfp4] [--bos]`: download, HF BF16 PPL (CPU), imp PPL, `/tokenize` ids vs HF, reasoning split, `json_object`; one table, exit 1 on a FAIL row. A checkpoint whose rows are all ok needs only its MODELS.md row (MiniCPM5-2B, LFM2.5-24B-A2B).
 
+## Rule: the port runs on the existing engine
+
+A new arch plugs into the shared subsystems; it never gets a runtime of its own beside them. Inkling-2-Mini shipped as a private runtime (9378 LOC in 44 files, sequence identity = first block id of a KV pool it stored no data in, no `WeightRegistry` / `KVCache` use, engine prefix cache off): #3270 broke it on main (#3272), and folding it back took audit row D-4 / B-111 slices S1-S6.
+
+| Concern | Use | Not |
+|---|---|---|
+| Forward | layer steps in `GraphExecutor` (`src/exec/executor.h`), arch differences via `ModelProfile` (`src/model/model_profile.h`) | an own forward loop / executor per arch |
+| Weights | `WeightRegistry` + `WeightHandle` (`src/exec/weight_handle.h`), GEMMs through the dense ladder (`gemm_via_handle_`, `src/compute/dispatch_paths.h`) | own weight structs, raw pointers, private GEMM calls |
+| KV + sequences | `KVCache` (`src/memory/kv_cache.h`) on the paged `BlockPool` (`src/memory/block_pool.h`), sequence = request id from `Scheduler` (`src/runtime/scheduler.h`), engine prefix cache on | own slot map, own KV pool, identity from a block id |
+| Per-sequence state (conv, GDN, rings) | engine-owned per-slot state, growth via `GrowRows` (`src/memory/grow_rows.h`) | buffers sized at init for the worst case |
+| Features | `EngineCapabilities` (`src/runtime/engine_capabilities.h`) derived from the shared paths: spec/MTP, constrained decoding, phrase bans, graph capture work because the engine does them | per-arch reimplementation, or capability bits forced on |
+
+An own subsystem only for an op the engine cannot express, named in the PR with the reason. Gate: a full `make test-e2e` and a 2-slot run (10 prompts x 300 tokens, error count) pass on the new arch with the prefix cache on.
+
 ## Integration checklist (gpt-oss #572 is the reference PR)
 
 | Step | Where | Notes |
