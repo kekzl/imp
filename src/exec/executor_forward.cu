@@ -189,7 +189,7 @@ void GraphExecutor::build_lm_head_sfatom_(cudaStream_t stream) {
     // Phase 3b's prefill cache may already hold the head's SfAtom: borrow it (both freed in
     // free_buffers). Qwen3-14B-NVFP4, gemm.nvfp4_lm_head=on: 46.4 MiB not built twice.
     if (const NvFP4SfAtomCacheEntry* ct = lm_e.nvfp4_sfatom; ct != nullptr && ct->scale_factors != nullptr) {
-        NvFP4SfAtomWeight view = *ct;  // a sliced copy of an entry is a view
+        NvFP4SfAtomWeight view = *ct;  // NOLINT(cppcoreguidelines-slicing): a sliced entry is a view
         lm_head_sfatom_ = NvFP4SfAtomCacheEntry(std::move(view));
         lm_head_sfatom_ready_ = lm_head_sfatom_.data != nullptr;
         IMP_LOG_INFO("LM head: batched-decode W4A4 GEMM borrows the prefill SfAtom (%zu KiB not duplicated)",

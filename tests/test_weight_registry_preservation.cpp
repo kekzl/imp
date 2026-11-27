@@ -38,11 +38,11 @@ TEST(WeightRegistryPreservation, NVFP4ModeDoesNotDowngradeSSMInOut) {
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
         // WQ is ALL_QUANT / required_floor=NVFP4 → should be assigned NVFP4
-        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1));
+        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1);
         // SSM_IN is FP16_ONLY / required_floor=FP16 → must stay FP16
-        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 4096, 4096, static_cast<uintptr_t>(i * 100 + 2));
+        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 2);
         // SSM_OUT is FP16_ONLY / required_floor=FP16 → must stay FP16
-        L.ssm_out = make_tensor_stub(TensorKind::SSM_OUT, 4096, 4096, static_cast<uintptr_t>(i * 100 + 3));
+        L.ssm_out = make_tensor_stub(TensorKind::SSM_OUT, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 3);
         m.layers_.push_back(std::move(L));
     }
 
@@ -81,9 +81,9 @@ TEST(StoragePlanner, TinyBudgetReturnsFailure) {
 
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
-        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1));
+        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1);
         // Add an FFN weight as well so there's more to compress
-        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096, static_cast<uintptr_t>(i * 100 + 2));
+        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 2);
         m.layers_.push_back(std::move(L));
     }
 
@@ -107,10 +107,10 @@ TEST(StoragePlanner, NativeNvfp4SourcesCostNothingAtNvfp4Tier) {
 
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
-        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1),
+        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1,
                                 QType::NVFP4);
-        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096,
-                                    static_cast<uintptr_t>(i * 100 + 2), QType::NVFP4);
+        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 2,
+                                    QType::NVFP4);
         m.layers_.push_back(std::move(L));
     }
     // The F16 token embedding is the resident upload itself (Phase 1 builds
@@ -230,7 +230,7 @@ TEST(StoragePlanner, GDNGateIsNotEnumeratedForOverlay) {
 
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
-        L.gdn_gate = make_tensor_stub(TensorKind::GDN_GATE, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1));
+        L.gdn_gate = make_tensor_stub(TensorKind::GDN_GATE, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1);
         m.layers_.push_back(std::move(L));
     }
 
@@ -323,8 +323,8 @@ TEST(StoragePlanner, ProjectedVRAMMatchesEntrySum) {
 
     for (int i = 0; i < 3; ++i) {
         TransformerLayer L;
-        L.wq = make_tensor_stub(TensorKind::WQ, 512, 512, static_cast<uintptr_t>(0x1000 + i));
-        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 512, 512, static_cast<uintptr_t>(0x2000 + i));
+        L.wq = make_tensor_stub(TensorKind::WQ, 512, 512, 0x1000 + static_cast<uintptr_t>(i));
+        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 512, 512, 0x2000 + static_cast<uintptr_t>(i));
         m.layers_.push_back(std::move(L));
     }
 

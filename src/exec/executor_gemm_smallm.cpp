@@ -63,6 +63,7 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out,
             return false;
         if (h.entries.nvfp4 == nullptr || (h.entries.nvfp4->K % 64) != 0)
             return false;
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
         out = *h.entries.nvfp4;
         return true;
     }

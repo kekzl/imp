@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
     }
     const imp::Tokenizer& tok = *m->tokenizer();
 
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): single-threaded harness, the env picks the dump mode
     if (getenv("EOS")) {  // "@@EOS <eos_id> <eos_ids...>": the stop set a server would use (#2377)
         printf("@@EOS %d", tok.eos_id());
         for (int32_t id : tok.eos_ids())
@@ -63,6 +64,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): single-threaded harness, the env picks the dump mode
     if (getenv("CHAT")) {
         auto family = imp::ChatTemplate::detect_family(tok.chat_template_str());
         if (family == imp::ChatTemplateFamily::RAW)
@@ -84,6 +86,7 @@ int main(int argc, char** argv) {
 
     // PPL=1: the whole file as the token stream `imp-cli --perplexity` scores, same "TOK <i> <id>"
     // lines as diagnostics.dump_tokens. Mirrors tools/imp-cli/main.cpp: encode, then BOS if add_bos.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): single-threaded harness, the env picks the dump mode
     if (getenv("PPL")) {
         auto ids = tok.encode(all);
         if (tok.add_bos() && tok.bos_id() >= 0 && (ids.empty() || ids[0] != tok.bos_id()))

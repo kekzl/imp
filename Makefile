@@ -862,7 +862,7 @@ format: lint-image
 format-check: lint-image
 	@$(CLANG_FORMAT_RUN) --dry-run -Werror --style=file $(CLANG_FORMAT_FILES)
 
-# Full clang-tidy lane (#2210): every src/tools .cpp + the host side of every src/ .cu TU,
+# Full clang-tidy lane (#2210): every src/tools/tests .cpp + the host side of every src/, tests/ .cu TU,
 # parallel, via scripts/tidy_lane.sh. Fails on a clang error, a nonzero clang-tidy exit or a
 # WarningsAsErrors finding (.clang-tidy) over its pin in tools/tidy_baseline.toml; CI runs the
 # same script on changed files. Configures first so build/compile_commands.json exists, then

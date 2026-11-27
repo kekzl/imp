@@ -20,7 +20,7 @@ public:
 
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
-    auto&& handle(this Self&& self, TensorID id) {
+    auto&& handle(this Self& self, TensorID id) {
         // IMP_CHECK, not IMP_LOG_FATAL: the latter only logs (logging.h:56), so this used to
         // report "out of range" and then index out of range anyway. Abort rather than throw: this
         // is a precondition inside CUDA-graph capture regions (unwinding isn't a recovery), and

@@ -681,6 +681,7 @@ void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, Mo
         return Tensor(static_cast<char*>(t.data) + (i * row_bytes), t.qtype, 2, shape, true);
     };
     for (int i = 0; i < ctx.n; ++i) {
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (moe_routing.h)
         MoeRoutingResult rr = ctx.routing;
         const int64_t rs[1] = {ctx.top_k};
         rr.expert_indices = Tensor(static_cast<int32_t*>(ctx.routing.expert_indices.data) +

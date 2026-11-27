@@ -272,7 +272,7 @@ private:
     // Helpers
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
-    auto&& top(this Self&& self) {
+    auto&& top(this Self& self) {
         return self.stack_.back();
     }
 

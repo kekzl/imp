@@ -462,6 +462,7 @@ void QuantPipeline::nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cu
             auto replace_weight = [&](Tensor& w, QType& qt) {
                 auto it = wcache_->fp16.find(w.data);
                 if (it != wcache_->fp16.end() && qt == QType::MXFP4) {
+                    // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view
                     w = it->second;
                     qt = QType::F16;
                 }

@@ -62,7 +62,7 @@ TEST_F(RoutingMtpOwnersTest, MoeRoutingOwnedReleasesItsFourBuffersOnceAndAMoveLe
     EXPECT_EQ(a.expert_indices.data, nullptr) << "a moved-from owner must not keep a view";
     EXPECT_EQ(a.expert_offsets.data, nullptr);
     EXPECT_FALSE(a.indices_owned);
-    const MoeRoutingResult view = b;  // a sliced copy (executor_forward_moe_nvfp4_host.cu) is a view
+    const MoeRoutingResult view = b;  // NOLINT(cppcoreguidelines-slicing): a sliced copy is a view
     EXPECT_EQ(view.sorted_token_ids.data, at(2));
     EXPECT_TRUE(log().empty());
 

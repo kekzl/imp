@@ -79,6 +79,7 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
                         auto replace = [&](Tensor& w, QType& qt) {
                             auto it = wcache_->fp16.find(w.data);
                             if (it != wcache_->fp16.end() && qt == QType::MXFP4) {
+                                // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view
                                 w = it->second;
                                 qt = QType::F16;
                                 // The model tensor now points at EXECUTOR-owned cache memory

@@ -153,6 +153,7 @@ void guard_serving_phase(size_t bytes, RegionTag tag) { note_serving_allocation(
 
 // --- Region ---
 
+// NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved): field-wise steal, `o` is reset
 void Region::steal_(Region&& o) noexcept {
     owner_ = o.owner_;
     base_ = o.base_;

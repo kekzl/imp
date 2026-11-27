@@ -10,7 +10,7 @@ namespace imp {
 
 // Per-layer weights LayerOffloadManager stages through its slots. Plan and scan share this list.
 template <class Layer, class Fn>
-void for_each_offloadable_tensor(Layer& ly, Fn&& fn) {
+void for_each_offloadable_tensor(Layer& ly, const Fn& fn) {
     for (auto* t : {&ly.wq,
                     &ly.wk,
                     &ly.wv,

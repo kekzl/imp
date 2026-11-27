@@ -183,11 +183,10 @@ TEST(AwqCalibration, MaxAbsRoundTripsAndIsAbsentFromV2Files) {
 TEST(AwqCalibration, RejectsForeignAndTruncatedFiles) {
     const std::string path = temp_path("imp_calib_foreign.bin");
     {
-        FILE* f = std::fopen(path.c_str(), "wb");
-        ASSERT_NE(f, nullptr);
+        std::ofstream f(path, std::ios::binary);
+        ASSERT_TRUE(f.good());
         const char junk[] = "not a calibration file at all";
-        std::fwrite(junk, 1, sizeof(junk), f);
-        std::fclose(f);
+        f.write(junk, sizeof(junk));
     }
     CalibrationStats out;
     EXPECT_NE(read_calibration_stats(path, out), "");
@@ -316,6 +315,7 @@ TEST(AwqCalibration, VectorFoldRefusesWhatItCannotDo) {
 // stores -0.99609375, so the gain the kernel applies is 2^-8.
 constexpr float kWorstDelta = -0.99609375f;
 constexpr float kWorstGain = 0.00390625f;
+static_assert(1.0f + kWorstDelta == kWorstGain, "gain = 1 + stored delta, exact in FP32");
 
 // The identity the whole family rests on: (1 + g') == (1 + g)/s.
 TEST(AwqNormFold, UnitOffsetFoldDividesTheGain) {

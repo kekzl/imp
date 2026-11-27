@@ -215,7 +215,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 tmp.K = static_cast<int64_t>(static_cast<int>(hw->shape[1])) * 2;
                 return tmp;
             };
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             NvFP4QuantResult nv_g = nv_g_secondary ? NvFP4QuantResult(*nv_g_e) : from_handle(hwg);
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             NvFP4QuantResult nv_u = nv_u_secondary ? NvFP4QuantResult(*nv_u_e) : from_handle(hwu);
             gemv_nvfp4_gate_up_fused(nv_g, nv_u, static_cast<const half*>(no.data),
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
@@ -350,6 +352,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // is already a populated struct; primary-tier handle needs reconstruction.
             NvFP4QuantResult wd_nvfp4;
             if (wd_nvfp4_secondary) {
+                // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
                 wd_nvfp4 = *wd_nv_e;
             } else {
                 wd_nvfp4.packed_data = hwd->payload.nvfp4.data;

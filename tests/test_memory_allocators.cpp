@@ -318,7 +318,7 @@ TEST(BlockPool, RefcountBalancesWhenAnExceptionUnwindsMidSequence) {
                 if (i == fail_after)
                     throw std::runtime_error("cancelled mid-prefill");
             }
-        } catch (const std::exception&) {
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the unwind is the test
             // The unwind is the whole mechanism: no free_sequence() to forget.
         }
         EXPECT_EQ(pool.total_refs(), 0u) << "fail_after=" << fail_after;

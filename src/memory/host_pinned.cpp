@@ -237,6 +237,7 @@ void HostRegistration::reset() {
     bytes_ = 0;
 }
 
+// NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved): field-wise steal, `o` is reset
 void PinnedBuffer::steal_(PinnedBuffer&& o) noexcept {
     owner_ = o.owner_;
     host_ = o.host_;

@@ -71,7 +71,7 @@ public:
     const Array& as_array() const { return std::get<Array>(data_); }
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
-    auto&& as_object(this Self&& self) {
+    auto&& as_object(this Self& self) {
         return std::get<Object>(self.data_);
     }
 

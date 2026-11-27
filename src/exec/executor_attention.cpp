@@ -678,6 +678,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // primary-tier handle needs reconstruction.
         NvFP4QuantResult wo_nvfp4;
         if (wo_nvfp4_secondary) {
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             wo_nvfp4 = *wo_nv_e;
         } else {
             const WeightHandle& wo_h = registry_.handle(ly.wo_id);

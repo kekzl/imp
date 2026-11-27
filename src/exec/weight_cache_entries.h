@@ -71,6 +71,7 @@ struct NvFP4MoECacheEntry : NvFP4MoEQuantResult {
 
     NvFP4MoECacheEntry() { borrowed = true; }
     // Takes over a converter result (plain family) unless it is marked borrowed. Empties `r`.
+    // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved): POD view copied, then reset
     explicit NvFP4MoECacheEntry(NvFP4MoEQuantResult&& r) noexcept : NvFP4MoEQuantResult(r) {
         if (!r.borrowed) {
             const size_t ne = static_cast<size_t>(r.n_experts);
@@ -93,6 +94,7 @@ struct NvFP4MoECacheEntry : NvFP4MoEQuantResult {
         borrowed = true;
     }
     // Takes over a quantize_packed_experts_to_nvfp4 owner. Empties `r`.
+    // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved): owners moved, view reset
     explicit NvFP4MoECacheEntry(NvFP4MoEOwned&& r) noexcept
         : NvFP4MoECacheEntry(r, std::move(r.packed_owned), std::move(r.scales_owned),
                              std::move(r.tscales_owned)) {
@@ -170,6 +172,7 @@ struct MxFP4SfAtomCacheEntry : MxFP4SfAtomWeight {
 
     MxFP4SfAtomCacheEntry() = default;
     // Takes over the two scale buffers of unpack_mxfp4_gguf (plain family). Empties `w`.
+    // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved): POD view copied, then reset
     explicit MxFP4SfAtomCacheEntry(MxFP4SfAtomWeight&& w) noexcept : MxFP4SfAtomWeight(w) {
         sf_owned.adopt(w.scale_factors, w.sf_bytes, nullptr);
         linear_owned.adopt(w.linear_scales, static_cast<size_t>(w.N) * (w.K / 32), nullptr);
