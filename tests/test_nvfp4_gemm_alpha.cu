@@ -7,9 +7,9 @@
 
 #include "compute/gemm.h"
 #include "quant/mxfp4_sfatom.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm_tile.h"
@@ -118,19 +118,19 @@ TEST_F(Nvfp4GemmAlphaTest, AlphaIsActuallyApplied) {
     const float baseline_tensor_scale = qr.tensor_scale;
     ASSERT_GT(baseline_tensor_scale, 0.0f) << "quantize produced zero tensor_scale";
 
-    CutlassNvFP4Owned cw;
-    convert_nvfp4_to_cutlass(qr, cw, stream_);
+    NvFP4SfAtomOwned cw;
+    convert_nvfp4_to_sfatom(qr, cw, stream_);
     cudaStreamSynchronize(stream_);
 
     // Activation NVFP4 quantization (SfAtom dynamic-quant kernel).
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t act_sf_bytes = nvfp4_sfatom_size(M, K);
 
     void* d_act_data = nullptr;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf = nullptr;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
+    quantize_fp16_to_nvfp4_sfatom(d_x, d_act_data, d_act_sf, M, K, stream_);
 
     half* d_y_a = nullptr;
     cudaMalloc(&d_y_a, M * N * sizeof(half));
@@ -244,18 +244,18 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0Reproducer) {
     fprintf(stderr, "[MISTRAL-REPRO] auto-tensor_scale=%.6g (Modelopt-convention multiplier)\n",
             qr.tensor_scale);
 
-    CutlassNvFP4Owned cw;
-    convert_nvfp4_to_cutlass(qr, cw, stream_);
+    NvFP4SfAtomOwned cw;
+    convert_nvfp4_to_sfatom(qr, cw, stream_);
     cudaStreamSynchronize(stream_);
 
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t act_sf_bytes = nvfp4_sfatom_size(M, K);
 
     void* d_act_data = nullptr;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf = nullptr;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
+    quantize_fp16_to_nvfp4_sfatom(d_x, d_act_data, d_act_sf, M, K, stream_);
 
     half* d_y = nullptr;
     cudaMalloc(&d_y, M * N * sizeof(half));
@@ -481,8 +481,8 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0PrequantByteLayout) {
     qr_pq.K = K;
 
     // 5. Convert to SfAtom format (this is the same path Phase-0b registers)
-    CutlassNvFP4Owned cw;
-    convert_nvfp4_to_cutlass(qr_pq, cw, stream_);
+    NvFP4SfAtomOwned cw;
+    convert_nvfp4_to_sfatom(qr_pq, cw, stream_);
     cudaStreamSynchronize(stream_);
     fprintf(stderr, "[PREQ] cw.tensor_scale=%.6g  (used as alpha)\n", cw.tensor_scale);
 
@@ -497,12 +497,12 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0PrequantByteLayout) {
     cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
 
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t act_sf_bytes = nvfp4_sfatom_size(M, K);
     void* d_act_data = nullptr;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf = nullptr;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
+    quantize_fp16_to_nvfp4_sfatom(d_x, d_act_data, d_act_sf, M, K, stream_);
 
     half* d_y = nullptr;
     cudaMalloc(&d_y, M * N * sizeof(half));

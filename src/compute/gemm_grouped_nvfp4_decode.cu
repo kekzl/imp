@@ -7,7 +7,7 @@
 
 #include "compute/gemm_grouped_nvfp4_decode.h"
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 
 #include "core/logging.h"
 #include "quant/fp8_utils.cuh"
@@ -272,7 +272,7 @@ __device__ __forceinline__ uint8_t pack_fp4(float lo, float hi) {
 
 __device__ __forceinline__ float rnd16(float v) { return __half2float(__float2half_rn(v)); }
 
-// fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel's activations, from fp16-rounded gate / up.
+// fused_act_quantize_fp16_nvfp4_sfatom_moe_kernel's activations, from fp16-rounded gate / up.
 template <MoeDecodeEpi EPI>
 __device__ __forceinline__ float act(float g, float u) {
     if constexpr (EPI == MoeDecodeEpi::kSwiglu) {

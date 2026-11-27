@@ -232,7 +232,7 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     if (s_warned.first()) {
         IMP_LOG_WARN(
             "gemm_nvfp4: using slow dequant-to-FP16 fallback for M=%lld "
-            "(CUTLASS/cuBLASLt NVFP4 unavailable). "
+            "(NVFP4 tile GEMM/cuBLASLt unavailable). "
             "Allocating %.1f MiB dequant buffer for [%lld, %lld] weight matrix",
             (long long)M, (double)((size_t)(N * K) * sizeof(half)) / (1024.0 * 1024.0), (long long)N,
             (long long)K);

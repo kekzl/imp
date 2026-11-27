@@ -18,7 +18,8 @@ at its measured CCN, keyed `path::signature` like function_size_thresholds.toml.
   NOTE  a baseline function that shrank or is gone (re-pin with --update)
   FAIL  with --base-config: a pin added or raised vs the base baseline (pins only shrink;
         a key moved to another path keeps its pin if the signature is unchanged, a changed
-        signature keeps it for the same function name in the same file)
+        signature keeps it for the same function name in the same file, a renamed function
+        keeps it when only the last name component differs)
 
 Exit codes: 0 pass, 1 violation, 2 malformed config.
 
@@ -301,21 +302,37 @@ def function_name(sig):
     return ""
 
 
+def name_hole(sig):
+    """sig with the last component of function_name(sig) cut out: equal for a pure function rename."""
+    end = sig.rfind(")")
+    depth = 0
+    for i in range(end, -1, -1):
+        depth += sig[i] == ")"
+        depth -= sig[i] == "("
+        if depth == 0:
+            m = re.search(r"([A-Za-z_~][A-Za-z0-9_<>~]*)\s*$", sig[:i])
+            return sig[:m.start(1)] + "@" + sig[i:] if m else sig
+    return sig
+
+
 def pin_ratchet(base, head):
     """[(key, base_pin, head_pin)] for pins added or raised vs the base baseline.
 
     A key absent from the base passes as a move (a base key gone from head with the same signature,
-    text after the first '::') or as a signature change (a base key gone from head in the same file with
-    the same function name), either with a pin >= the new one.
+    text after the first '::'), as a signature change (a base key gone from head in the same file with
+    the same function name) or as a function rename (a base key gone from head, any file, whose
+    signature differs only in the last name component), each with a pin >= the new one.
     """
     moved_from = {}
     renamed_from = {}
+    retitled_from = {}
     for k, p in base.items():
         if k not in head:
             path, _, sig = k.partition("::")
             moved_from[sig] = max(moved_from.get(sig, 0), p)
             key = (path, function_name(sig))
             renamed_from[key] = max(renamed_from.get(key, 0), p)
+            retitled_from[name_hole(sig)] = max(retitled_from.get(name_hole(sig), 0), p)
     out = []
     for k, p in sorted(head.items()):
         if k in base:
@@ -323,7 +340,8 @@ def pin_ratchet(base, head):
                 out.append((k, base[k], p))
             continue
         path, _, sig = k.partition("::")
-        if p > max(moved_from.get(sig, 0), renamed_from.get((path, function_name(sig)), 0)):
+        if p > max(moved_from.get(sig, 0), renamed_from.get((path, function_name(sig)), 0),
+                   retitled_from.get(name_hole(sig), 0)):
             out.append((k, None, p))
     return out
 
@@ -418,6 +436,14 @@ def selftest():
         ("kernel name behind __launch_bounds__ is the name", {"a::void __launch_bounds__(N * 2, 1) k(int a)": 49},
          {"a::void __launch_bounds__(N * 2, 1) k()": 49}, 0),
         ("same name in another file is a new pin", {"a::int f(int x)": 30}, {"b::int f()": 28}, 1),
+        ("renamed function, moved file, same pin passes", {"a::bool C::old_(int l)": 71},
+         {"b::bool C::new_(int l)": 71}, 0),
+        ("renamed function with a raised pin fails", {"a::bool C::old_(int l)": 71},
+         {"a::bool C::new_(int l)": 72}, 1),
+        ("renamed function with other parameters is a new pin", {"a::bool C::old_(int l)": 71},
+         {"a::bool C::new_(int l, int m)": 71}, 1),
+        ("renamed function in another class is a new pin", {"a::bool C::old_(int l)": 71},
+         {"a::bool D::new_(int l)": 71}, 1),
     ]
     for name, base, head, want in ratchet_cases:
         got = len(pin_ratchet(base, head))

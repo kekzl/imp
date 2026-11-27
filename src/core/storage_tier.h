@@ -8,10 +8,11 @@ enum class StorageTier : uint8_t {
     Undefined = 0,  // handle not yet populated — FATAL if dispatched
     FP32 = 1,
     FP16 = 2,
-    FP8 = 3,            // E4M3 with per-tensor scale
-    NVFP4 = 4,          // two-level micro-scale, native decode-GEMV path
-    CUTLASS_NVFP4 = 5,  // SfAtom NVFP4 on the own tile GEMM (name historical, CUTLASS gone #2938)
-    MXFP4 = 6,          // block-scaled MXFP4 weights: gemv_mxfp4_kpar decode, gemm_mxfp4_tile prefill
+    FP8 = 3,  // E4M3 with per-tensor scale
+    // Both NVFP4 tiers serve SafeTensors and GGUF-requantized weights; they differ in the scale layout.
+    NVFP4_LINEAR = 4,  // row-major [N, K/16] micro-scales + tensor scale: decode GEMV
+    NVFP4_SFATOM = 5,  // SfAtom block-scale layout: own tile GEMM (M>1), W4A4 M=1
+    MXFP4 = 6,         // block-scaled MXFP4 weights: gemv_mxfp4_kpar decode, gemm_mxfp4_tile prefill
 };
 
 using TierMask = uint32_t;

@@ -109,7 +109,7 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
 // Shared eval-side LM-head driver (perplexity + spec-decode greedy
 // verify): applies the tier-aware LM head to hidden_[0..n_rows) in batches
 // of max_logit_tokens_, handing each batch's logits_ view (softcap applied) to `consume`.
-void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
+void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_w4a4_head,
                                             const std::function<void(const Tensor&, int, int)>& consume) {
     if (!initialized_ || n_rows <= 0) {
         return;
@@ -134,20 +134,20 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
         int csz = (chunk_len - c < mb) ? (chunk_len - c) : mb;
         Tensor hc = hidden_all.slice(c, c + csz);          // [csz, d]
         Tensor lg = view_tokens(logits_, csz);             // [csz, V]
-        bool lm_cutlass_done = false;
-        if (allow_cutlass && lm_is_nvfp4 && lm_head_cutlass_ready_ &&
-            qscratch_.cutlass_act_data.get() != nullptr && qscratch_.cutlass_act_sf.get() != nullptr) {
+        bool lm_sfatom_done = false;
+        if (allow_w4a4_head && lm_is_nvfp4 && lm_head_sfatom_ready_ &&
+            qscratch_.tile_act_data.get() != nullptr && qscratch_.tile_act_sf.get() != nullptr) {
             // Same NVFP4-activation tensor-core path as batched decode, letting the
             // perplexity harness measure its quality directly (the per-row GEMV below
             // keeps FP16 activations; toggling gemm.nvfp4_lm_head_cutlass gives the
             // PPL trade). NVFP4 act quant is per-row, so M (csz) affects only speed.
             Tensor noc = view_tokens(norm_out_, csz);
             rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
-            quantize_fp16_to_nvfp4_cutlass(noc.data, qscratch_.cutlass_act_data.get(),
-                                           qscratch_.cutlass_act_sf.get(), csz, cfg.d_model, stream);
-            lm_cutlass_done = lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream);
+            quantize_fp16_to_nvfp4_sfatom(noc.data, qscratch_.tile_act_data.get(),
+                                          qscratch_.tile_act_sf.get(), csz, cfg.d_model, stream);
+            lm_sfatom_done = lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream);
         }
-        if (lm_cutlass_done) {
+        if (lm_sfatom_done) {
             // logits already written
         } else if (lm_head_fp8_(hc, lg, stream)) {
         } else if (lm_is_nvfp4) {
@@ -222,12 +222,12 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
         return;
     }
     const int V = model_->config().vocab_size;
-    // Lazy-builds the CUTLASS LM head: engine init only builds it when serving
+    // Lazy-builds the SfAtom LM head: engine init only builds it when serving
     // (max_batch_size>1), but the harness must measure the batched-decode
     // quality trade from a batch=1 CLI run too. No-op if the flag is off or the LM head isn't in the NVFP4
     // decode cache.
-    build_lm_head_cutlass_(stream);
-    for_each_lm_head_batch_(chunk_len, stream, /*allow_cutlass=*/true,
+    build_lm_head_sfatom_(stream);
+    for_each_lm_head_batch_(chunk_len, stream, /*allow_w4a4_head=*/true,
                             [&](const Tensor& lg, int row0, int csz) {
                                 perplexity_nll_kernel<<<csz, 256, 0, stream>>>(
                                     static_cast<const float*>(lg.data), d_tokens, chunk_start + row0,
@@ -475,7 +475,7 @@ void GraphExecutor::draw_verify_row_runs_(const Tensor& lg, int row0, int csz, i
 
 void GraphExecutor::greedy_argmax_all(const GreedyArgmaxArgs& a) {
     const auto& [n_rows, d_out, stream, d_hist, n_hist, d_draft, rep_pen, freq_pen, pres_pen, d_topm, topm,
-                 d_banned, n_banned, allow_cutlass, d_banned_alt, n_banned_alt, h_row_alt, h_row_hist,
+                 d_banned, n_banned, allow_w4a4_head, d_banned_alt, n_banned_alt, h_row_alt, h_row_hist,
                  h_row_hist_n, h_row_pens] = a;
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
@@ -494,11 +494,10 @@ void GraphExecutor::greedy_argmax_all(const GreedyArgmaxArgs& a) {
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    // allow_cutlass=false: verify logits decide (and emit) the accepted batch=1
+    // allow_w4a4_head=false: verify logits decide (and emit) the accepted batch=1
     // tokens — keep them on the FP16-activation GEMV path bit-identical to the
     // n==1 decode step, independent of gemm.nvfp4_lm_head_cutlass.
-    for_each_lm_head_batch_(n_rows, stream, allow_cutlass,
-                            [&](const Tensor& lg, int row0, int csz) {
+    for_each_lm_head_batch_(n_rows, stream, allow_w4a4_head, [&](const Tensor& lg, int row0, int csz) {
         if (penalties) {
             dim3 pgrid((V + 255) / 256, csz);
             verify_penalties_kernel<<<pgrid, 256, 0, stream>>>(static_cast<float*>(lg.data), row0, V,
@@ -567,9 +566,9 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
     const float* s8 = nullptr;
     const DraftHeadRoute route = draft_head_route(draft_nvfp4 != nullptr &&
                                                       draft_nvfp4->packed_data != nullptr,
-                                                  lm_head_fp8_view(w8, s8), lm_head_cutlass_ready_,
-                                                  qscratch_.cutlass_act_data.get() != nullptr &&
-                                                      qscratch_.cutlass_act_sf.get() != nullptr);
+                                                  lm_head_fp8_view(w8, s8), lm_head_sfatom_ready_,
+                                                  qscratch_.tile_act_data.get() != nullptr &&
+                                                      qscratch_.tile_act_sf.get() != nullptr);
     if (route == DraftHeadRoute::None)
         return false;
     const auto& cfg = model_->config();
@@ -595,8 +594,8 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
                                         V, cfg.d_model, csz, stream))
                 return false;
         } else {
-            quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data.get(),
-                                           qscratch_.cutlass_act_sf.get(), csz, cfg.d_model, stream);
+            quantize_fp16_to_nvfp4_sfatom(rows, qscratch_.tile_act_data.get(), qscratch_.tile_act_sf.get(),
+                                          csz, cfg.d_model, stream);
             if (!lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream))
                 return false;
         }
@@ -611,8 +610,8 @@ void GraphExecutor::project_logits_all(int n_rows, float* d_out, cudaStream_t st
     if (!initialized_ || n_rows <= 0 || d_out == nullptr)
         return;
     const size_t V = static_cast<size_t>(model_->config().vocab_size);
-    // allow_cutlass=false: same batch=1 verify-path reasoning as greedy_argmax_all.
-    for_each_lm_head_batch_(n_rows, stream, /*allow_cutlass=*/false,
+    // allow_w4a4_head=false: same batch=1 verify-path reasoning as greedy_argmax_all.
+    for_each_lm_head_batch_(n_rows, stream, /*allow_w4a4_head=*/false,
                             [&](const Tensor& lg, int row0, int csz) {
                                 IMP_CUDA_CHECK_LOG(
                                     cudaMemcpyAsync(d_out + (static_cast<size_t>(row0) * V), lg.data,

@@ -35,10 +35,11 @@ TEST(LmHeadRoute, DecisionTable) {
     using R = LmHeadRoute;
     using T = StorageTier;
     const Row rows[] = {
-        {"NVFP4 tier", facts(T::NVFP4), R::Nvfp4, R::Nvfp4, R::Nvfp4},
+        {"NVFP4 tier", facts(T::NVFP4_LINEAR), R::Nvfp4, R::Nvfp4, R::Nvfp4},
         {"NVFP4 secondary cache of a GGUF head", facts(T::FP16, false, true, false, true), R::Nvfp4, R::Nvfp4,
          R::Nvfp4},
-        {"FP8 cache beats the NVFP4 cache", facts(T::NVFP4, true, true), R::Fp8Cache, R::Handle, R::Handle},
+        {"FP8 cache beats the NVFP4 cache", facts(T::NVFP4_LINEAR, true, true), R::Fp8Cache, R::Handle,
+         R::Handle},
         {"FP8 cache of a dp4a head", facts(T::Undefined, true, false, false, true), R::Fp8Cache, R::Dp4a,
          R::Handle},
         {"MXFP4 with linear scales", facts(T::MXFP4, false, false, true), R::Mxfp4Gemv, R::Handle, R::Handle},
@@ -59,10 +60,10 @@ TEST(LmHeadRoute, DecisionTable) {
 }
 
 TEST(LmHeadRoute, NvFp4MeansNotFp8Cached) {
-    EXPECT_TRUE(imp::lm_head_is_nvfp4(facts(StorageTier::NVFP4)));
+    EXPECT_TRUE(imp::lm_head_is_nvfp4(facts(StorageTier::NVFP4_LINEAR)));
     EXPECT_TRUE(imp::lm_head_is_nvfp4(facts(StorageTier::Undefined, false, true)));
-    EXPECT_FALSE(imp::lm_head_is_nvfp4(facts(StorageTier::NVFP4, true)));
-    EXPECT_FALSE(imp::lm_head_is_nvfp4(facts(StorageTier::CUTLASS_NVFP4)));
+    EXPECT_FALSE(imp::lm_head_is_nvfp4(facts(StorageTier::NVFP4_LINEAR, true)));
+    EXPECT_FALSE(imp::lm_head_is_nvfp4(facts(StorageTier::NVFP4_SFATOM)));
 }
 
 TEST(LmHeadRoute, DraftHead) {

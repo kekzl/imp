@@ -1,6 +1,6 @@
 #include "model/host_expert_fit.h"
 
-#include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size
+#include "compute/nvfp4_sfatom_quant.h"  // nvfp4_sfatom_size
 #include "memory/weight_snapshot.h"
 #include "model/model.h"
 #include "quant/dequant_gpu.h"
@@ -29,7 +29,7 @@ size_t layer_nvfp4_expert_sf_bytes(const TransformerLayer& L) {
             continue;
         const int n = static_cast<int>((*vt)[0].shape[0]);
         const int k = static_cast<int>((*vt)[0].shape[1] * 2);  // wire shape stores K/2 (e2m1 pairs)
-        const size_t group = vt->size() * cutlass_nvfp4_sf_size(n, k);
+        const size_t group = vt->size() * nvfp4_sfatom_size(n, k);
         bytes += (group + kSfAlign - 1) / kSfAlign * kSfAlign;
     }
     return bytes;

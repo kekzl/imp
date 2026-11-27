@@ -25,9 +25,9 @@ int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
             return n * 2;
         case StorageTier::FP8:
             return n + 4;  // packed bytes + per-tensor scale
-        case StorageTier::NVFP4:
+        case StorageTier::NVFP4_LINEAR:
             return (n / 2) + (n / 16);  // packed FP4 + micro-scales
-        case StorageTier::CUTLASS_NVFP4:
+        case StorageTier::NVFP4_SFATOM:
             return (n / 2) + (n / 16);
         case StorageTier::MXFP4:
             return (n / 2) + (n / 32);
@@ -39,14 +39,14 @@ int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
 
 // The plan must budget the INCREMENTAL cost of reaching a tier, not its full footprint.
 // A native-NVFP4 source already holds the packed nibbles + micro-scales on device (Phase
-// 0b registers zero-copy); only the Phase 3b CUTLASS SfAtom repack (~n/16) allocates.
+// 0b registers zero-copy); only the Phase 3b SfAtom repack (~n/16) allocates.
 // Pricing the full tier bytes projected phantom demand on native checkpoints, making a
 // real insufficiency indistinguishable from the normal case (#1765).
 int64_t incremental_bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier, QType source) {
     if (source == QType::NVFP4) {
-        if (tier == StorageTier::NVFP4)
+        if (tier == StorageTier::NVFP4_LINEAR)
             return 0;  // decode cache borrows the resident source storage
-        if (tier == StorageTier::CUTLASS_NVFP4)
+        if (tier == StorageTier::NVFP4_SFATOM)
             return rows * cols / 16;  // SfAtom sidecar; nibbles stay shared
     }
     // An F16/F32-source tensor at the FP16 tier is the resident upload itself: Phase 1 only
@@ -76,22 +76,22 @@ StorageTier pick_initial_tier(TensorKind kind, const KindCapabilities& cap, cons
                                   kind == TensorKind::EXPERT_UP || kind == TensorKind::EXPERT_DOWN);
         if (is_attn_proj && mask_contains(cap.supported, StorageTier::FP8))
             return StorageTier::FP8;
-        if (is_ffn_proj && mask_contains(cap.supported, StorageTier::NVFP4))
-            return StorageTier::NVFP4;
+        if (is_ffn_proj && mask_contains(cap.supported, StorageTier::NVFP4_LINEAR))
+            return StorageTier::NVFP4_LINEAR;
     }
 
     // prefer_nvfp4_decode: pick NVFP4 only if the refined capabilities still list it. For
     // Q4_K sources effective_capabilities strips NVFP4, so the hint falls through to
     // required_floor (FP16). Structural fix for the Q4_K coverage-gap bug.
-    if (hints.prefer_nvfp4_decode && mask_contains(cap.supported, StorageTier::NVFP4))
-        return StorageTier::NVFP4;
+    if (hints.prefer_nvfp4_decode && mask_contains(cap.supported, StorageTier::NVFP4_LINEAR))
+        return StorageTier::NVFP4_LINEAR;
 
     return cap.required_floor;
 }
 
 // Return the next-smaller (more compressed) supported tier after current, never below
 // floor; returns current if none exists. StorageTier order: FP32=1, FP16=2, FP8=3,
-// NVFP4=4, CUTLASS_NVFP4=5, MXFP4=6 - higher integer = more compressed, so "downgrade"
+// NVFP4_LINEAR=4, NVFP4_SFATOM=5, MXFP4=6 - higher integer = more compressed, so "downgrade"
 // means increasing the enum value.
 StorageTier downgrade_one(StorageTier current, StorageTier floor, const KindCapabilities& cap) {
     for (int s = std::to_underlying(current) + 1; s <= std::to_underlying(StorageTier::MXFP4); ++s) {

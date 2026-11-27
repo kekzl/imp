@@ -61,7 +61,7 @@ ACQUIRE = ("cudaMallocAsync", "cudaMallocManaged", "cudaMallocPitch", "cudaMallo
 RELEASE = ("cudaFreeAsync", "cudaFreeHost", "cudaFree", "cudaHostUnregister")
 
 # First argument of the call, address-of and any cast peeled off. `\s` spans newlines: four
-# sites in executor_forward_moe_cutlass.cu put the argument on the next line, and a line-based
+# sites in executor_forward_moe_grouped.cu put the argument on the next line, and a line-based
 # match silently dropped them.
 CALL = re.compile(
     r"\b(" + "|".join(ACQUIRE + RELEASE) + r")\s*\(\s*"

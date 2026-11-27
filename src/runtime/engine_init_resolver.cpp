@@ -392,13 +392,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // Weights are NOT in VRAM yet at resolver time (still host/mmap),
             // so cudaMemGetInfo reports the near-empty card; subtract the
             // weight footprint that WILL be uploaded. approx_weight_bytes
-            // under-counts NVFP4 decode/CUTLASS-SF caches; kKvHeadroomFrac
+            // under-counts NVFP4 decode/SfAtom caches; kKvHeadroomFrac
             // (0.6) reserves for those plus workspaces, and the downstream
             // KV clamp is the hard backstop.
             size_t upload_bytes = approx_weight_bytes;
             // Native-NVFP4 models: the shards on disk when smaller (as the max_seq_len resolver; Flint 26.8
             // GB estimated vs 21.2 GiB uploaded left 1.0 GB and 2 slots), plus the mandatory decode caches
-            // (CUTLASS SfAtom slab + nvfp4_moe) built before the KV pool.
+            // (SfAtom slab + nvfp4_moe) built before the KV pool.
             if (mcfg.is_nvfp4_prequant)
                 upload_bytes = nvfp4_weight_reserve_bytes(
                                    approx_weight_bytes,
@@ -596,7 +596,7 @@ void Engine::init_resolve_fp8_prefill_() {
     const bool no_fp8_prefill = (runtime_config_.attention.fp8_prefill == "never");
     const bool is_nvfp4_native = model_->config().is_nvfp4_prequant;
     if (is_nvfp4_native && !config_.use_fp8_prefill) {
-        IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)");
+        IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (NVFP4 tile GEMM used instead)");
     } else if (!config_.use_fp8_prefill && !no_fp8_prefill) {
         int sm_major = 0;
         int sm_minor = 0;
@@ -719,7 +719,7 @@ void Engine::init_resolve_quant_flags_() {
         }
     }
 
-    // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS_NVFP4-tier paths, and CUDA graphs all
+    // Gemma 4: FP8 prefill, NVFP4 prefill, NVFP4_SFATOM-tier paths, and CUDA graphs all
     // have incompatibilities with the per-layer head_dim + split MoE tensor
     // layout; force plain FP16 until proper kernels land. GDN models can't
     // use FP8 prefill either: recurrent state accumulates error per token,
@@ -936,7 +936,7 @@ void Engine::init_compute_max_seq_len_() {
         // vram.kv_fraction.
         float kv_fraction = std::clamp(config_.kv_fraction.value_or(1.0f), 0.05f, 1.0f);
         // Native-NVFP4 models: weights plus the mandatory decode caches
-        // (CUTLASS SfAtom slab + nvfp4_moe, reserved right after upload) will
+        // (SfAtom slab + nvfp4_moe, reserved right after upload) will
         // consume most of the card; subtract them so the auto context
         // reflects the KV room that actually remains. GGUF models keep the
         // raw-free overshoot: init_kv_cache clamps an auto value to the built pool.

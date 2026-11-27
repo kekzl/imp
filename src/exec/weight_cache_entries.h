@@ -7,18 +7,18 @@
 // The ownership flags of the base structs (borrowed, borrowed_data) always
 // read "not mine" inside an entry, so a sliced copy of the base is a view
 // and the src/quant free functions release nothing when handed one. NvFP4CacheEntry and
-// CutlassNvFP4CacheEntry are the producer owners (quant/nvfp4_owned.h, compute/cutlass_nvfp4_owned.h)
+// NvFP4SfAtomCacheEntry are the producer owners (quant/nvfp4_owned.h, compute/nvfp4_sfatom_owned.h)
 // that can also hold a view.
 
 #include <cstddef>
 #include <utility>
 
-#include "compute/cutlass_nvfp4_owned.h"  // CutlassNvFP4Owned
-#include "compute/gemm_cutlass_sm120.h"   // CutlassNvFP4Weight
+#include "compute/nvfp4_sfatom_owned.h"  // NvFP4SfAtomOwned
+#include "compute/nvfp4_sfatom_quant.h"  // NvFP4SfAtomWeight
 #include "core/tensor.h"
 #include "memory/device_owned.h"
-#include "quant/cutlass_mxfp4_weight.h"  // CutlassMxFP4Weight
-#include "quant/mxfp8_sfatom.h"          // CutlassMxFP8Weight
+#include "quant/mxfp4_sfatom_weight.h"  // MxFP4SfAtomWeight
+#include "quant/mxfp8_sfatom.h"         // MxFP8SfAtomWeight
 #include "quant/nvfp4_owned.h"           // NvFP4Owned, NvFP4MoEOwned
 #include "quant/nvfp4_quant.h"           // NvFP4QuantResult, NvFP4MoEQuantResult
 
@@ -125,36 +125,36 @@ private:
 
 // SfAtom scale factors of an NVFP4 weight. `data` is always a view (an nvfp4 entry's packed
 // data or the model's). `sf_owned` empty: scale_factors is a slab slice or null (G3 SfAtom-less).
-struct CutlassNvFP4CacheEntry : CutlassNvFP4Owned {
-    CutlassNvFP4CacheEntry() = default;
+struct NvFP4SfAtomCacheEntry : NvFP4SfAtomOwned {
+    NvFP4SfAtomCacheEntry() = default;
     // A view: a slab slice, another entry's SfAtom or none (G3 SfAtom-less).
-    explicit CutlassNvFP4CacheEntry(const CutlassNvFP4Weight& view) noexcept {
-        CutlassNvFP4Weight::operator=(view);
+    explicit NvFP4SfAtomCacheEntry(const NvFP4SfAtomWeight& view) noexcept {
+        NvFP4SfAtomWeight::operator=(view);
     }
-    // Takes over a convert_nvfp4_to_cutlass owner (plain family). Empties `w`.
-    explicit CutlassNvFP4CacheEntry(CutlassNvFP4Owned&& w) noexcept : CutlassNvFP4Owned(std::move(w)) {}
-    CutlassNvFP4CacheEntry(const CutlassNvFP4Owned&) =
+    // Takes over a convert_nvfp4_to_sfatom owner (plain family). Empties `w`.
+    explicit NvFP4SfAtomCacheEntry(NvFP4SfAtomOwned&& w) noexcept : NvFP4SfAtomOwned(std::move(w)) {}
+    NvFP4SfAtomCacheEntry(const NvFP4SfAtomOwned&) =
         delete;  // an owner passed without std::move would become a view
 };
 
 // MXFP8 prefill copy. `data_owned` empty: data is rows of an FP8 row-scale sidecar
 // (borrowed_data stays the dispatch's route flag). `sf_owned` also holds a row view's col_scale.
-struct CutlassMxFP8CacheEntry : CutlassMxFP8Weight {
+struct MxFP8SfAtomCacheEntry : MxFP8SfAtomWeight {
     DeviceOwned<void> data_owned;
     DeviceOwned<void> sf_owned;
 
-    CutlassMxFP8CacheEntry() = default;
-    CutlassMxFP8CacheEntry(const CutlassMxFP8Weight& view, DeviceOwned<void>&& data_buf,
-                           DeviceOwned<void>&& sf_buf) noexcept
-        : CutlassMxFP8Weight(view), data_owned(std::move(data_buf)), sf_owned(std::move(sf_buf)) {}
+    MxFP8SfAtomCacheEntry() = default;
+    MxFP8SfAtomCacheEntry(const MxFP8SfAtomWeight& view, DeviceOwned<void>&& data_buf,
+                          DeviceOwned<void>&& sf_buf) noexcept
+        : MxFP8SfAtomWeight(view), data_owned(std::move(data_buf)), sf_owned(std::move(sf_buf)) {}
 
-    CutlassMxFP8CacheEntry(CutlassMxFP8CacheEntry&& o) noexcept
-        : CutlassMxFP8Weight(detail::take_view<CutlassMxFP8Weight>(o)),
+    MxFP8SfAtomCacheEntry(MxFP8SfAtomCacheEntry&& o) noexcept
+        : MxFP8SfAtomWeight(detail::take_view<MxFP8SfAtomWeight>(o)),
           data_owned(std::move(o.data_owned)),
           sf_owned(std::move(o.sf_owned)) {}
-    CutlassMxFP8CacheEntry& operator=(CutlassMxFP8CacheEntry&& o) noexcept {
+    MxFP8SfAtomCacheEntry& operator=(MxFP8SfAtomCacheEntry&& o) noexcept {
         if (this != &o) {
-            CutlassMxFP8Weight::operator=(detail::take_view<CutlassMxFP8Weight>(o));
+            MxFP8SfAtomWeight::operator=(detail::take_view<MxFP8SfAtomWeight>(o));
             data_owned = std::move(o.data_owned);
             sf_owned = std::move(o.sf_owned);
         }
@@ -164,25 +164,25 @@ struct CutlassMxFP8CacheEntry : CutlassMxFP8Weight {
 
 // MXFP4 weight. `data` is always a view: unpack_mxfp4_gguf compacts the packed nibbles in place
 // in the model's own buffer (native GGUF). Both scale layouts are the entry's.
-struct CutlassMxFP4CacheEntry : CutlassMxFP4Weight {
+struct MxFP4SfAtomCacheEntry : MxFP4SfAtomWeight {
     DeviceOwned<void> sf_owned;
     DeviceOwned<void> linear_owned;
 
-    CutlassMxFP4CacheEntry() = default;
+    MxFP4SfAtomCacheEntry() = default;
     // Takes over the two scale buffers of unpack_mxfp4_gguf (plain family). Empties `w`.
-    explicit CutlassMxFP4CacheEntry(CutlassMxFP4Weight&& w) noexcept : CutlassMxFP4Weight(w) {
+    explicit MxFP4SfAtomCacheEntry(MxFP4SfAtomWeight&& w) noexcept : MxFP4SfAtomWeight(w) {
         sf_owned.adopt(w.scale_factors, w.sf_bytes, nullptr);
         linear_owned.adopt(w.linear_scales, static_cast<size_t>(w.N) * (w.K / 32), nullptr);
-        w = CutlassMxFP4Weight{};
+        w = MxFP4SfAtomWeight{};
     }
 
-    CutlassMxFP4CacheEntry(CutlassMxFP4CacheEntry&& o) noexcept
-        : CutlassMxFP4Weight(detail::take_view<CutlassMxFP4Weight>(o)),
+    MxFP4SfAtomCacheEntry(MxFP4SfAtomCacheEntry&& o) noexcept
+        : MxFP4SfAtomWeight(detail::take_view<MxFP4SfAtomWeight>(o)),
           sf_owned(std::move(o.sf_owned)),
           linear_owned(std::move(o.linear_owned)) {}
-    CutlassMxFP4CacheEntry& operator=(CutlassMxFP4CacheEntry&& o) noexcept {
+    MxFP4SfAtomCacheEntry& operator=(MxFP4SfAtomCacheEntry&& o) noexcept {
         if (this != &o) {
-            CutlassMxFP4Weight::operator=(detail::take_view<CutlassMxFP4Weight>(o));
+            MxFP4SfAtomWeight::operator=(detail::take_view<MxFP4SfAtomWeight>(o));
             sf_owned = std::move(o.sf_owned);
             linear_owned = std::move(o.linear_owned);
         }

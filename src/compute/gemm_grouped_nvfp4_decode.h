@@ -63,6 +63,6 @@ inline size_t gemm_grouped_nvfp4_decode_m16_sf(int r, int kg, int N) {
 void gemm_grouped_nvfp4_decode_prewarm();
 
 // The act epilogues' scale clipping flag (absmax > 2688): gemm_grouped_nvfp4_decode_scale_clipped(),
-// declared in gemm_cutlass_sm120.h next to nvfp4_report_scale_clipping, which reports it.
+// declared in nvfp4_sfatom_quant.h next to nvfp4_report_scale_clipping, which reports it.
 
 }  // namespace imp

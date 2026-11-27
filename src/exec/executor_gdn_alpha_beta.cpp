@@ -114,13 +114,13 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
         return false;
     const WeightHandle& h = registry_.handle(id);
     const StorageTier decode = (h.decode_tier == StorageTier::Undefined) ? h.primary_tier : h.decode_tier;
-    if (decode == StorageTier::NVFP4) {
+    if (decode == StorageTier::NVFP4_LINEAR) {
         if (h.entries.nvfp4 == nullptr)
             return false;
         out = *h.entries.nvfp4;
         return true;
     }
-    if (decode == StorageTier::CUTLASS_NVFP4 && h.source_data && h.source_scales) {
+    if (decode == StorageTier::NVFP4_SFATOM && h.source_data && h.source_scales) {
         out.packed_data = const_cast<void*>(h.source_data);
         out.micro_scales = const_cast<void*>(h.source_scales);
         out.tensor_scale = h.source_tensor_scale;
@@ -348,7 +348,7 @@ bool GraphExecutor::fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const {
     out.scale = e->host_scale;
     out.row_scales = e->d_row_scales;
     out.N = h.shape[0];
-    out.K = (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1];
+    out.K = (h.primary_tier == StorageTier::NVFP4_SFATOM) ? h.shape[1] * 2 : h.shape[1];
     return true;
 }
 
@@ -474,7 +474,7 @@ GemmContext GraphExecutor::gdn_q8_reuse_ctx_(int layer, const Tensor& no, const 
     auto raw_q8 = [&](TensorID id) {
         return id >= 0 && id < static_cast<TensorID>(registry_.size()) &&
                registry_.handle(id).source_qtype == QType::Q8_0 &&
-               !prefill_routes_cutlass_nvfp4_(id, n, ctx.mode);
+               !prefill_routes_nvfp4_sfatom_(id, n, ctx.mode);
     };
     if (n < 2 || n > 32 || !raw_q8(ly.gdn_gate_id) || !raw_q8(ly.gdn_alpha_id) || !raw_q8(ly.gdn_beta_id))
         return ctx;

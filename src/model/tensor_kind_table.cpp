@@ -9,11 +9,12 @@ namespace imp {
 
 namespace {
 
-constexpr TierMask ALL_QUANT = mask(StorageTier::FP16) | mask(StorageTier::FP8) | mask(StorageTier::NVFP4) |
-                               mask(StorageTier::CUTLASS_NVFP4) | mask(StorageTier::MXFP4);
+constexpr TierMask ALL_QUANT = mask(StorageTier::FP16) | mask(StorageTier::FP8) |
+                               mask(StorageTier::NVFP4_LINEAR) | mask(StorageTier::NVFP4_SFATOM) |
+                               mask(StorageTier::MXFP4);
 
-constexpr TierMask NO_MXFP4 = mask(StorageTier::FP16) | mask(StorageTier::FP8) | mask(StorageTier::NVFP4) |
-                              mask(StorageTier::CUTLASS_NVFP4);
+constexpr TierMask NO_MXFP4 = mask(StorageTier::FP16) | mask(StorageTier::FP8) |
+                              mask(StorageTier::NVFP4_LINEAR) | mask(StorageTier::NVFP4_SFATOM);
 
 constexpr TierMask FP16_ONLY = mask(StorageTier::FP16);
 constexpr TierMask FP32_ONLY = mask(StorageTier::FP32);
@@ -24,10 +25,10 @@ constexpr KindCapabilities build(TierMask s, StorageTier f, bool fus = false) { 
 constexpr std::array<KindCapabilities, std::to_underlying(TensorKind::COUNT)> kKindTable = [] {
     std::array<KindCapabilities, std::to_underlying(TensorKind::COUNT)> t{};
     t[std::to_underlying(TensorKind::UNKNOWN)] = build(FP16_ONLY, StorageTier::FP16);
-    t[std::to_underlying(TensorKind::WQ)] = build(ALL_QUANT, StorageTier::NVFP4);
+    t[std::to_underlying(TensorKind::WQ)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR);
     t[std::to_underlying(TensorKind::WK)] = build(ALL_QUANT, StorageTier::FP8, true);
     t[std::to_underlying(TensorKind::WV)] = build(ALL_QUANT, StorageTier::FP8, true);
-    t[std::to_underlying(TensorKind::WO)] = build(ALL_QUANT, StorageTier::NVFP4);
+    t[std::to_underlying(TensorKind::WO)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR);
     t[std::to_underlying(TensorKind::QKV_FUSED)] = build(NO_MXFP4, StorageTier::FP8);
     // MLA (DeepSeek-V2/V3) latent projections.
     // kv_a_proj is precision-sensitive (latent down-proj) → no aggressive FP4 default.
@@ -35,15 +36,15 @@ constexpr std::array<KindCapabilities, std::to_underlying(TensorKind::COUNT)> kK
     // kv_a_layernorm is an RMSNorm weight → never quantized.
     t[std::to_underlying(TensorKind::KV_A_NORM)] = build(FP32_ONLY, StorageTier::FP32);
     // kv_b_proj is a standard up-proj → mirror WO.
-    t[std::to_underlying(TensorKind::KV_B_PROJ)] = build(ALL_QUANT, StorageTier::NVFP4);
-    t[std::to_underlying(TensorKind::W_GATE)] = build(ALL_QUANT, StorageTier::NVFP4, true);
-    t[std::to_underlying(TensorKind::W_UP)] = build(ALL_QUANT, StorageTier::NVFP4, true);
-    t[std::to_underlying(TensorKind::W_DOWN)] = build(ALL_QUANT, StorageTier::NVFP4);
-    t[std::to_underlying(TensorKind::EXPERT_GATE)] = build(ALL_QUANT, StorageTier::NVFP4, true);
-    t[std::to_underlying(TensorKind::EXPERT_UP)] = build(ALL_QUANT, StorageTier::NVFP4, true);
-    t[std::to_underlying(TensorKind::EXPERT_DOWN)] = build(ALL_QUANT, StorageTier::NVFP4);
+    t[std::to_underlying(TensorKind::KV_B_PROJ)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR);
+    t[std::to_underlying(TensorKind::W_GATE)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR, true);
+    t[std::to_underlying(TensorKind::W_UP)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR, true);
+    t[std::to_underlying(TensorKind::W_DOWN)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR);
+    t[std::to_underlying(TensorKind::EXPERT_GATE)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR, true);
+    t[std::to_underlying(TensorKind::EXPERT_UP)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR, true);
+    t[std::to_underlying(TensorKind::EXPERT_DOWN)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR);
     t[std::to_underlying(TensorKind::FUSED_KV)] = build(NO_MXFP4, StorageTier::FP8);
-    t[std::to_underlying(TensorKind::FUSED_GATE_UP)] = build(ALL_QUANT, StorageTier::NVFP4);
+    t[std::to_underlying(TensorKind::FUSED_GATE_UP)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR);
     t[std::to_underlying(TensorKind::TOK_EMBED)] = build(FP16_ONLY, StorageTier::FP16);
     t[std::to_underlying(TensorKind::LM_HEAD)] = build(FP16_ONLY, StorageTier::FP16);
     t[std::to_underlying(TensorKind::ROUTER)] = build(FP16_OR_FP32, StorageTier::FP32);
@@ -57,7 +58,7 @@ constexpr std::array<KindCapabilities, std::to_underlying(TensorKind::COUNT)> kK
     t[std::to_underlying(TensorKind::BETA)] = build(FP16_ONLY, StorageTier::FP16);
     t[std::to_underlying(TensorKind::ALPHA)] = build(FP16_ONLY, StorageTier::FP16);
     t[std::to_underlying(TensorKind::SSM_GROUP_NORM)] = build(FP16_ONLY, StorageTier::FP16);
-    t[std::to_underlying(TensorKind::GDN_GATE)] = build(ALL_QUANT, StorageTier::NVFP4);
+    t[std::to_underlying(TensorKind::GDN_GATE)] = build(ALL_QUANT, StorageTier::NVFP4_LINEAR);
     t[std::to_underlying(TensorKind::GDN_ALPHA)] = build(FP16_ONLY, StorageTier::FP16);
     t[std::to_underlying(TensorKind::GDN_BETA)] = build(FP16_ONLY, StorageTier::FP16);
     t[std::to_underlying(TensorKind::GDN_ALPHA_BETA_PACKED)] = build(FP16_ONLY, StorageTier::FP16);
@@ -91,8 +92,8 @@ KindCapabilities effective_capabilities(TensorKind k, QType source_qtype) {
     // Native FP4-family sources: capabilities ARE the source tier.
     // No upgrade path exists (we wouldn't dequant FP4 to FP16 just to cache it).
     if (source_qtype == QType::NVFP4) {
-        cap.supported = mask(StorageTier::NVFP4) | mask(StorageTier::CUTLASS_NVFP4);
-        cap.required_floor = StorageTier::NVFP4;
+        cap.supported = mask(StorageTier::NVFP4_LINEAR) | mask(StorageTier::NVFP4_SFATOM);
+        cap.required_floor = StorageTier::NVFP4_LINEAR;
         return cap;
     }
     if (source_qtype == QType::MXFP4) {
@@ -117,11 +118,10 @@ KindCapabilities effective_capabilities(TensorKind k, QType source_qtype) {
                                    source_qtype == QType::IQ4_XS);
 
     if (!nvfp4_overlay_ok) {
-        cap.supported = cap.supported & ~mask(StorageTier::NVFP4) &
-                        ~mask(StorageTier::CUTLASS_NVFP4) & ~mask(StorageTier::MXFP4);
-        if (cap.required_floor == StorageTier::NVFP4 ||
-            cap.required_floor == StorageTier::CUTLASS_NVFP4 ||
-            cap.required_floor == StorageTier::MXFP4) {
+        cap.supported = cap.supported & ~mask(StorageTier::NVFP4_LINEAR) & ~mask(StorageTier::NVFP4_SFATOM) &
+                        ~mask(StorageTier::MXFP4);
+        if (cap.required_floor == StorageTier::NVFP4_LINEAR ||
+            cap.required_floor == StorageTier::NVFP4_SFATOM || cap.required_floor == StorageTier::MXFP4) {
             // Fall back to FP16 (smallest cuBLAS-friendly tier still in supported).
             // If FP16 was also stripped (it shouldn't be — all dense kinds keep it),
             // the caller will fail loud via required_floor not in supported.

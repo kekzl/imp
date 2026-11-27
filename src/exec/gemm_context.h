@@ -67,7 +67,7 @@ struct GemmContext {
         return c;
     }
 
-    // Act-quant hint (NVFP4 prefill QKV / gate-up dedupe): the CUTLASS NVFP4
+    // Act-quant hint (NVFP4 prefill QKV / gate-up dedupe): the SfAtom NVFP4
     // activation scratch already holds quantize(input) for exactly this
     // (data, M, K) triple — a prior dispatch on the SAME input quantized it.
     // gemm_via_handle_ forwards the match as args.act_prequantized so the

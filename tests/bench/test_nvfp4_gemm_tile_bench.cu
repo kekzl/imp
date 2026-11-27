@@ -1,11 +1,11 @@
 // Timing cases of tests/test_nvfp4_gemm_tile.cu, built into test-bench (make test-bench), not into the
 // default GPU run.
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
 #include "nvfp4_ref_gemm.cuh"
 #include "quant/nvfp4_gemm_tile.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 

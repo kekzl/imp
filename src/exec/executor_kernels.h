@@ -15,8 +15,8 @@ namespace imp {
 // Forward declarations for legacy gemm_dispatch parameters
 struct FP8CacheEntry;
 struct NvFP4QuantResult;
-struct CutlassNvFP4Weight;
-struct CutlassMxFP4Weight;
+struct NvFP4SfAtomWeight;
+struct MxFP4SfAtomWeight;
 
 // Host launcher: dispatches the right T based on dtype size (2 = half/bf16).
 void attn_gate_split_interleaved(const void* src, void* q_dst, void* gate_dst, int n_tokens, int nh, int hd,

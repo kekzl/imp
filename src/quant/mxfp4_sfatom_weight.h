@@ -10,7 +10,7 @@
 
 namespace imp {
 
-struct CutlassMxFP4Weight {
+struct MxFP4SfAtomWeight {
     const void* data = nullptr;     // [N, K/2] packed E2M1 nibbles
     void* scale_factors = nullptr;  // SfAtom layout UE8M0 (gemm_mxfp4_tile prefill)
     void* linear_scales = nullptr;  // [N, K/32] row-major UE8M0 (for GEMV decode)

@@ -12,9 +12,9 @@ struct EngineConfig;
 // All-or-nothing for CUDA-graph decode: one MoE layer missing its nvfp4_moe entry falls
 // to the host-args legacy path, which aborts capture (26-40 tok/s vs ~250 captured).
 struct NativeCacheDemand {
-    // Persistent CUTLASS SfAtom SF slab (phase 3b) across ALL registered NVFP4 weights
+    // Persistent SfAtom SF slab (phase 3b) across ALL registered NVFP4 weights
     // (dense projections, experts, GDN/SSM projections, LM head). Sized with
-    // cutlass_nvfp4_sf_size() plus 256-byte per-entry alignment (pre_dequant_phase3_cutlass.cpp).
+    // nvfp4_sfatom_size() plus 256-byte per-entry alignment (pre_dequant_phase3_sfatom.cpp).
     size_t sf_bytes = 0;
     // Largest transient per-(layer,proj) contiguous MoE expert copy (phase 3-moe copy
     // branch: packed + micro-scales + tensor-scales). The zero-copy borrow branch needs
@@ -74,7 +74,7 @@ struct VRAMBudget {
     size_t mandatory_sf_bytes = 0;
     size_t mandatory_moe_bytes = 0;
     // Total weight-cache demand this pass charged against post-weight headroom
-    // (nvfp4 estimate + cutlass_sf estimate, absorbing native-NVFP4 and planner-driven
+    // (nvfp4 estimate + sfatom estimate, absorbing native-NVFP4 and planner-driven
     // reserves). Exposed so plan_memory() compares against the SAME figure (A7 step 2b).
     size_t weight_cache_estimate_bytes = 0;
     // TRANSIENT slice of the estimate above: init-time headroom phase-0..3 builders re-derive

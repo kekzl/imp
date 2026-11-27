@@ -205,9 +205,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // (body extracted to pre_dequant_phase0_promote_nvfp4_sidecars_)
     pre_dequant_phase0_promote_nvfp4_sidecars_(cfg, stream);
 
-    // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
-    // (body extracted to pre_dequant_phase0b_register_cutlass_nvfp4_)
-    pre_dequant_phase0b_register_cutlass_nvfp4_(cfg, stream);
+    // --- Phase 0b: register prequant-promoted NVFP4 weights in the decode cache ---
+    // (body extracted to pre_dequant_phase0b_register_prequant_nvfp4_)
+    pre_dequant_phase0b_register_prequant_nvfp4_(cfg, stream);
 
     // Stage 1 (one-tier-truth): builds the budget-constrained StoragePlan once
     // for the model's lifetime, AFTER Phase 0 so prequant-NVFP4 weights
@@ -248,7 +248,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     fp8_lm_head_cache_(stream);
     mtp_draft_lm_head_nvfp4_(stream);  // MTP draft copy of an FP8-served 16-bit head
 
-    // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
+    // --- Phase 3: NVFP4 decode weight cache + 3b SfAtom + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);
 
     // --- Phase 3d: NVFP4 prefill copies of the F16 GDN projections (gemm.nvfp4_gdn_proj_prefill) ---
@@ -289,12 +289,12 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     note_total("WEIGHT_CACHE_NVFP4", wcache_->nvfp4_bytes + wcache_->nvfp4_lm_head_bytes +
                                          wcache_->nvfp4_moe_bytes - wcache_->nvfp4_moe_noted_bytes);
     // Minus the native MXFP4 data compacted in place in the GGUF source buffers: WEIGHTS holds it.
-    note_total("WEIGHT_CACHE_CUTLASS_SF", wcache_->cutlass_nvfp4_bytes + wcache_->cutlass_mxfp4_bytes -
-                                              wcache_->cutlass_mxfp4_inplace_bytes -
-                                              wcache_->cutlass_nvfp4_noted_bytes);
+    note_total("WEIGHT_CACHE_CUTLASS_SF", wcache_->nvfp4_sfatom_bytes + wcache_->mxfp4_sfatom_bytes -
+                                              wcache_->mxfp4_sfatom_inplace_bytes -
+                                              wcache_->nvfp4_sfatom_noted_bytes);
     // Raw allocations no tag claimed, so they read as library reserve: the GDN NVFP4 prefill copy
     // (Qwen3.5-4B MXFP4: 270 MiB) and the MXFP4 FP16 decode fallback bulk (same model: 8020 MiB).
-    note_total("WEIGHT_CACHE_GDN_PREFILL", wcache_->cutlass_nvfp4_prefill_bytes);
+    note_total("WEIGHT_CACHE_GDN_PREFILL", wcache_->nvfp4_sfatom_prefill_bytes);
     note_total("WEIGHT_CACHE_MXFP4_FP16", wcache_->fp16_bulk_data.bytes());
 }
 
@@ -322,7 +322,7 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
         out = *h.entries.nvfp4;
         return true;
     }
-    if (h.primary_tier != StorageTier::NVFP4 || h.payload.nvfp4.data == nullptr)
+    if (h.primary_tier != StorageTier::NVFP4_LINEAR || h.payload.nvfp4.data == nullptr)
         return false;
     out.packed_data  = h.payload.nvfp4.data;
     out.micro_scales = h.payload.nvfp4.block_scales;
@@ -371,7 +371,7 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
         if (!is_gdn || dispatch_policy().gemm.nvfp4_lm_head_gdn) {
             for (auto& e : plan.entries)
                 if (e.kind == TensorKind::LM_HEAD)
-                    e.tier = StorageTier::NVFP4;
+                    e.tier = StorageTier::NVFP4_LINEAR;
         }
     }
 
@@ -380,7 +380,7 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // from-scratch <pad>/IMA corruption no longer reproduces (degen_suite 33/0, 2026-10-14).
     if (model_->profile().is_gemma3) {
         for (auto& e : plan.entries) {
-            if (e.tier == StorageTier::NVFP4)
+            if (e.tier == StorageTier::NVFP4_LINEAR)
                 e.fp16_companion = true;
         }
     }

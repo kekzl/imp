@@ -27,7 +27,7 @@ No `tcgen05` / TMEM / 2-CTA cluster MMA (SM100 only), no `wgmma` (`sm_90a` only)
 
 1. **Batch=1 decode on the tuned paths (Qwen3.8 family) is at its ceiling; batched decode (M<=32) is its own regime; a newly ported path is not at any ceiling (Inkling-2-Mini v1 26.36-27.94 -> 152.3 tok/s, skill kernel-tuning).** Order at batch=1: fast per-launch GEMM (native `mxf4nvf4` smallm v2 for M<=32, #1766; CUTLASS at large M; never the `gemm_nvfp4` dequant->cuBLAS fallback), then CUDA-graph capture (`CudaGraphConditionalRunner`, `src/runtime/cuda_graph.h`), then bytes. Qwen3.8 M=1 spec-off: 95.8% busy, no single lever >=1% left (#1789); the decode graph is strictly serial there (union == sum). A per-token host round-trip drops a path out of the conditional loop (-27..-45%). At 32 streams grid-shape and launch levers PAID: row-block RMSNorm +6.8% (#1769), shared act-quantize +4.6% (#1771), producer quantize +2.6% (#1773), BF16 GDN state +12.5% (#1776/#1778), smallm sibling pairs +1.7% (#1788), row-batched sampling +2.2% (#1790), PDL device half +0.5-1.3% (#1833); residual-accumulate LOST -0.9% (#1793: the adds overlap with the next layer's GEMMs). Measure the regime with a 32-stream two-image A/B (benchmark-cuda).
 2. **Occupancy is for reaching the roofline, not passing it.** <=48 regs for 100% occupancy on GEMV paths. `__launch_bounds__(T, N)` forces N blocks by SPILLING: `(128,12)` on the MR GEMV went 14.5 -> 26.8 us at MR=4; `(256,1)` on the shipped dense FA2 instance moved ptxas 137 -> 180 regs. What shipped: `(256,2)` on a SEPARATE wrapper kernel (TWOSLOT 35 KB, 137 -> 128 regs, 24 B spill, FA2 -10% at pp4096, #1843) with the production instance byte-identical in SASS. Read `--ptxas-options=-v` per template instance; the CI `kernels` gate (`tools/kernel_resource_baseline.txt`, REG >= 240 or any local frame) ratchets it. Two CTAs/SM on a tensor-pipe-bound kernel is flat (chunkpar K2: 333 vs 331 ms) or worse under latency binding (+8%: barriers double, half the work per MMA phase).
-3. **Quantization type determines kernel strategy.** Q8_0: bandwidth-bound, row-parallel + smem activations. Q6_K: K-parallel + warp division. NVFP4 large M: `StorageTier::CUTLASS_NVFP4` (SfAtom layout); M<=32: smallm v2 on the PLAIN packed bytes (`h.source_data`/`h.source_scales`). Plain `StorageTier::NVFP4` at large M = slow `gemm_nvfp4`.
+3. **Quantization type determines kernel strategy.** Q8_0: bandwidth-bound, row-parallel + smem activations. Q6_K: K-parallel + warp division. NVFP4 large M: `StorageTier::NVFP4_SFATOM` (SfAtom layout); M<=32: smallm v2 on the PLAIN packed bytes (`h.source_data`/`h.source_scales`). `StorageTier::NVFP4_LINEAR` at large M = slow `gemm_nvfp4`.
 
 ## Numerics rules for tensor-core rewrites
 
@@ -58,7 +58,7 @@ Traps: `gdn_scan_chunkpar.cu` sat at exactly 600 code LOC (kernel hard threshold
 
 | Path | Evidence at init / config |
 |---|---|
-| CUTLASS NVFP4 weight cache | `cutlass_nvfp4 weight cache` log line; without it decode runs dequant->cuBLAS |
+| SfAtom NVFP4 weight cache | `CUTLASS sm_120 NVFP4 weight cache:` log line (text kept, tests grep it); without it decode runs dequant->cuBLAS |
 | CUDA-graph decode loop, graph prewarm | `runtime.cuda_graphs`; graph prewarm always on (32/32 captures in 2.3 s) |
 | PDL both halves | `runtime.no_pdl=false`; registered kernels call `griddepcontrol.wait` before the first global access (`src/core/pdl_device.cuh`); registered = waits, blanket registrations without a wait RACED (`GreedyDeterminism`) |
 | FA2 prefill family | `attention.fmha_fa2` (on); hd 256, f16 QK, 2-CTA dense and Bkv 64 are fixed since 2026-11-14 (keys removed) |
@@ -99,7 +99,7 @@ Padding two access patterns at once may not fit (chunkpar histories at stride 13
 | Mistake | Fix |
 |---|---|
 | Targeting `sm_120` / `sm_120f` | `compute_120a/sm_120a` |
-| Decode routed through `gemm_nvfp4` | promote to `StorageTier::CUTLASS_NVFP4`; check the init line |
+| Decode routed through `gemm_nvfp4` | promote to `StorageTier::NVFP4_SFATOM`; check the init line |
 | No graphs-ON re-bench after a kernel win | the tok/s win is graph-mediated |
 | H100 SMEM assumptions | 99 KB opt-in |
 | `__launch_bounds__` on regular GEMV/attention paths | -4.5..-20%; min-blocks spills to DRAM; only wrapper-kernel bounds with a SASS-identical production instance |
