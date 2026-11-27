@@ -20,18 +20,29 @@ void attention_cublas_prefill_reset_count();
 // [abs_pos-sliding_window+1, abs_pos]. Default 0 (off).
 // sinks (#547): per-head FP16 logits [n_heads]; adds exp(sink-max) to the softmax denominator,
 // dropped after softmax. nullptr = off.
-void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
-                              int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
-                              float softcap = 0.0f, int q_offset = 0, cudaStream_t stream = nullptr,
-                              int sliding_window = 0, const void* sinks = nullptr);
+// Arguments in the old parameter order (audit D-11) for both entry points; Tensors by pointer.
+struct AttnCublasPrefillArgs {
+    const Tensor* Q = nullptr;
+    const Tensor* K = nullptr;
+    const Tensor* V = nullptr;
+    Tensor* O = nullptr;
+    Tensor* S = nullptr;
+    int n_heads = 0;
+    int n_kv_heads = 0;
+    int head_dim = 0;
+    float scale = 0.0f;
+    bool causal = false;
+    float softcap = 0.0f;
+    int q_offset = 0;
+    cudaStream_t stream = nullptr;
+    int sliding_window = 0;
+    const void* sinks = nullptr;
+};
+void attention_cublas_prefill(const AttnCublasPrefillArgs& a);
 
 // Slices attention_cublas_prefill into q-row chunks sized to the S workspace (S-matrix-overflow
 // regime: long ctx x wide chunk). Sizing stays on the FP32-S path (use_fp32_s), floored to a
 // multiple of 16; returns false if even a 16-row slice overflows, caller falls back to tiled FMHA.
-[[nodiscard]] bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-                                     Tensor& S, int n_heads, int n_kv_heads, int head_dim, float scale,
-                                     bool causal, float softcap = 0.0f, int q_offset = 0,
-                                     cudaStream_t stream = nullptr, int sliding_window = 0,
-                                     const void* sinks = nullptr);
+[[nodiscard]] bool attention_cublas_prefill_sliced(const AttnCublasPrefillArgs& a);
 
 }  // namespace imp

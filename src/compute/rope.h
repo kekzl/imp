@@ -33,10 +33,24 @@ struct MRopeParams {
 // head_dim). neox: true=NeoX/split pairs (i,i+d/2), false=interleaved (2i,2i+1).
 // YaRN (ext_factor>0): attn_factor=mscale; corr_dims=[2] host floats, dimension
 // boundaries for the ramp (rope_yarn_corr_dims()) - passed by value, a device pointer hangs.
-void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, float theta = 10000.0f,
-                  float scaling = 1.0f, int rope_dim = 0, bool neox = false, float ext_factor = 0.0f,
-                  float attn_factor = 1.0f, const float* corr_dims = nullptr, cudaStream_t stream = nullptr,
-                  const float* longrope_inv_freqs = nullptr, MRopeParams mrope = {});
+// Arguments in the old parameter order with the old defaults (audit D-11); Q and K by pointer.
+struct RopeForwardArgs {
+    Tensor* Q = nullptr;
+    Tensor* K = nullptr;
+    const int* positions = nullptr;
+    int head_dim = 0;
+    float theta = 10000.0f;
+    float scaling = 1.0f;
+    int rope_dim = 0;
+    bool neox = false;
+    float ext_factor = 0.0f;
+    float attn_factor = 1.0f;
+    const float* corr_dims = nullptr;
+    cudaStream_t stream = nullptr;
+    const float* longrope_inv_freqs = nullptr;
+    MRopeParams mrope = {};
+};
+void rope_forward(const RopeForwardArgs& a);
 
 // Fused QK-norm + RoPE (FP16, prefill and decode rows): per-head RMSNorm on Q/K then RoPE, one warp
 // per (token, head) for head_dim 64/128/256/512, else one CTA per (head, token).

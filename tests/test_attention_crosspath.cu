@@ -208,8 +208,20 @@ protected:
         {  // 1. cuBLAS materialized (the executor's historic short-prefill reference)
             PathResult r{"cublas"};
             clear_o();
-            attention_cublas_prefill(Q2, K2, V2, O2, S3, NH, NKV, HD, scale, causal, softcap, 0, stream_,
-                                     sw);
+            attention_cublas_prefill({.Q = &Q2,
+                                      .K = &K2,
+                                      .V = &V2,
+                                      .O = &O2,
+                                      .S = &S3,
+                                      .n_heads = NH,
+                                      .n_kv_heads = NKV,
+                                      .head_dim = HD,
+                                      .scale = scale,
+                                      .causal = causal,
+                                      .softcap = softcap,
+                                      .q_offset = 0,
+                                      .stream = stream_,
+                                      .sliding_window = sw});
             r.ran = true;
             collect(r);
             results.push_back(std::move(r));

@@ -137,10 +137,26 @@ void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float
 // Reference multi-token GDN scan: deliberately unfused, state in global memory, per-token
 // serial loop; L2-norm via shared-memory reductions (no register-cached state). Same
 // delta-rule math as gdn_scan_fused_f32. Selected by gdn.ref_kernel.
-void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                            int grouped_layout = 0, const int* d_real_n = nullptr);
+// Arguments in the old parameter order (audit D-11); grouped_layout 0 = tiled, d_real_n nullptr = n_tokens.
+struct GdnScanReferenceArgs {
+    const float* conv_f32 = nullptr;
+    int conv_channels = 0;
+    const half* alpha = nullptr;
+    const half* beta = nullptr;
+    const float* A_log = nullptr;
+    const float* dt_bias = nullptr;
+    float* h_state = nullptr;
+    half* y = nullptr;
+    int n_tokens = 0;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    cudaStream_t stream = nullptr;
+    int grouped_layout = 0;
+    const int* d_real_n = nullptr;
+};
+void gdn_scan_reference_f32(const GdnScanReferenceArgs& a);
 
 // ---------------------------------------------------------------------------
 // Legacy per-token interfaces (kept for fallback / testing)

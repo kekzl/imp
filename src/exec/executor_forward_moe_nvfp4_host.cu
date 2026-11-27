@@ -464,11 +464,14 @@ NvFP4MoEQuantResult pool_view(char* layer_pool, size_t slot_size, size_t ms_off,
 
 }  // namespace
 
-void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff, int top_k,
-                                              const MoeRoutingResult& routing, const Tensor& no, Tensor& h,
-                                              const Tensor& r, bool moe_use_fp32_residual,
-                                              bool will_skip_residual_copy, bool& residual_fused,
-                                              bool non_gated_experts, int n_rows) {
+void GraphExecutor::run_moe_decode_nvfp4_host(const MoeDecodeNvfp4HostArgs& a) {
+    const auto& [layer, stream, d, eff, top_k, routing_p, no_p, h_p, r_p, moe_use_fp32_residual,
+                 will_skip_residual_copy, residual_fused_p, non_gated_experts, n_rows] = a;
+    const MoeRoutingResult& routing = *routing_p;
+    const Tensor& no = *no_p;
+    Tensor& h = *h_p;
+    const Tensor& r = *r_p;
+    bool& residual_fused = *residual_fused_p;
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
@@ -656,9 +659,20 @@ void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, Mo
     if (dev_expert_cache_.layer_ready(layer) && !dev_expert_cache_.layer_tiered(layer) &&
         ctx.n <= kDevExpertMaxRows && expert_cache_.slots_per_layer_ >= nk3 && moe_.d_slot_idx_count >= nk3) {
         (void)fork_shared_expert_(layer, stream, ctx.d, ctx.no);  // joined in phase 8
-        run_moe_decode_nvfp4_host(layer, stream, ctx.d, ctx.eff, ctx.top_k, ctx.routing, ctx.no, ctx.h, ctx.r,
-                                  ctx.moe_use_fp32_residual, ctx.will_skip_residual_copy, ctx.residual_fused,
-                                  ctx.non_gated_experts, ctx.n);
+        run_moe_decode_nvfp4_host({.layer = layer,
+                                   .stream = stream,
+                                   .d = ctx.d,
+                                   .eff = ctx.eff,
+                                   .top_k = ctx.top_k,
+                                   .routing = &ctx.routing,
+                                   .no = &ctx.no,
+                                   .h = &ctx.h,
+                                   .r = &ctx.r,
+                                   .moe_use_fp32_residual = ctx.moe_use_fp32_residual,
+                                   .will_skip_residual_copy = ctx.will_skip_residual_copy,
+                                   .residual_fused = &ctx.residual_fused,
+                                   .non_gated_experts = ctx.non_gated_experts,
+                                   .n_rows = ctx.n});
         return;
     }
     const size_t row_bytes = static_cast<size_t>(ctx.d) * ctx.es;
@@ -678,8 +692,19 @@ void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, Mo
         Tensor no = row(ctx.no, i);
         Tensor h = row(ctx.h, i);
         Tensor r = row(ctx.r, i);
-        run_moe_decode_nvfp4_host(layer, stream, ctx.d, ctx.eff, ctx.top_k, rr, no, h, r, ctx.moe_use_fp32_residual,
-                                  ctx.will_skip_residual_copy, ctx.residual_fused, ctx.non_gated_experts);
+        run_moe_decode_nvfp4_host({.layer = layer,
+                                   .stream = stream,
+                                   .d = ctx.d,
+                                   .eff = ctx.eff,
+                                   .top_k = ctx.top_k,
+                                   .routing = &rr,
+                                   .no = &no,
+                                   .h = &h,
+                                   .r = &r,
+                                   .moe_use_fp32_residual = ctx.moe_use_fp32_residual,
+                                   .will_skip_residual_copy = ctx.will_skip_residual_copy,
+                                   .residual_fused = &ctx.residual_fused,
+                                   .non_gated_experts = ctx.non_gated_experts});
     }
 }
 

@@ -473,13 +473,10 @@ void GraphExecutor::draw_verify_row_runs_(const Tensor& lg, int row0, int csz, i
     }
 }
 
-void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
-                                      const int32_t* d_hist, int n_hist, const int32_t* d_draft,
-                                      float rep_pen, float freq_pen, float pres_pen,
-                                      int32_t* d_topm, int topm, const int32_t* d_banned,
-                                      int n_banned, bool allow_cutlass, const int32_t* d_banned_alt,
-                                      int n_banned_alt, const uint8_t* h_row_alt, const int32_t* const* h_row_hist,
-                                      const int* h_row_hist_n, const float* h_row_pens) {
+void GraphExecutor::greedy_argmax_all(const GreedyArgmaxArgs& a) {
+    const auto& [n_rows, d_out, stream, d_hist, n_hist, d_draft, rep_pen, freq_pen, pres_pen, d_topm, topm,
+                 d_banned, n_banned, allow_cutlass, d_banned_alt, n_banned_alt, h_row_alt, h_row_hist,
+                 h_row_hist_n, h_row_pens] = a;
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
     }

@@ -308,11 +308,21 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
         const bool no_ws = process_diag_deterministic() || !process_diag_nvfp4_prompt_streamk();
         auto* q = static_cast<uint8_t*>(uo.data);
         uint8_t* sf = q + swiglu_epi_sf_offset(n, N);
-        if (gemm_nvfp4_tile_swiglu_quant(qscratch_.cutlass_act_data.get(), qscratch_.cutlass_act_sf.get(),
-                                         cu.weight, cu.sf, alpha, go.data, q, sf, act_scale_of_(ly.w_down_id),
-                                         n, N, K, ctx.stream,
-                                         no_ws ? nullptr : qscratch_.cutlass_workspace.get(),
-                                         qscratch_.cutlass_workspace_size)) {
+        if (gemm_nvfp4_tile_swiglu_quant({.a_data = qscratch_.cutlass_act_data.get(),
+                                          .a_sf = qscratch_.cutlass_act_sf.get(),
+                                          .w_data = cu.weight,
+                                          .w_sf = cu.sf,
+                                          .alpha = alpha,
+                                          .gate_fp16 = go.data,
+                                          .q_packed = q,
+                                          .q_sf = sf,
+                                          .q_act_scale = act_scale_of_(ly.w_down_id),
+                                          .M = n,
+                                          .N = N,
+                                          .K = K,
+                                          .stream = ctx.stream,
+                                          .workspace = no_ws ? nullptr : qscratch_.cutlass_workspace.get(),
+                                          .workspace_bytes = qscratch_.cutlass_workspace_size})) {
             static LogOnce logged;  // activity proof, once
             if (logged.first()) {
                 IMP_LOG_INFO(

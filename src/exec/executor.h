@@ -28,8 +28,11 @@
 #include "compute/qsa_indexer.h"
 #include "exec/ffn_graph_cache.h"
 #include "exec/gemma_pli_state.h"
+#include "exec/greedy_argmax_args.h"
 #include "exec/sae.h"
 #include "exec/buffer_stamp.h"
+#include "exec/decode_pipeline_advance.h"
+#include "exec/moe_decode_args.h"
 #include "exec/smallm_xq_tag.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/gemm_mode.h"
@@ -62,16 +65,6 @@ namespace imp {
 
 class LoraAdapter;
 struct LoraWeights;
-
-// Pipelined batched-decode chain advance (decode_pipeline_advance.cu): see
-// decode_pipeline_advance.cu for the mechanism. Patch/pos arrays must be
-// device-readable (mapped pinned memory). Declared here (host-safe) so
-// host-only TUs (engine_scheduler.cpp) can launch it.
-void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
-                             int32_t* d_token_ids, int* d_positions, int* d_context_lens,
-                             int* d_block_tables, int n_patches, const int* d_patch_offsets,
-                             const int* d_patch_values, int32_t* d_hist_base, int hist_stride,
-                             const int* d_hist_pos, cudaStream_t stream);
 
 // Nvfp4DecodeContext moved to exec/quant_pipeline.h (build-only; consumed by
 // the QuantPipeline phase-3 helpers).
@@ -196,16 +189,7 @@ public:
         verify_sampling_.reset();
         verify_rows_.assign(rows, rows + n);
     }
-    void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
-                           const int32_t* d_hist = nullptr, int n_hist = 0,
-                           const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
-                           float freq_pen = 0.0f, float pres_pen = 0.0f,
-                           int32_t* d_topm = nullptr, int topm = 0,
-                           const int32_t* d_banned = nullptr, int n_banned = 0,
-                           bool allow_cutlass = false, const int32_t* d_banned_alt = nullptr,
-                           int n_banned_alt = 0, const uint8_t* h_row_alt = nullptr,
-                           const int32_t* const* h_row_hist = nullptr, const int* h_row_hist_n = nullptr,
-                           const float* h_row_pens = nullptr);
+    void greedy_argmax_all(const GreedyArgmaxArgs& a);
 
     // LM head + argmax over EXTERNAL, already-normed rows ([n_rows,d_model]
     // FP16, e.g. MTP head output): draft_nvfp4 (W4A16, one weight pass per 4 rows) when given, else the
@@ -1340,11 +1324,7 @@ private:
     // all top_k experts in a single kernel per projection (NVFP4 and dp4a/FP16
     // sub-paths handled internally). Sets residual_fused=true when the
     // weighted sum fused the residual add (no shared expert active).
-    void run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff,
-                             int top_k, const MoeRoutingResult& routing,
-                             const Tensor& no, Tensor& h, const Tensor& r,
-                             bool moe_use_fp32_residual, bool moe_fused_norm_q8,
-                             bool will_skip_residual_copy, bool& residual_fused);
+    void run_moe_decode_fast(const MoeDecodeFastArgs& a);
     // Device expert cache staging of n_rows rows; true = the gather runs on gather_overlap_.stream and
     // the GEMVs of entries that missed wait on gather_overlap_.gathered (moe_.entry_miss() flags them).
     [[nodiscard]] bool stage_dev_experts_(int layer, const int32_t* expert_indices, int top_k, int n_rows,
@@ -1354,10 +1334,7 @@ private:
     // rows (n_rows > 1: device expert cache only) into the LRU cache's slot pool, runs fused NVFP4 GEMVs
     // against it. Called only when run_moe_decode_fast's dispatch predicate
     // (nvfp4_expert_offload.h) confirms every precondition holds.
-    void run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff, int top_k,
-                                   const MoeRoutingResult& routing, const Tensor& no, Tensor& h,
-                                   const Tensor& r, bool moe_use_fp32_residual, bool will_skip_residual_copy,
-                                   bool& residual_fused, bool non_gated_experts, int n_rows = 1);
+    void run_moe_decode_nvfp4_host(const MoeDecodeNvfp4HostArgs& a);
     // Host-resident NVFP4 experts, 2..kHostDecodeRowsMax rows: one resolve + gather + GEMV set for all
     // rows on the device expert cache, else each row through the n == 1 path
     // (executor_forward_moe_nvfp4_host.cu).

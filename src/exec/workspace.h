@@ -42,21 +42,39 @@ public:
     // pointer-context). Pointer args point to LIVE GraphExecutor members so the moved
     // methods read/write them exactly as before (e.g. has_gdn_ is false at the first
     // compute_shared_sizes() call and true afterward).
-    void init(const Model& model, VRAMAllocator* alloc, QType compute_dtype, int* max_tokens,
-              MoEWorkspace& moe,
-              // model-feature flags (read for phase sizing)
-              const bool* has_moe, const bool* has_ssm, const bool* has_gdn, const bool* has_dense_ffn,
-              const int* max_expert_eff, const int* max_logit_tokens,
-              // persistent activation tensors (carved by allocate_persistent; the four
-              // per-phase configure_* carvers are back on GraphExecutor, so the 16 phase
-              // tensors no longer pass through here)
-              Tensor* hidden, Tensor* residual, Tensor* norm_out, Tensor* logits,
-              DeviceOwned<void>* fp32_accum_buf, Tensor* fp32_hidden) {
-        model_ = &model;
+    // Arguments in the old parameter order (audit D-11); model and moe by pointer.
+    struct InitArgs {
+        const Model* model = nullptr;
+        VRAMAllocator* alloc = nullptr;
+        QType compute_dtype{};
+        int* max_tokens = nullptr;
+        MoEWorkspace* moe = nullptr;
+        // model-feature flags (read for phase sizing)
+        const bool* has_moe = nullptr;
+        const bool* has_ssm = nullptr;
+        const bool* has_gdn = nullptr;
+        const bool* has_dense_ffn = nullptr;
+        const int* max_expert_eff = nullptr;
+        const int* max_logit_tokens = nullptr;
+        // persistent activation tensors (carved by allocate_persistent; the four
+        // per-phase configure_* carvers are back on GraphExecutor, so the 16 phase
+        // tensors no longer pass through here)
+        Tensor* hidden = nullptr;
+        Tensor* residual = nullptr;
+        Tensor* norm_out = nullptr;
+        Tensor* logits = nullptr;
+        DeviceOwned<void>* fp32_accum_buf = nullptr;
+        Tensor* fp32_hidden = nullptr;
+    };
+    void init(const InitArgs& a) {
+        const auto& [model, alloc, compute_dtype, max_tokens, moe, has_moe, has_ssm, has_gdn, has_dense_ffn,
+                     max_expert_eff, max_logit_tokens, hidden, residual, norm_out, logits, fp32_accum_buf,
+                     fp32_hidden] = a;
+        model_ = model;
         vram_alloc_ = alloc;
         compute_dtype_ = compute_dtype;
         max_tokens_ = max_tokens;
-        moe_ = &moe;
+        moe_ = moe;
         has_moe_ = has_moe;
         has_ssm_ = has_ssm;
         has_gdn_ = has_gdn;

@@ -672,9 +672,20 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // boundary, labelled (not exempted) via AllocPhaseScope so `make check-alloc-interpose` sees it.
     AllocPhaseScope mtp_alloc_phase(AllocPhase::Planning, "mtp workspace");
     ws->kv_growable = growable_backend(runtime_config_.vram.lazy_commit);  // head KV per slot at first use
-    if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
-                                     mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max,
-                                     shape.n_kv_slots, shape.hc_count, shape.hc_lowrank)) {
+    if (!imp::mtp_workspace_allocate({.ws = ws.get(),
+                                      .hidden_dim = hidden_dim,
+                                      .vocab_size = vocab_size,
+                                      .n_experts = n_experts,
+                                      .top_k = top_k,
+                                      .expert_d_ff = expert_d_ff,
+                                      .shared_d_ff = shared_d_ff,
+                                      .num_heads = mtp_num_heads,
+                                      .num_kv_heads = mtp_num_kv_heads,
+                                      .head_dim = mtp_head_dim,
+                                      .max_seq_len = mtp_kv_max,
+                                      .n_kv_slots = shape.n_kv_slots,
+                                      .hc_count = shape.hc_count,
+                                      .hc_lowrank = shape.hc_lowrank})) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
@@ -851,9 +862,21 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
     // An NVFP4 view wins over the FP8 head for drafts (draft-only precision, verification reads FP8).
     if (executor_ && lm_nvfp4_p == nullptr)
         (void)executor_->lm_head_fp8_view(lm_fp8, lm_fp8_scales);  // false: no FP8 head, pointers stay null
-    return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_, model_->tok_emb_, model_->out_proj_,
-                               *ws, hidden_dim, vocab_size, out_token_id, decode_stream(), lm_nvfp4_p,
-                               d_prev_token, d_out_token, lm_fp8, lm_fp8_scales);
+    return imp::mtp_draft_step({.prev_token_id = prev_token_id,
+                                .d_h_prev = d_h_prev,
+                                .mtp = &*model_->mtp_,
+                                .main_tok_emb = &model_->tok_emb_,
+                                .main_lm_head = &model_->out_proj_,
+                                .ws = ws,
+                                .hidden_dim = hidden_dim,
+                                .vocab_size = vocab_size,
+                                .out_token_id = out_token_id,
+                                .stream = decode_stream(),
+                                .lm_head_nvfp4 = lm_nvfp4_p,
+                                .d_prev_token = d_prev_token,
+                                .d_out_token = d_out_token,
+                                .lm_head_fp8 = lm_fp8,
+                                .lm_head_fp8_scales = lm_fp8_scales});
 }
 
 }  // namespace imp

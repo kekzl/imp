@@ -423,10 +423,9 @@ bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
     return run_tile<Fmt::kNv4>(p, stream, variant, workspace, workspace_bytes);
 }
 
-bool gemm_nvfp4_tile_swiglu_quant(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
-                                  float alpha, const void* gate_fp16, void* q_packed, void* q_sf,
-                                  float q_act_scale, int M, int N, int K, cudaStream_t stream,
-                                  void* workspace, size_t workspace_bytes) {
+bool gemm_nvfp4_tile_swiglu_quant(const GemmNvfp4TileSwigluQuantArgs& a) {
+    const auto& [a_data, a_sf, w_data, w_sf, alpha, gate_fp16, q_packed, q_sf, q_act_scale, M, N, K, stream,
+                 workspace, workspace_bytes] = a;
     if (N % 16 != 0 || gate_fp16 == nullptr || q_packed == nullptr || q_sf == nullptr ||
         reinterpret_cast<uintptr_t>(gate_fp16) % 16 != 0 || reinterpret_cast<uintptr_t>(q_packed) % 8 != 0)
         return false;
@@ -507,9 +506,9 @@ bool gemm_mxfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
     return run_tile<Fmt::kMx4>(p, stream, variant, workspace, workspace_bytes);
 }
 
-bool gemm_fp8_tile(const void* a_data, const void* w_data, const float* a_scale, const float* w_scale,
-                   float beta, void* d_fp16, int M, int N, int K, cudaStream_t stream, int variant,
-                   void* workspace, size_t workspace_bytes, bool a_per_row) {
+bool gemm_fp8_tile(const GemmFp8TileArgs& a) {
+    const auto& [a_data, w_data, a_scale, w_scale, beta, d_fp16, M, N, K, stream, variant, workspace,
+                 workspace_bytes, a_per_row] = a;
     TileArgs p{static_cast<const uint8_t*>(a_data),
                nullptr,
                static_cast<const uint8_t*>(w_data),

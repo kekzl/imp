@@ -140,10 +140,28 @@ TEST_F(MtpFeedBatchTest, BatchedFeedMatchesPerPairLoop) {
     s.build(/*seed=*/7);
 
     imp::MtpDraftWorkspace ws_ref, ws_bat;
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_ref, kH, kVocab, /*n_experts=*/0, /*top_k=*/0,
-                                            /*expert_d_ff=*/0, kDff, kNh, kNkv, kHd, kSeq));
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_bat, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd,
-                                            kSeq));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_ref,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq}));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_bat,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq}));
     ASSERT_GT(ws_bat.feed_rows_cap, 0) << "dense head must get batch scratch";
     configure_ws(ws_ref);
     configure_ws(ws_bat);
@@ -154,8 +172,16 @@ TEST_F(MtpFeedBatchTest, BatchedFeedMatchesPerPairLoop) {
     for (int j = 0; j < kPairs; ++j) {
         const void* h_j = static_cast<const char*>(s.d_hidden) +
                           static_cast<size_t>(j) * kH * sizeof(__half);
-        ASSERT_TRUE(imp::mtp_draft_step(s.tokens[j], h_j, s.head, s.tok_emb, s.tok_emb,
-                                        ws_ref, kH, kVocab, /*out_token_id=*/nullptr, stream))
+        ASSERT_TRUE(imp::mtp_draft_step({.prev_token_id = s.tokens[j],
+                                         .d_h_prev = h_j,
+                                         .mtp = &s.head,
+                                         .main_tok_emb = &s.tok_emb,
+                                         .main_lm_head = &s.tok_emb,
+                                         .ws = &ws_ref,
+                                         .hidden_dim = kH,
+                                         .vocab_size = kVocab,
+                                         .out_token_id = nullptr,
+                                         .stream = stream}))
             << "per-pair feed failed at j=" << j;
     }
     ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
@@ -185,8 +211,30 @@ TEST_F(MtpFeedBatchTest, MultiSlotFeedMatchesPerSlotBatches) {
     constexpr int kSlots = 4;
 
     imp::MtpDraftWorkspace ws_ref, ws_ms;
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_ref, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_ms, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_ref,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq,
+                                             .n_kv_slots = kSlots}));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_ms,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq,
+                                             .n_kv_slots = kSlots}));
     ASSERT_EQ(ws_ref.n_kv_slots, kSlots);
     configure_ws(ws_ref);
     configure_ws(ws_ms);
@@ -280,8 +328,18 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
     constexpr int kSlots = 3;
     imp::MtpDraftWorkspace ws_host, ws_pass;
     for (auto* ws : {&ws_host, &ws_pass}) {
-        ASSERT_TRUE(
-            imp::mtp_workspace_allocate(*ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
+        ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = ws,
+                                                 .hidden_dim = kH,
+                                                 .vocab_size = kVocab,
+                                                 .n_experts = 0,
+                                                 .top_k = 0,
+                                                 .expert_d_ff = 0,
+                                                 .shared_d_ff = kDff,
+                                                 .num_heads = kNh,
+                                                 .num_kv_heads = kNkv,
+                                                 .head_dim = kHd,
+                                                 .max_seq_len = kSeq,
+                                                 .n_kv_slots = kSlots}));
         configure_ws(*ws);
     }
     cudaStream_t stream = nullptr;
@@ -400,8 +458,18 @@ TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
     constexpr int kSeqLong = 4096;
     imp::MtpDraftWorkspace ws_e, ws_g;
     for (auto* ws : {&ws_e, &ws_g}) {
-        ASSERT_TRUE(
-            imp::mtp_workspace_allocate(*ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeqLong, kSlots));
+        ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = ws,
+                                                 .hidden_dim = kH,
+                                                 .vocab_size = kVocab,
+                                                 .n_experts = 0,
+                                                 .top_k = 0,
+                                                 .expert_d_ff = 0,
+                                                 .shared_d_ff = kDff,
+                                                 .num_heads = kNh,
+                                                 .num_kv_heads = kNkv,
+                                                 .head_dim = kHd,
+                                                 .max_seq_len = kSeqLong,
+                                                 .n_kv_slots = kSlots}));
         configure_ws(*ws);
         // Zero prefix rows on both sides: the scans read every row below each position.
         const size_t kv_bytes = static_cast<size_t>(kSlots) * ws->kv_slot_elems * sizeof(__half);
@@ -504,10 +572,28 @@ TEST_F(MtpFeedBatchTest, SecondBatchContinuesAtCorrectPosition) {
     s.build(/*seed=*/11);
 
     imp::MtpDraftWorkspace ws_ref, ws_bat;
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_ref, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd,
-                                            kSeq));
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_bat, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd,
-                                            kSeq));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_ref,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq}));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_bat,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq}));
     configure_ws(ws_ref);
     configure_ws(ws_bat);
     cudaStream_t stream = nullptr;
@@ -515,8 +601,16 @@ TEST_F(MtpFeedBatchTest, SecondBatchContinuesAtCorrectPosition) {
     for (int j = 0; j < kPairs; ++j) {
         const void* h_j = static_cast<const char*>(s.d_hidden) +
                           static_cast<size_t>(j) * kH * sizeof(__half);
-        ASSERT_TRUE(imp::mtp_draft_step(s.tokens[j], h_j, s.head, s.tok_emb, s.tok_emb,
-                                        ws_ref, kH, kVocab, nullptr, stream));
+        ASSERT_TRUE(imp::mtp_draft_step({.prev_token_id = s.tokens[j],
+                                         .d_h_prev = h_j,
+                                         .mtp = &s.head,
+                                         .main_tok_emb = &s.tok_emb,
+                                         .main_lm_head = &s.tok_emb,
+                                         .ws = &ws_ref,
+                                         .hidden_dim = kH,
+                                         .vocab_size = kVocab,
+                                         .out_token_id = nullptr,
+                                         .stream = stream}));
     }
 
     constexpr int kFirst = 10;
@@ -546,8 +640,17 @@ TEST_F(MtpFeedBatchTest, RefusesUnsupportedOrOverCapacity) {
     s.build(/*seed=*/13);
 
     imp::MtpDraftWorkspace ws;
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd,
-                                            kSeq));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq}));
     configure_ws(ws);
     ws.mtp_pos = kSeq - 4;  // 4 rows to the ring end
     EXPECT_TRUE(imp::mtp_feed_batch(s.tokens.data(), s.d_hidden, 8, s.head, s.tok_emb, ws, kH, nullptr));
@@ -567,8 +670,17 @@ TEST_F(MtpFeedBatchTest, RefusesUnsupportedOrOverCapacity) {
 
     // MoE-shaped alloc (n_experts > 0) gets no batch scratch.
     imp::MtpDraftWorkspace ws_moe;
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_moe, kH, kVocab, /*n_experts=*/4, /*top_k=*/2,
-                                            /*expert_d_ff=*/32, kDff, kNh, kNkv, kHd, kSeq));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_moe,
+                                             .hidden_dim = kH,
+                                             .vocab_size = kVocab,
+                                             .n_experts = 4,
+                                             .top_k = 2,
+                                             .expert_d_ff = 32,
+                                             .shared_d_ff = kDff,
+                                             .num_heads = kNh,
+                                             .num_kv_heads = kNkv,
+                                             .head_dim = kHd,
+                                             .max_seq_len = kSeq}));
     EXPECT_EQ(ws_moe.feed_rows_cap, 0);
     imp::mtp_workspace_free(ws_moe);
 }
@@ -588,9 +700,18 @@ TEST_F(MtpFeedBatchTest, AllocatedBytesEqualThePlanMirror) {
     d.carry_rows = 16;
     d.prenorm_rows = 64;
     imp::MtpDraftWorkspace ws;
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws, d.hidden_dim, d.vocab_size, 0, 0, 0, d.shared_d_ff,
-                                            d.num_heads, d.num_kv_heads, d.head_dim, d.max_seq_len,
-                                            d.n_kv_slots));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws,
+                                             .hidden_dim = d.hidden_dim,
+                                             .vocab_size = d.vocab_size,
+                                             .n_experts = 0,
+                                             .top_k = 0,
+                                             .expert_d_ff = 0,
+                                             .shared_d_ff = d.shared_d_ff,
+                                             .num_heads = d.num_heads,
+                                             .num_kv_heads = d.num_kv_heads,
+                                             .head_dim = d.head_dim,
+                                             .max_seq_len = d.max_seq_len,
+                                             .n_kv_slots = d.n_kv_slots}));
     ASSERT_TRUE(imp::mtp_carry_allocate(ws, d.carry_rows));
     ASSERT_TRUE(imp::mtp_prenorm_allocate(ws, d.prenorm_rows));
     EXPECT_EQ(ws.device_bytes, imp::mtp_workspace_bytes(d));
@@ -605,9 +726,17 @@ TEST_F(MtpFeedBatchTest, AllocatedBytesEqualThePlanMirror) {
     m.carry_rows = 0;
     m.prenorm_rows = 0;
     imp::MtpDraftWorkspace ws_moe;
-    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_moe, m.hidden_dim, m.vocab_size, m.n_experts, m.top_k,
-                                            m.expert_d_ff, m.shared_d_ff, m.num_heads, m.num_kv_heads,
-                                            m.head_dim, m.max_seq_len));
+    ASSERT_TRUE(imp::mtp_workspace_allocate({.ws = &ws_moe,
+                                             .hidden_dim = m.hidden_dim,
+                                             .vocab_size = m.vocab_size,
+                                             .n_experts = m.n_experts,
+                                             .top_k = m.top_k,
+                                             .expert_d_ff = m.expert_d_ff,
+                                             .shared_d_ff = m.shared_d_ff,
+                                             .num_heads = m.num_heads,
+                                             .num_kv_heads = m.num_kv_heads,
+                                             .head_dim = m.head_dim,
+                                             .max_seq_len = m.max_seq_len}));
     EXPECT_EQ(ws_moe.device_bytes, imp::mtp_workspace_bytes(m));
     imp::mtp_workspace_free(ws_moe);
 }
