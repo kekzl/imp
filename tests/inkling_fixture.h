@@ -4,16 +4,17 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <gtest/gtest.h>
 
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "compute/inkling_ops.h"
 #include "exec/inkling_forward.h"
-#include "memory/leaked_static.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
 
@@ -38,12 +39,22 @@ struct Fixture {
     bool loaded = false;
     bool load(const char* dir) { return loaded = va.init() && load_inkling_weights(dir, w, va); }
 };
-// Never destroyed (memory/leaked_static.h): its exit-time teardown ended in "double free or
-// corruption" with rc 139 after every test passed (InklingRewind.ARequestBinds... alone, on main too).
-inline Fixture& fixture() {
-    static LeakedStatic<Fixture> f;
-    return *f;
+// Released after the last test while the CUDA context lives (I5: no device free in a static
+// destructor, memory/leaked_static.h); fixture() after that release reloads.
+inline std::unique_ptr<Fixture>& fixture_slot() {
+    static std::unique_ptr<Fixture> f;
+    return f;
 }
+inline Fixture& fixture() {
+    if (!fixture_slot())
+        fixture_slot() = std::make_unique<Fixture>();
+    return *fixture_slot();
+}
+struct FixtureRelease : ::testing::Environment {
+    void TearDown() override { fixture_slot().reset(); }
+};
+inline ::testing::Environment* const kFixtureRelease = ::testing::AddGlobalTestEnvironment(
+    new FixtureRelease);
 
 // Final state of every row after run() over ids[from..) at position from.
 inline std::vector<float> run_rows(InklingForward& fwd, const InklingWeights& w,
