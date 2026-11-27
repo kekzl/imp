@@ -385,6 +385,8 @@ jobs:
         with:
           name: imp-build
           path: build/imp-server
+          # Read only by `Real API contract` in this run; the 90-day default kept 15 MB per run.
+          retention-days: 1
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against

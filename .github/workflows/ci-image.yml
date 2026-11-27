@@ -21,13 +21,16 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   image:
     name: Build CI image
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    # Job scope: the GHCR push is the only write.
+    permissions:
+      contents: read
+      packages: write
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/imp-ci
     steps:
