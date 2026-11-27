@@ -53,12 +53,30 @@ void sparse_update_key_minmax_all_layers(const SparseKeyMinmaxArgs& a);
 // q: [n_seq, n_heads, head_dim] half (post-RoPE decode queries).
 // scores_scratch: [n_seq, max_blocks_per_seq] float.
 // sparse_block_tables: [n_seq, table_blocks] int. sparse_context_lens: [n_seq].
-void sparse_select_blocks(const half* q, const void* minmax_base, const int* block_tables,
-                          const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
-                          int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
-                          int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
-                          int* sparse_block_tables, int* sparse_context_lens, float std_coef,
-                          cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); all required.
+struct SparseSelectBlocksArgs {
+    const half* q = nullptr;
+    const void* minmax_base = nullptr;
+    const int* block_tables = nullptr;
+    const int* context_lens = nullptr;
+    int n_seq = 0;
+    int n_heads = 0;
+    int n_kv_heads = 0;
+    int head_dim = 0;
+    int block_size = 0;
+    int max_blocks_per_seq = 0;
+    int budget_blocks = 0;
+    int sink_blocks = 0;
+    int recent_blocks = 0;
+    int engage_blocks = 0;
+    int table_blocks = 0;
+    float* scores_scratch = nullptr;
+    int* sparse_block_tables = nullptr;
+    int* sparse_context_lens = nullptr;
+    float std_coef = 0.0f;
+    cudaStream_t stream = nullptr;
+};
+void sparse_select_blocks(const SparseSelectBlocksArgs& a);
 // True when both launch sites score this shape with the kv-head-split kernel (32 / n_kv_heads in {4, 8, 16}
 // lanes per kv head, head_dim a multiple of 4 x lanes); false = the per-4-dims kernel.
 [[nodiscard]] bool sparse_score_uses_split(int n_kv_heads, int head_dim);

@@ -74,10 +74,20 @@ void GraphExecutor::dp4a_qkv_(const TransformerLayer& ly, int layer, const Tenso
     const int k_rows = static_cast<int>(ly.wk.shape[0]);
     const int v_rows = static_cast<int>(ly.wv.shape[0]);
     const bool v_same = ly.wv.qtype == ly.wq.qtype;
-    dispatch_gemv_qkv_fused(ly.wq.qtype, ly.wq.data, ly.wk.data, v_same ? ly.wv.data : nullptr, q8,
-                            qscratch_.d8_buf.data(), static_cast<half*>(qv.data), static_cast<half*>(kk.data),
-                            v_same ? static_cast<half*>(vv.data) : nullptr, q_rows, k_rows,
-                            v_same ? v_rows : 0, K, stream);
+    dispatch_gemv_qkv_fused({.qtype = ly.wq.qtype,
+                             .W_q = ly.wq.data,
+                             .W_k = ly.wk.data,
+                             .W_v = v_same ? ly.wv.data : nullptr,
+                             .q8_1 = q8,
+                             .d8 = qscratch_.d8_buf.data(),
+                             .y_q = static_cast<half*>(qv.data),
+                             .y_k = static_cast<half*>(kk.data),
+                             .y_v = v_same ? static_cast<half*>(vv.data) : nullptr,
+                             .q_rows = q_rows,
+                             .k_rows = k_rows,
+                             .v_rows = v_same ? v_rows : 0,
+                             .K = K,
+                             .stream = stream});
     if (!v_same)
         dispatch_dp4a_gemv(ly.wv.qtype, ly.wv.data, q8, qscratch_.d8_buf.data(), static_cast<half*>(vv.data),
                            v_rows, K, stream);
@@ -461,10 +471,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // rotating Q/K here scrambles positional binding (bag-of-words
             // prompts). QK-norm above still applies; only the rotation is skipped.
             if (layer_rope) {
-                rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
-                             layer_rope_dim, cfg.rope_neox, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                             cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream, longrope_freqs,
-                             state.mrope);
+                rope_forward({.Q = &q4r_t,
+                              .K = &k4r_t,
+                              .positions = state.positions,
+                              .head_dim = hd,
+                              .theta = layer_rope_theta,
+                              .scaling = layer_rope_freq_scale,
+                              .rope_dim = layer_rope_dim,
+                              .neox = cfg.rope_neox,
+                              .ext_factor = cfg.yarn_ext_factor,
+                              .attn_factor = cfg.yarn_attn_factor,
+                              .corr_dims = cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr,
+                              .stream = stream,
+                              .longrope_inv_freqs = longrope_freqs,
+                              .mrope = state.mrope});
             }
         }
     }

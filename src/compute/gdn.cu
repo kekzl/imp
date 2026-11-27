@@ -599,10 +599,9 @@ __global__ void gdn_scan_reference_kernel(
     }
 }
 
-void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                            int grouped_layout, const int* d_real_n) {
+void gdn_scan_reference_f32(const GdnScanReferenceArgs& a) {
+    const auto& [conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
+                 head_dim_ssm, state_size, n_groups, stream, grouped_layout, d_real_n] = a;
     // Shared memory: state slab [SS*HD] + K[SS] + Q[SS] + V[HD] + reduce[HD]
     // For Qwen 3.6 (SS=128, HD=128): ~66 KB — exceeds 48 KB default per block,
     // needs the opt-in dynamic-shared attribute.

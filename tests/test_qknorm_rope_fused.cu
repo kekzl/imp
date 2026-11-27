@@ -159,8 +159,14 @@ TEST_P(QkNormRopeFusedTest, MatchesNormThenStandaloneRope) {
     int64_t k_shape[4] = {1, n_tokens, n_kv_heads, head_dim};
     Tensor Q(d_q_ref, QType::F16, 4, q_shape, true);
     Tensor K(d_k_ref, QType::F16, 4, k_shape, true);
-    rope_forward(Q, K, static_cast<const int*>(d_pos), head_dim, theta, /*scaling=*/1.0f, rope_dim,
-                 /*neox=*/true);
+    rope_forward({.Q = &Q,
+                  .K = &K,
+                  .positions = static_cast<const int*>(d_pos),
+                  .head_dim = head_dim,
+                  .theta = theta,
+                  .scaling = 1.0f,
+                  .rope_dim = rope_dim,
+                  .neox = true});
     QK_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<half> q_a(q_count), k_a(k_count), q_b(q_count), k_b(k_count);

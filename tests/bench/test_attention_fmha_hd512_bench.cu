@@ -67,7 +67,19 @@ TEST_F(FmhaHd512Test, DISABLED_BenchVsCublas) {
                     // timing loop: the launch status is not under test
                     (void)fmha_sm120_prefill(Q4, K4, V4, O4, scale, true, 0, 0.0f, stream_, 0, nullptr);
                 else
-                    attention_cublas_prefill(Q2, K2, V2, O2, S3, NH, NKV, HD, scale, true, 0.0f, 0, stream_);
+                    attention_cublas_prefill({.Q = &Q2,
+                                              .K = &K2,
+                                              .V = &V2,
+                                              .O = &O2,
+                                              .S = &S3,
+                                              .n_heads = NH,
+                                              .n_kv_heads = NKV,
+                                              .head_dim = HD,
+                                              .scale = scale,
+                                              .causal = true,
+                                              .softcap = 0.0f,
+                                              .q_offset = 0,
+                                              .stream = stream_});
             }
             cudaEventRecord(b, stream_);
             cudaEventSynchronize(b);
@@ -81,7 +93,19 @@ TEST_F(FmhaHd512Test, DISABLED_BenchVsCublas) {
         for (int w = 0; w < 40; w++) {
             // timing loop: the launch status is not under test
             (void)fmha_sm120_prefill(Q4, K4, V4, O4, scale, true, 0, 0.0f, stream_, 0, nullptr);
-            attention_cublas_prefill(Q2, K2, V2, O2, S3, NH, NKV, HD, scale, true, 0.0f, 0, stream_);
+            attention_cublas_prefill({.Q = &Q2,
+                                      .K = &K2,
+                                      .V = &V2,
+                                      .O = &O2,
+                                      .S = &S3,
+                                      .n_heads = NH,
+                                      .n_kv_heads = NKV,
+                                      .head_dim = HD,
+                                      .scale = scale,
+                                      .causal = true,
+                                      .softcap = 0.0f,
+                                      .q_offset = 0,
+                                      .stream = stream_});
         }
         cudaStreamSynchronize(stream_);
         double best_c = 1e9, best_f = 1e9;
@@ -141,8 +165,19 @@ TEST_F(FmhaHd512Test, DISABLED_BenchLongCtxFallback) {
                 int64_t q2s[2] = {slice, (int64_t)NH * HD};
                 Tensor Q2s(static_cast<half*>(d_q) + (size_t)off * NH * HD, QType::F16, 2, q2s, true);
                 Tensor O2s(static_cast<half*>(d_o) + (size_t)off * NH * HD, QType::F16, 2, q2s, true);
-                attention_cublas_prefill(Q2s, K2, V2, O2s, S3, NH, NKV, HD, scale, /*causal=*/true,
-                                         /*softcap=*/0.0f, q_offset + off, stream_);
+                attention_cublas_prefill({.Q = &Q2s,
+                                          .K = &K2,
+                                          .V = &V2,
+                                          .O = &O2s,
+                                          .S = &S3,
+                                          .n_heads = NH,
+                                          .n_kv_heads = NKV,
+                                          .head_dim = HD,
+                                          .scale = scale,
+                                          .causal = true,
+                                          .softcap = 0.0f,
+                                          .q_offset = q_offset + off,
+                                          .stream = stream_});
             }
         };
 

@@ -464,3 +464,24 @@ Ten launchers take one args struct; clang-format breaks a wrapped designated lis
 |---|---:|---:|---|
 | `src/compute/mtp_forward.cu` | 1762 | 1789 | 1435 -> 1462 |
 | `tests/test_gdn.cu` | 1613 | 1665 | 1372 -> 1424 |
+
+## 2026-11-27: B-133 slice 8 call sites (D-11)
+
+Fourteen launchers take one args struct; clang-format breaks a wrapped designated list one field per line.
+
+| file | raw LOC before | raw LOC after | `[allow]` pin (code LOC) |
+|---|---:|---:|---|
+| `src/exec/executor_forward_moe_batch.cu` | 1200 | 1212 | 964 -> 977 |
+| `tests/test_sparse_attn_select.cu` | 998 | 1100 | 860 -> 962 |
+
+## 2026-11-27: B-133 slice 9 call sites (D-11)
+
+Sixteen launchers take one args struct; clang-format breaks a wrapped designated list one field per line.
+
+| file | raw LOC before | raw LOC after | `[allow]` pin (code LOC) |
+|---|---:|---:|---|
+| `src/exec/executor_attention.cpp` (TU with its 3 fragments) | 824 | 844 | 1205 -> 1233 |
+| `tests/test_gdn.cu` | 1665 | 1679 | 1424 -> 1438 |
+| `src/exec/executor_gemm_dispatch.cpp` | 1030 | 1042 | new, 806 (794 before) |
+| `tests/test_mla.cu` | 1071 | 1082 | new, 811 (800 before) |
+| `tests/test_mtp_feed_batch.cu` | 893 | 1022 | new, 922 (793 before) |

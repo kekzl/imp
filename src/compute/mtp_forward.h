@@ -253,13 +253,25 @@ inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
 // d_prev_token/d_out_token: device-chain I/O, no H2D/D2H/sync per step. Caller drains the
 // whole chain with one D2H+sync at the end.
 // Returns false on any precondition violation (mtp not loaded, null buffers).
-[[nodiscard]] bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
-                                  const Tensor& main_tok_emb, const Tensor& main_lm_head,
-                                  MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int* out_token_id,
-                                  cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4 = nullptr,
-                                  const int32_t* d_prev_token = nullptr, int32_t* d_out_token = nullptr,
-                                  const void* lm_head_fp8 = nullptr,
-                                  const float* lm_head_fp8_scales = nullptr);
+// Arguments in the old parameter order (audit D-11); head, Tensors and workspace by pointer.
+struct MtpDraftStepArgs {
+    int prev_token_id = 0;
+    const void* d_h_prev = nullptr;
+    const MtpHead* mtp = nullptr;
+    const Tensor* main_tok_emb = nullptr;
+    const Tensor* main_lm_head = nullptr;
+    MtpDraftWorkspace* ws = nullptr;
+    int hidden_dim = 0;
+    int vocab_size = 0;
+    int* out_token_id = nullptr;
+    cudaStream_t stream = nullptr;
+    const NvFP4QuantResult* lm_head_nvfp4 = nullptr;
+    const int32_t* d_prev_token = nullptr;
+    int32_t* d_out_token = nullptr;
+    const void* lm_head_fp8 = nullptr;
+    const float* lm_head_fp8_scales = nullptr;
+};
+[[nodiscard]] bool mtp_draft_step(const MtpDraftStepArgs& a);
 
 // Batched prefill feed: append n_rows (token,hidden) pairs to the MTP KV cache in one
 // M=n_rows pass (embedding/norm/fc/attention/MLP batched, causal attention per query row
@@ -399,11 +411,24 @@ void mtp_apply_mrope(const MtpMropeArgs& a);
 // Allocates the workspace from the VRAM allocator; caller keeps ws alive (typically
 // Engine, session lifetime). MoE buffers sized from n_experts/top_k/expert_d_ff/
 // shared_d_ff; pass 0 for any to disable the MoE block (back-compat 2-arg form).
-[[nodiscard]] bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
-                            int n_experts = 0, int top_k = 0,
-                            int expert_d_ff = 0, int shared_d_ff = 0,
-                            int num_heads = 0, int num_kv_heads = 0, int head_dim = 0,
-                            int max_seq_len = 0, int n_kv_slots = 1, int hc_count = 0, int hc_lowrank = 0);
+// Arguments in the old parameter order (audit D-11); ws by pointer.
+struct MtpWorkspaceAllocateArgs {
+    MtpDraftWorkspace* ws = nullptr;
+    int hidden_dim = 0;
+    int vocab_size = 0;
+    int n_experts = 0;
+    int top_k = 0;
+    int expert_d_ff = 0;
+    int shared_d_ff = 0;
+    int num_heads = 0;
+    int num_kv_heads = 0;
+    int head_dim = 0;
+    int max_seq_len = 0;
+    int n_kv_slots = 1;
+    int hc_count = 0;
+    int hc_lowrank = 0;
+};
+[[nodiscard]] bool mtp_workspace_allocate(const MtpWorkspaceAllocateArgs& a);
 // Memory behind slot's head KV rows (no-op for fixed caches and committed slots). False: the device
 // refused the commit, the slot must not be written.
 [[nodiscard]] bool mtp_commit_slot(MtpDraftWorkspace& ws, int slot);

@@ -1041,10 +1041,21 @@ TEST(MLAAbsorb, MatchesMaterializedReference) {
     int h_cl = ctx;
     cudaMemcpy(d_cl, &h_cl, sizeof(int), cudaMemcpyHostToDevice);
 
-    mla_absorbed_decode(static_cast<const half*>(g_q.data), static_cast<const half*>(g_kvb.data),
-                        static_cast<const half*>(g_cache.data), static_cast<half*>(g_out.data),
-                        d_scores, d_cl, nh, hd, rope_dim, nope_dim, kv_lora, v_hd, max_seq, scale,
-                        nullptr);
+    mla_absorbed_decode({.q = static_cast<const half*>(g_q.data),
+                         .kv_b = static_cast<const half*>(g_kvb.data),
+                         .cache = static_cast<const half*>(g_cache.data),
+                         .out = static_cast<half*>(g_out.data),
+                         .scores = d_scores,
+                         .context_lens = d_cl,
+                         .n_heads = nh,
+                         .head_dim = hd,
+                         .rope_dim = rope_dim,
+                         .nope_dim = nope_dim,
+                         .kv_lora_rank = kv_lora,
+                         .v_head_dim = v_hd,
+                         .max_seq = max_seq,
+                         .scale = scale,
+                         .stream = nullptr});
     cudaDeviceSynchronize();
 
     auto got = read_gpu_fp16(g_out);

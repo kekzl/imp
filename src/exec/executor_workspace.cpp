@@ -338,9 +338,23 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // Wires the scratch-arena component with the live context it sizes
     // against (pointers to GraphExecutor members, e.g. has_gdn_ read live:
     // still false here, set true below); activation/phase tensors stay GraphExecutor-owned.
-    ws_.init(model, vram_alloc_, compute_dtype_, &max_tokens_, moe_, &has_moe_, &has_ssm_, &has_gdn_,
-             &has_dense_ffn_, &max_expert_eff_, &max_logit_tokens_, &hidden_, &residual_, &norm_out_,
-             &logits_, &fp32_accum_buf_, &fp32_hidden_);
+    ws_.init({.model = &model,
+              .alloc = vram_alloc_,
+              .compute_dtype = compute_dtype_,
+              .max_tokens = &max_tokens_,
+              .moe = &moe_,
+              .has_moe = &has_moe_,
+              .has_ssm = &has_ssm_,
+              .has_gdn = &has_gdn_,
+              .has_dense_ffn = &has_dense_ffn_,
+              .max_expert_eff = &max_expert_eff_,
+              .max_logit_tokens = &max_logit_tokens_,
+              .hidden = &hidden_,
+              .residual = &residual_,
+              .norm_out = &norm_out_,
+              .logits = &logits_,
+              .fp32_accum_buf = &fp32_accum_buf_,
+              .fp32_hidden = &fp32_hidden_});
 
     // Computes shared workspace sizes before allocation; GDN detection must
     // run BEFORE these sizes are computed, since compute_shared_sizes() charges

@@ -270,11 +270,20 @@ bool Engine::pipeline_enqueue_next_(int parity, cudaStream_t stream) {
     // context lens, appends the per-row history, scatters freshly appended
     // block ids. Stream-ordered after the in-flight step's samplers, before
     // this step's forward.
-    decode_pipeline_advance(n, executor_->sample_slot_base(parity ^ 1), SAMPLE_SCRATCH_BYTES,
-                            bd_pipe_.gpu.d_token_ids, bd_pipe_.gpu.d_positions, bd_pipe_.gpu.d_context_lens,
-                            bd_pipe_.gpu.d_block_tables, n_patches, d_bt_patch_off_[parity],
-                            d_bt_patch_val_[parity], d_pipe_hist_.get(), pipe_hist_stride_,
-                            d_hist_pos_[parity], stream);
+    decode_pipeline_advance({.n_rows = n,
+                             .slot_tokens = executor_->sample_slot_base(parity ^ 1),
+                             .slot_stride_bytes = SAMPLE_SCRATCH_BYTES,
+                             .d_token_ids = bd_pipe_.gpu.d_token_ids,
+                             .d_positions = bd_pipe_.gpu.d_positions,
+                             .d_context_lens = bd_pipe_.gpu.d_context_lens,
+                             .d_block_tables = bd_pipe_.gpu.d_block_tables,
+                             .n_patches = n_patches,
+                             .d_patch_offsets = d_bt_patch_off_[parity],
+                             .d_patch_values = d_bt_patch_val_[parity],
+                             .d_hist_base = d_pipe_hist_.get(),
+                             .hist_stride = pipe_hist_stride_,
+                             .d_hist_pos = d_hist_pos_[parity],
+                             .stream = stream});
     if (!runner.replay_only(stream))
         return false;  // abandoned chained forward is safe: the per-step path
                        // re-uploads batch state and rewrites the same KV slot

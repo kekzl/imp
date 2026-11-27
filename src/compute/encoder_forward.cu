@@ -227,14 +227,35 @@ bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int
         gemm(h, fp16_view(E.wv, d, d), v, 1.0f, 0.0f, stream);
         int64_t r4[4] = {1, n, ws.n_heads, ws.head_dim};
         Tensor q4 = q.reshape(4, r4), k4 = k.reshape(4, r4);
-        rope_forward(q4, k4, ws.d_positions, ws.head_dim, ws.rope_theta, 1.0f, /*rope_dim=*/0,
-                     /*neox=*/true, 0.0f, 1.0f, nullptr, stream);
+        rope_forward({.Q = &q4,
+                      .K = &k4,
+                      .positions = ws.d_positions,
+                      .head_dim = ws.head_dim,
+                      .theta = ws.rope_theta,
+                      .scaling = 1.0f,
+                      .rope_dim = 0,
+                      .neox = true,
+                      .ext_factor = 0.0f,
+                      .attn_factor = 1.0f,
+                      .corr_dims = nullptr,
+                      .stream = stream});
 
         Tensor attn = fp16_view(ws.d_attn, n, d);
         int64_t s_shape[2] = {static_cast<int64_t>(ws.n_heads), static_cast<int64_t>(n) * n};
         Tensor S(ws.d_scores, QType::F32, 2, s_shape, true);
-        attention_cublas_prefill(q, k, v, attn, S, ws.n_heads, ws.n_heads, ws.head_dim, scale,
-                                 /*causal=*/false, 0.0f, /*q_offset=*/0, stream);
+        attention_cublas_prefill({.Q = &q,
+                                  .K = &k,
+                                  .V = &v,
+                                  .O = &attn,
+                                  .S = &S,
+                                  .n_heads = ws.n_heads,
+                                  .n_kv_heads = ws.n_heads,
+                                  .head_dim = ws.head_dim,
+                                  .scale = scale,
+                                  .causal = false,
+                                  .softcap = 0.0f,
+                                  .q_offset = 0,
+                                  .stream = stream});
 
         Tensor proj = fp16_view(ws.d_proj, n, d);
         gemm(attn, fp16_view(E.wo, d, d), proj, 1.0f, 0.0f, stream);

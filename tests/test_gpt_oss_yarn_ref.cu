@@ -142,9 +142,18 @@ TEST(GptOssYarnRef, KernelMatchesReferenceLongSeq) {
 
     // gpt-oss path: theta=150000, scaling=FACTOR(32), rope_dim=0(full HD),
     // neox=false, ext_factor=1 (YaRN), attn_factor=1.
-    rope_forward(Q, K, dPos, HD, static_cast<float>(THETA), static_cast<float>(FACTOR),
-                 /*rope_dim=*/0, /*neox=*/false, /*ext_factor=*/1.0f, /*attn_factor=*/1.0f, corr_dims_host,
-                 /*stream=*/nullptr);
+    rope_forward({.Q = &Q,
+                  .K = &K,
+                  .positions = dPos,
+                  .head_dim = HD,
+                  .theta = static_cast<float>(THETA),
+                  .scaling = static_cast<float>(FACTOR),
+                  .rope_dim = 0,
+                  .neox = false,
+                  .ext_factor = 1.0f,
+                  .attn_factor = 1.0f,
+                  .corr_dims = corr_dims_host,
+                  .stream = nullptr});
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<half> Qo(Qh.size()), Ko(Kh.size());

@@ -20,11 +20,25 @@ namespace imp {
 // quantize(swiglu(gate, fp16(D))) as packed [M,N/2] + SfAtom scales (cutlass_nvfp4_sf_size(M, N)) at
 // q_act_scale, the bytes of gemm_nvfp4_tile + swiglu_quantize_fp16_to_nvfp4_cutlass with the same workspace.
 // gate [M,N] fp16. N % 16 == 0; false = refused, nothing written. Auto variant.
-[[nodiscard]] bool gemm_nvfp4_tile_swiglu_quant(const void* a_data, const void* a_sf, const void* w_data,
-                                                const void* w_sf, float alpha, const void* gate_fp16,
-                                                void* q_packed, void* q_sf, float q_act_scale, int M, int N,
-                                                int K, cudaStream_t stream, void* workspace = nullptr,
-                                                size_t workspace_bytes = 0);
+// Arguments in the old parameter order (audit D-11); workspace nullptr = data-parallel only.
+struct GemmNvfp4TileSwigluQuantArgs {
+    const void* a_data = nullptr;
+    const void* a_sf = nullptr;
+    const void* w_data = nullptr;
+    const void* w_sf = nullptr;
+    float alpha = 0.0f;
+    const void* gate_fp16 = nullptr;
+    void* q_packed = nullptr;
+    void* q_sf = nullptr;
+    float q_act_scale = 0.0f;
+    int M = 0;
+    int N = 0;
+    int K = 0;
+    cudaStream_t stream = nullptr;
+    void* workspace = nullptr;
+    size_t workspace_bytes = 0;
+};
+[[nodiscard]] bool gemm_nvfp4_tile_swiglu_quant(const GemmNvfp4TileSwigluQuantArgs& a);
 // The SwiGLU-quant epilogue clipped a block scale at 448 (#1544); read at shutdown (synchronises).
 [[nodiscard]] bool gemm_nvfp4_tile_scale_clipped();
 // Same, fp32 D [M,N] stored per fragment (LM head logits); auto variant.
@@ -51,10 +65,24 @@ namespace imp {
 // Same kernel on FP8 (kind::f8f6f4, no SF): D[M,N] fp16 = as(m) * *w_scale * A W^T + beta * D, as(m) =
 // a_scale[m] when a_per_row (per-token activation scales), else *a_scale. A [M,K] / W [N,K] E4M3 row-major,
 // scales in device memory (graph-capturable). K % 64 == 0, N % 8 == 0. Variants and workspace as above.
-[[nodiscard]] bool gemm_fp8_tile(const void* a_data, const void* w_data, const float* a_scale,
-                                 const float* w_scale, float beta, void* d_fp16, int M, int N, int K,
-                                 cudaStream_t stream, int variant = -1, void* workspace = nullptr,
-                                 size_t workspace_bytes = 0, bool a_per_row = false);
+// Arguments in the old parameter order (audit D-11); variant -1 = auto.
+struct GemmFp8TileArgs {
+    const void* a_data = nullptr;
+    const void* w_data = nullptr;
+    const float* a_scale = nullptr;
+    const float* w_scale = nullptr;
+    float beta = 0.0f;
+    void* d_fp16 = nullptr;
+    int M = 0;
+    int N = 0;
+    int K = 0;
+    cudaStream_t stream = nullptr;
+    int variant = -1;
+    void* workspace = nullptr;
+    size_t workspace_bytes = 0;
+    bool a_per_row = false;
+};
+[[nodiscard]] bool gemm_fp8_tile(const GemmFp8TileArgs& a);
 
 // Workspace that lets auto pick stream-K: one fp32 128x128 partial tile per SM (170 x 64 KiB on the 5090).
 size_t gemm_tile_streamk_workspace_bytes();
