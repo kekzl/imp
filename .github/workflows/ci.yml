@@ -37,8 +37,28 @@ permissions:
   contents: read
 
 jobs:
+  # Picks `Build`'s container: a docs-only diff runs `Build` on the runner without the CI image
+  # (1.1 GB pull, median 32 s of a 94 s docs-only Build). Same script as Build's own detection.
+  changes:
+    name: Changes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # the base SHA for `git diff`
+      - name: Detect non-docs changes
+        id: changes
+        run: sh scripts/ci_changes.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
+
   build:
     name: Build
+    needs: changes
+    # Also when `Changes` failed: a skipped `Build` reports success on the required check. An
+    # empty `needs.changes.outputs.code` then picks the container (fail-open).
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     outputs:
@@ -48,7 +68,9 @@ jobs:
       # .github/ci-image/Dockerfile (1104 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
       # nvcc, cuBLAS, git, python3, cmake, ninja, ccache preinstalled, so no job runs apt for its toolchain.
       # Ubuntu 26.04, GCC 15.2: same libstdc++ 15 as the release image (#903).
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
+      # Empty image = the runner itself (ubuntu-26.04, same python3): only for code=false, where
+      # every toolchain step below is skipped and only the static gates run.
+      image: ${{ needs.changes.outputs.code != 'false' && 'ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c' || '' }}
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -87,53 +109,22 @@ jobs:
       # Docs-only changes (only **/*.md or docs/** touched) skip the expensive
       # CUDA build/test below but still report the required `Build` check as
       # success — every heavy step is gated on steps.changes.outputs.code, so the
-      # job goes green in seconds instead of compiling
-      # and linking. Plain `git diff` (no third-party action,
-      # so no Node-deprecation churn). FAIL-OPEN: any uncertainty (no base SHA,
-      # git error, empty diff) → code=true, so detection can never wrongly skip a
+      # job goes green in seconds instead of compiling and linking, on the bare
+      # runner (see `Changes`). Plain `git diff` in scripts/ci_changes.sh (no
+      # third-party action, so no Node-deprecation churn). FAIL-OPEN: no base SHA
+      # or an empty diff → code=true, so detection can never wrongly skip a
       # code change or leave the required check unreported.
       - name: Detect non-docs changes
         id: changes
+        run: sh scripts/ci_changes.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
+
+      # Both jobs run the same script on the same base, so this never fires; if it did, the steps
+      # below would compile on a runner without nvcc. Fail here, by name.
+      - name: Container matches the detection
+        if: steps.changes.outputs.code == 'true' && needs.changes.outputs.code == 'false'
         run: |
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          code=true
-          # `cpp` gates the clang-tidy steps below, which lint changed src|tools|tests
-          # *.cpp, the host side of changed src/*.cu, tests/*.cu (#2210) and up to 3 TUs per changed
-          # src|tools|tests|include header (scripts/tidy_lane.sh): no apt install
-          # when there is nothing to lint. Same FAIL-OPEN rule as `code`: any
-          # uncertainty runs them.
-          cpp=true
-          # Say so when the fail-open fires. Without this the step prints a
-          # perfectly normal-looking `code=true` and an empty file list, which
-          # is what let a permanently-open gate go unnoticed: it looks the same
-          # as a genuine code PR. A run that cannot resolve its base is a
-          # detection that is not running, and should read as one.
-          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "::warning::change detection fell open (base '${base:-<unset>}' unresolvable) - every gated step runs"
-          fi
-          if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            files="$(git diff --name-only "$base" HEAD)"
-            # code stays true unless EVERY changed file is markdown, docs/, .claude/
-            # or a workflow other than ci.yml: none is a build input; 4/69 PR runs compiled 91-739 s for them.
-            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/|^\.claude/|^\.github/workflows/(codeql|auto-merge|roofline|release-docker)\.yml$)'; then
-              code=false
-            fi
-            # `grep -c`, not `grep -q`, and no here-string. Two traps meet on
-            # this line. #1499: `grep -q` exits at the first match, the producer
-            # takes EPIPE and pipefail reports a non-zero pipeline for a
-            # SUCCESSFUL match. And the here-string the other lanes use to dodge
-            # that is a bashism - this job declares no `shell:`, so it gets
-            # whatever the CUDA image provides, and `Build` is the one required
-            # check (ruleset 14716423): a syntax error here fails every PR.
-            # `grep -c` reads all of stdin, so nothing ever takes EPIPE, and it
-            # is POSIX. `|| true` because grep exits 1 when the count is 0.
-            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$|^(src|tools|tests|include)/.*\.(h|hpp|cuh)$' || true)"
-            [ "${n_cpp:-0}" -gt 0 ] || cpp=false
-          fi
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "cpp=$cpp" >> "$GITHUB_OUTPUT"
-          printf 'non-docs changes: code=%s (src|tools|tests .cpp, src|tests .cu or header: %s)\nchanged files:\n%s\n' \
-            "$code" "$cpp" "${files:-<none>}"
+          echo "::error::Changes said docs-only (no container) but Build detected code changes"
+          exit 1
 
       # The blocking static gates, FIRST, before the compile. Ruleset 14716423
       # requires exactly one context (`Build`), so a gate that runs only as its

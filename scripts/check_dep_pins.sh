@@ -59,6 +59,12 @@ jobs:
             -o /tmp/f
           echo '4444444444444444444444444444444444444444444444444444444444444444  /tmp/f' | sha256sum -c -
 EOF
+        cat > "$tmp/.github/workflows/x.yml" <<'EOF'
+jobs:
+  k:
+    container:
+      image: ${{ needs.c.outputs.code != 'false' && 'example.com/base:1.0@sha256:1111111111111111111111111111111111111111111111111111111111111111' || '' }}
+EOF
     }
 
     st_case() {  # name, expected-substring ("" = must pass)
@@ -81,6 +87,8 @@ EOF
     st_case "helper Dockerfile on a bare tag" "Dockerfile.agents:1 'example.com/helper:2.0' is tag-pinned"
     fixture; sed -i 's|@sha256:6666[0-9a-f]*||' "$tmp/docker-compose.yml"
     st_case "compose image on a bare tag" "docker-compose.yml:5 'example.com/web:3.0' is tag-pinned"
+    fixture; sed -i 's|@sha256:1111[0-9a-f]*||' "$tmp/.github/workflows/x.yml"
+    st_case "expression image on a bare tag" "x.yml:4 'example.com/base:1.0' is tag-pinned"
     fixture; sed -i 's|imp:ciq|imp:unlisted|' "$tmp/tools/analysis/Dockerfile.cutile"
     st_case "local image not in the exempt list" "'imp:unlisted' is tag-pinned"
     fixture; sed -i 's|@sha256:1111111111111111111111111111111111111111111111111111111111111111|@sha256:9999999999999999999999999999999999999999999999999999999999999999|' "$tmp/.github/workflows/w.yml"
@@ -282,11 +290,27 @@ for f in "${ALL_DOCKERFILES[@]}"; do
         check_image_ref "$f" "$line" "$ref"
     done < <(grep -nE '^FROM[[:space:]]' "$f" | sed -E 's/^([0-9]+):FROM[[:space:]]+([^[:space:]]+).*/\1:\2/')
 done
+# `image: ${{ cond && 'ref' || '' }}` (ci.yml Build: docs-only runs on the bare runner): every
+# non-empty quoted operand of && / || is a ref; a comparison literal ('false') is not.
+image_lines() {  # file -> "line:ref"
+    local hit line text lit
+    while IFS= read -r hit; do
+        line="${hit%%:*}"; text="${hit#*:}"
+        if [[ "$text" == *'${{'* ]]; then
+            while IFS= read -r lit; do
+                lit="${lit#*\'}"; lit="${lit%\'}"
+                [ -n "$lit" ] && printf '%s:%s\n' "$line" "$lit"
+            done < <(grep -oE "(&&|\|\|)[[:space:]]*'[^']*'" <<< "$text")
+        else
+            printf '%s\n' "$hit" | tr -d "\"'" \
+                | sed -E 's/^([0-9]+):[[:space:]]*image:[[:space:]]*([^[:space:]#]+).*/\1:\2/'
+        fi
+    done < <(grep -nE '^[[:space:]]*image:[[:space:]]' "$1")
+}
 for f in "${WORKFLOWS[@]}" "${COMPOSE_FILES[@]}"; do
     while IFS=: read -r line ref; do
         check_image_ref "$f" "$line" "$ref"
-    done < <(grep -nE '^[[:space:]]*image:[[:space:]]' "$f" | tr -d "\"'" \
-             | sed -E 's/^([0-9]+):[[:space:]]*image:[[:space:]]*([^[:space:]#]+).*/\1:\2/')
+    done < <(image_lines "$f")
 done
 printf '  %d image refs\n' "$n_images"
 
