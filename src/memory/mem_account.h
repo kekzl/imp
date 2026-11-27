@@ -104,7 +104,7 @@ public:
 
 private:
     MemAccount() = default;
-    ~MemAccount();
+    ~MemAccount() = delete;  // never destroyed: instance() leaks it, Engine::~Engine stops the sampler
     MemAccount(const MemAccount&) = delete;
     MemAccount& operator=(const MemAccount&) = delete;
 

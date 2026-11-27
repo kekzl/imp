@@ -4,6 +4,11 @@
 #include "memory/mem_account.h"
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <string>
+
+#include "death_test_exec.h"
+
 namespace imp {
 namespace {
 
@@ -33,6 +38,22 @@ TEST(MemAccountKeyed, FreeOfAnUnchargedPointerChangesNothing) {
     m.note_free(&a);
     m.note_free(&a);  // a second free of the same pointer uncharges once
     EXPECT_EQ(m.pool_current(kPool), before - 512);
+}
+
+// VRAMAllocator::free() notes here, also from a static owner destroyed at exit (the Inkling test
+// fixture). The re-executed child first registers the late note, then first uses MemAccount, so a
+// Meyers instance would be destroyed before it; 8 pools fill the vector, the late one reallocates.
+void note_after_exit() { MemAccount::instance().note("test_exit_pool_late", -1); }
+[[noreturn]] void exit_with_a_late_note() {
+    std::atexit(&note_after_exit);
+    for (int i = 0; i < 8; ++i)
+        MemAccount::instance().note(("test_exit_pool_" + std::to_string(i)).c_str(), 1);
+    std::exit(0);
+}
+
+TEST(MemAccountExit, AStaticOwnerStillNotesAfterExit) {
+    imp_test::threadsafe_death_tests();
+    EXPECT_EXIT(exit_with_a_late_note(), ::testing::ExitedWithCode(0), "");
 }
 
 }  // namespace
