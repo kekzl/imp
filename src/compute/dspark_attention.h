@@ -19,9 +19,23 @@ cudaError_t dspark_attention(const half* q, const half* k, const half* v, half* 
 // Graph-replayable: kv_len = *d_ctx + rows read on the device, <= max_kv_len (sizes the grid).
 // d_first (optional): the launch's key 0 is row *d_first of K / V (a window that moves with the position).
 // blocks (optional, device): key k at row blocks[k / 16] * 16 + k % 16 of K / V (a paged KV layer).
-cudaError_t dspark_attention_dev(const half* q, const half* k, const half* v, half* o, float* work, int rows,
-                                 int n_heads, int n_kv_heads, const int* d_ctx, int max_kv_len, float scale,
-                                 cudaStream_t stream, const int* d_first = nullptr,
-                                 const int* blocks = nullptr);
+// Arguments in the old parameter order (audit D-11); d_first / blocks keep the old nullptr defaults.
+struct DsparkAttentionDevArgs {
+    const half* q = nullptr;
+    const half* k = nullptr;
+    const half* v = nullptr;
+    half* o = nullptr;
+    float* work = nullptr;
+    int rows = 0;
+    int n_heads = 0;
+    int n_kv_heads = 0;
+    const int* d_ctx = nullptr;
+    int max_kv_len = 0;
+    float scale = 0.0f;
+    cudaStream_t stream = nullptr;
+    const int* d_first = nullptr;
+    const int* blocks = nullptr;
+};
+cudaError_t dspark_attention_dev(const DsparkAttentionDevArgs& a);
 
 }  // namespace imp

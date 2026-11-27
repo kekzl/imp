@@ -168,10 +168,21 @@ void GraphExecutor::qsa_attend_rows_(int layer, const InferenceState& state, con
     const int nkv = cfg.n_kv_heads, hd = cfg.head_dim, nh = cfg.n_heads;
     const int cap = cfg.qsa_budget + cfg.qsa_ratio - 1;
     const int kv_layer = get_kv_layer(kv_layer_map_, layer);
-    qsa_gather_kv(static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
-                  static_cast<const half*>(cache->v_ptr(kv_layer, 0)), bt, bs, nkv, hd, qsa_sel_tokens_,
-                  qsa_sel_count_, cap, static_cast<half*>(qsa_k_scratch_), static_cast<half*>(qsa_v_scratch_),
-                  qsa_blocks_per_row_, qsa_scratch_ctx_, rows, stream);
+    qsa_gather_kv({.k_cache = static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
+                   .v_cache = static_cast<const half*>(cache->v_ptr(kv_layer, 0)),
+                   .bt = bt,
+                   .block_size = bs,
+                   .n_kv = nkv,
+                   .hd = hd,
+                   .sel_tokens = qsa_sel_tokens_,
+                   .sel_count = qsa_sel_count_,
+                   .cap = cap,
+                   .k_scratch = static_cast<half*>(qsa_k_scratch_),
+                   .v_scratch = static_cast<half*>(qsa_v_scratch_),
+                   .blocks_per_row = qsa_blocks_per_row_,
+                   .scratch_ctx = qsa_scratch_ctx_,
+                   .rows = rows,
+                   .stream = stream});
     const int64_t qd[4] = {rows, 1, nh, hd};
     const int64_t cs[4] = {static_cast<int64_t>(rows) * qsa_blocks_per_row_, bs, nkv, hd};
     Tensor Q(const_cast<void*>(q_rows), QType::F16, 4, qd, true);

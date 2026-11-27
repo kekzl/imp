@@ -64,12 +64,42 @@ protected:
         int64_t s_h_sf = tokens_rounded * s_t_sf;
         int64_t s_bz_sf = heads * s_h_sf;
 
-        bool q_ok = nvfp4_quant_hw_fp16(d_input, d_nvfp4, d_sf, batch, heads, tokens, head_dim, s_bz, s_h,
-                                        s_t, s_bz_out, s_h_out, s_t_out, s_bz_sf, s_h_sf, s_t_sf, 0);
+        bool q_ok = nvfp4_quant_hw_fp16({.d_input = d_input,
+                                         .d_nvfp4 = d_nvfp4,
+                                         .d_sf = d_sf,
+                                         .batch_size = batch,
+                                         .n_heads = heads,
+                                         .n_tokens = tokens,
+                                         .head_dim = head_dim,
+                                         .stride_bz_input = s_bz,
+                                         .stride_h_input = s_h,
+                                         .stride_seq_input = s_t,
+                                         .stride_bz_output = s_bz_out,
+                                         .stride_h_output = s_h_out,
+                                         .stride_seq_output = s_t_out,
+                                         .stride_bz_output_sf = s_bz_sf,
+                                         .stride_h_output_sf = s_h_sf,
+                                         .stride_seq_output_sf = s_t_sf,
+                                         .stream = nullptr});
         ASSERT_TRUE(q_ok);
 
-        bool dq_ok = nvfp4_dequant_hw_fp16(d_nvfp4, d_sf, d_output, batch, heads, tokens, head_dim, s_bz_out,
-                                           s_h_out, s_t_out, s_bz, s_h, s_t, s_bz_sf, s_h_sf, s_t_sf, 0);
+        bool dq_ok = nvfp4_dequant_hw_fp16({.d_nvfp4 = d_nvfp4,
+                                            .d_sf = d_sf,
+                                            .d_output = d_output,
+                                            .batch_size = batch,
+                                            .n_heads = heads,
+                                            .n_tokens = tokens,
+                                            .head_dim = head_dim,
+                                            .stride_bz_input = s_bz_out,
+                                            .stride_h_input = s_h_out,
+                                            .stride_seq_input = s_t_out,
+                                            .stride_bz_output = s_bz,
+                                            .stride_h_output = s_h,
+                                            .stride_seq_output = s_t,
+                                            .stride_bz_input_sf = s_bz_sf,
+                                            .stride_h_input_sf = s_h_sf,
+                                            .stride_seq_input_sf = s_t_sf,
+                                            .stream = nullptr});
         ASSERT_TRUE(dq_ok);
 
         cudaDeviceSynchronize();

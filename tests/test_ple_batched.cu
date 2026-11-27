@@ -95,8 +95,18 @@ PleRun run_conv(const std::vector<int>& slots, bool batched, uint32_t seed_state
         const Tensor tgv = rows_tensor(d_gv.p, n, kChannels);
         const Tensor tgvn = rows_tensor(d_gvn.p, n, kChannels);
         Tensor th = rows_tensor(d_hidden.p, n, kChannels);
-        ple_conv_add(tgv, tgvn, tw, d_slab.p, kStride, static_cast<const int*>(d_slots.p), n, th, kChannels,
-                     kKernel, kDilation, nullptr);
+        ple_conv_add({.gv = &tgv,
+                      .gvn = &tgvn,
+                      .w = &tw,
+                      .conv_state = d_slab.p,
+                      .slot_stride = kStride,
+                      .slots = static_cast<const int*>(d_slots.p),
+                      .n_seq = n,
+                      .hidden = &th,
+                      .channels = kChannels,
+                      .kernel = kKernel,
+                      .dilation = kDilation,
+                      .stream = nullptr});
     } else {
         for (int s = 0; s < n; s++) {
             const size_t off = static_cast<size_t>(s) * kChannels * 2;
@@ -105,7 +115,18 @@ PleRun run_conv(const std::vector<int>& slots, bool batched, uint32_t seed_state
             Tensor th = rows_tensor(static_cast<char*>(d_hidden.p) + off, 1, kChannels);
             void* st = static_cast<uint16_t*>(d_slab.p) +
                        static_cast<size_t>(slots[static_cast<size_t>(s)]) * kStride;
-            ple_conv_add(tgv, tgvn, tw, st, 0, nullptr, 1, th, kChannels, kKernel, kDilation, nullptr);
+            ple_conv_add({.gv = &tgv,
+                          .gvn = &tgvn,
+                          .w = &tw,
+                          .conv_state = st,
+                          .slot_stride = 0,
+                          .slots = nullptr,
+                          .n_seq = 1,
+                          .hidden = &th,
+                          .channels = kChannels,
+                          .kernel = kKernel,
+                          .dilation = kDilation,
+                          .stream = nullptr});
         }
     }
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -151,9 +172,21 @@ TEST_F(PLEBatched, NeighbourStateDoesNotReachARow) {
     h2d(d_slab.p, slab_b);
     h2d(d_slots.p, slots);
     Tensor th = rows_tensor(d_hidden.p, n, kChannels);
-    ple_conv_add(rows_tensor(d_gv.p, n, kChannels), rows_tensor(d_gvn.p, n, kChannels),
-                 rows_tensor(d_w.p, kChannels, kKernel), d_slab.p, kStride,
-                 static_cast<const int*>(d_slots.p), n, th, kChannels, kKernel, kDilation, nullptr);
+    const Tensor tgv = rows_tensor(d_gv.p, n, kChannels);
+    const Tensor tgvn = rows_tensor(d_gvn.p, n, kChannels);
+    const Tensor tw = rows_tensor(d_w.p, kChannels, kKernel);
+    ple_conv_add({.gv = &tgv,
+                  .gvn = &tgvn,
+                  .w = &tw,
+                  .conv_state = d_slab.p,
+                  .slot_stride = kStride,
+                  .slots = static_cast<const int*>(d_slots.p),
+                  .n_seq = n,
+                  .hidden = &th,
+                  .channels = kChannels,
+                  .kernel = kKernel,
+                  .dilation = kDilation,
+                  .stream = nullptr});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     const auto hidden_b = d2h<uint16_t>(d_hidden.p, row_elems);
     const auto slab_out = d2h<uint16_t>(d_slab.p, slab_b.size());
@@ -192,9 +225,20 @@ TEST_F(PLEBatched, PrefillChunkMatchesTokenSteps) {
         for (int r0 = 0; r0 < kRows; r0 += chunk) {
             const size_t off = static_cast<size_t>(r0) * kChannels * 2;
             Tensor th = rows_tensor(static_cast<char*>(d_hidden.p) + off, chunk, kChannels);
-            ple_conv_add(rows_tensor(static_cast<char*>(d_gv.p) + off, chunk, kChannels),
-                         rows_tensor(static_cast<char*>(d_gvn.p) + off, chunk, kChannels), tw, d_st.p, 0,
-                         nullptr, 1, th, kChannels, kKernel, kDilation, nullptr);
+            const Tensor tgv = rows_tensor(static_cast<char*>(d_gv.p) + off, chunk, kChannels);
+            const Tensor tgvn = rows_tensor(static_cast<char*>(d_gvn.p) + off, chunk, kChannels);
+            ple_conv_add({.gv = &tgv,
+                          .gvn = &tgvn,
+                          .w = &tw,
+                          .conv_state = d_st.p,
+                          .slot_stride = 0,
+                          .slots = nullptr,
+                          .n_seq = 1,
+                          .hidden = &th,
+                          .channels = kChannels,
+                          .kernel = kKernel,
+                          .dilation = kDilation,
+                          .stream = nullptr});
         }
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         out[mode] = d2h<uint16_t>(d_hidden.p, row_elems);

@@ -455,3 +455,12 @@ Seven launchers take one args struct; clang-format breaks a wrapped designated l
 | `tests/test_gdn_batched.cu` | 937 | 962 | new, 813 (was 788, TU hard line 800) |
 | `src/compute/mtp_forward.cu` | 1720 | 1762 | 1393 -> 1435 |
 | `tests/test_sparse_attn_select.cu` | 982 | 998 | 844 -> 860 |
+
+## 2026-11-27: B-133 slice 7 call sites (D-11)
+
+Ten launchers take one args struct; clang-format breaks a wrapped designated list one field per line.
+
+| file | raw LOC before | raw LOC after | `[allow]` pin (code LOC) |
+|---|---:|---:|---|
+| `src/compute/mtp_forward.cu` | 1762 | 1789 | 1435 -> 1462 |
+| `tests/test_gdn.cu` | 1613 | 1665 | 1372 -> 1424 |

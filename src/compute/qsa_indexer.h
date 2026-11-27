@@ -51,10 +51,25 @@ void qsa_select(const half* q, const int* positions, const half* block_keys, flo
 // [block][block_size][n_kv][hd], one sequence's block table `bt`) into a scratch paged
 // cache where row r owns blocks [r * blocks_per_row, (r+1) * blocks_per_row); writes
 // scratch_ctx[r] = sel_count[r]. scratch_bt is filled by qsa_init_scratch_bt.
-void qsa_gather_kv(const half* k_cache, const half* v_cache, const int* bt, int block_size,
-                   int n_kv, int hd, const int32_t* sel_tokens, const int32_t* sel_count,
-                   int cap, half* k_scratch, half* v_scratch, int blocks_per_row,
-                   int32_t* scratch_ctx, int rows, cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); all required.
+struct QsaGatherKvArgs {
+    const half* k_cache = nullptr;
+    const half* v_cache = nullptr;
+    const int* bt = nullptr;
+    int block_size = 0;
+    int n_kv = 0;
+    int hd = 0;
+    const int32_t* sel_tokens = nullptr;
+    const int32_t* sel_count = nullptr;
+    int cap = 0;
+    half* k_scratch = nullptr;
+    half* v_scratch = nullptr;
+    int blocks_per_row = 0;
+    int32_t* scratch_ctx = nullptr;
+    int rows = 0;
+    cudaStream_t stream = nullptr;
+};
+void qsa_gather_kv(const QsaGatherKvArgs& a);
 void qsa_init_scratch_bt(int32_t* scratch_bt, int rows, int blocks_per_row, cudaStream_t stream);
 
 }  // namespace imp

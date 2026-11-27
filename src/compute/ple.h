@@ -20,9 +20,25 @@ void ple_gate_value(const Tensor& key, Tensor& q_gv, const Tensor& value, int hc
 // conv_state + (slots ? slots[s] : 0) * slot_stride halves (slots: DEVICE, graph-stable).
 // Single sequence: d_real_n (device) caps the committed rows (pad rows), snap_state gets the state
 // after d_snap_n rows (verify row-0 snapshot). All three nullable.
-void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* conv_state, int64_t slot_stride,
-                  const int* slots, int n_seq, Tensor& hidden, int channels, int kernel, int dilation,
-                  cudaStream_t stream, void* snap_state = nullptr, const int* d_snap_n = nullptr,
-                  const int* d_real_n = nullptr);
+// Arguments in the old parameter order (audit D-11); Tensors by pointer, required. The trailing
+// snap_state / d_snap_n / d_real_n keep the old nullptr defaults.
+struct PleConvAddArgs {
+    const Tensor* gv = nullptr;
+    const Tensor* gvn = nullptr;
+    const Tensor* w = nullptr;
+    void* conv_state = nullptr;
+    int64_t slot_stride = 0;
+    const int* slots = nullptr;
+    int n_seq = 0;
+    Tensor* hidden = nullptr;
+    int channels = 0;
+    int kernel = 0;
+    int dilation = 0;
+    cudaStream_t stream = nullptr;
+    void* snap_state = nullptr;
+    const int* d_snap_n = nullptr;
+    const int* d_real_n = nullptr;
+};
+void ple_conv_add(const PleConvAddArgs& a);
 
 }  // namespace imp

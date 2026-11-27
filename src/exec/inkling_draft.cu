@@ -367,9 +367,20 @@ bool InklingDraft::block_(cudaStream_t s) {
         IMP_CUDA_CHECK_LAUNCH();
         draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD + KD, KD, vc, nk, d_row, 0, tbl);
         IMP_CUDA_CHECK_LAUNCH();
-        if (dspark_attention_dev(q_, kc, vc, o_, work_, B, c.heads, c.kv_heads, local ? d_ctx_local : d_pos,
-                                 (local ? std::min(c.window, max_ctx_) : max_ctx_) + B, scale, s,
-                                 local ? d_first_local : nullptr, tbl) != cudaSuccess)
+        if (dspark_attention_dev({.q = q_,
+                                  .k = kc,
+                                  .v = vc,
+                                  .o = o_,
+                                  .work = work_,
+                                  .rows = B,
+                                  .n_heads = c.heads,
+                                  .n_kv_heads = c.kv_heads,
+                                  .d_ctx = local ? d_ctx_local : d_pos,
+                                  .max_kv_len = (local ? std::min(c.window, max_ctx_) : max_ctx_) + B,
+                                  .scale = scale,
+                                  .stream = s,
+                                  .d_first = local ? d_first_local : nullptr,
+                                  .blocks = tbl}) != cudaSuccess)
             return false;
         lin8_(o_, B, QD, ly.wo8, ly.wo, H, y_, s);
         draft_add_k<<<blocks(bH), kT, 0, s>>>(h_, y_, bH);

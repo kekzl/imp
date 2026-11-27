@@ -118,7 +118,21 @@ TEST(QsaIndexer, AllTrueSelectionMatchesDensePaged) {
     cudaMemset(dVs, 0x55, scr * sizeof(half));
     qsa_init_scratch_bt(d_sbt, rows, bpr, nullptr);
     qsa_select(dQi, dpos, dBK, d_scores, nb_max, d_sel, d_cnt, rows, g, nullptr);
-    qsa_gather_kv(dK, dV, dbt, bs, nkv, hd, d_sel, d_cnt, cap, dKs, dVs, bpr, d_sctx, rows, nullptr);
+    qsa_gather_kv({.k_cache = dK,
+                   .v_cache = dV,
+                   .bt = dbt,
+                   .block_size = bs,
+                   .n_kv = nkv,
+                   .hd = hd,
+                   .sel_tokens = d_sel,
+                   .sel_count = d_cnt,
+                   .cap = cap,
+                   .k_scratch = dKs,
+                   .v_scratch = dVs,
+                   .blocks_per_row = bpr,
+                   .scratch_ctx = d_sctx,
+                   .rows = rows,
+                   .stream = nullptr});
     Tensor tKs = f16(dKs, {rows * bpr, bs, nkv, hd}), tVs = f16(dVs, {rows * bpr, bs, nkv, hd}),
            tOs = f16(dO_sel, {rows, 1, nh, hd});
     paged_attention_decode({.Q = &tQ,
@@ -322,7 +336,21 @@ TEST(QsaIndexer, SplitKBelowBudgetMatchesDensePaged) {
     cudaMalloc(&dVs, scr * sizeof(half));
     qsa_init_scratch_bt(d_sbt, rows, bpr, nullptr);
     qsa_select(dQi, dpos, dBK, d_scores, nb_max, d_sel, d_cnt, rows, g, nullptr);
-    qsa_gather_kv(dK, dV, dbt, bs, nkv, hd, d_sel, d_cnt, cap, dKs, dVs, bpr, d_sctx, rows, nullptr);
+    qsa_gather_kv({.k_cache = dK,
+                   .v_cache = dV,
+                   .bt = dbt,
+                   .block_size = bs,
+                   .n_kv = nkv,
+                   .hd = hd,
+                   .sel_tokens = d_sel,
+                   .sel_count = d_cnt,
+                   .cap = cap,
+                   .k_scratch = dKs,
+                   .v_scratch = dVs,
+                   .blocks_per_row = bpr,
+                   .scratch_ctx = d_sctx,
+                   .rows = rows,
+                   .stream = nullptr});
     Tensor tKs = f16(dKs, {rows * bpr, bs, nkv, hd}), tVs = f16(dVs, {rows * bpr, bs, nkv, hd}),
            tOs = f16(dO_sel, {rows, 1, nh, hd});
     paged_attention_decode({.Q = &tQ,

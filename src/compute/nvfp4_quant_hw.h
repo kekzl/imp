@@ -20,21 +20,52 @@ namespace imp {
 // Host-callable entry: quantize a 4D FP16/BF16 tensor to NVFP4 + HW-layout
 // FP8 UE4M3 scales. Returns false on invalid parameters. Lays out the
 // scale buffer in the format consumed by the block-scaled MMA.
-[[nodiscard]] bool nvfp4_quant_hw_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, int batch_size, int n_heads,
-                         int n_tokens, int head_dim,
-                         int64_t stride_bz_input,  // elements
-                         int64_t stride_h_input, int64_t stride_seq_input,
-                         int64_t stride_bz_output,  // bytes (nvfp4 is 1/2 byte per elem)
-                         int64_t stride_h_output, int64_t stride_seq_output, int64_t stride_bz_output_sf,
-                         int64_t stride_h_output_sf, int64_t stride_seq_output_sf, cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); all required. Input strides in elements,
+// output strides in bytes (nvfp4 is 1/2 byte per elem).
+struct Nvfp4QuantHwArgs {
+    const half* d_input = nullptr;
+    uint8_t* d_nvfp4 = nullptr;
+    uint8_t* d_sf = nullptr;
+    int batch_size = 0;
+    int n_heads = 0;
+    int n_tokens = 0;
+    int head_dim = 0;
+    int64_t stride_bz_input = 0;
+    int64_t stride_h_input = 0;
+    int64_t stride_seq_input = 0;
+    int64_t stride_bz_output = 0;
+    int64_t stride_h_output = 0;
+    int64_t stride_seq_output = 0;
+    int64_t stride_bz_output_sf = 0;
+    int64_t stride_h_output_sf = 0;
+    int64_t stride_seq_output_sf = 0;
+    cudaStream_t stream = nullptr;
+};
+[[nodiscard]] bool nvfp4_quant_hw_fp16(const Nvfp4QuantHwArgs& a);
 
 // Dequantize back to FP16 using the same HW layout — inverse of the
 // quant kernel. Used for round-trip validation. Production attention
 // kernels do not need this because the MMA dequants implicitly.
-[[nodiscard]] bool nvfp4_dequant_hw_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half* d_output, int batch_size,
-                           int n_heads, int n_tokens, int head_dim, int64_t stride_bz_input,
-                           int64_t stride_h_input, int64_t stride_seq_input, int64_t stride_bz_output,
-                           int64_t stride_h_output, int64_t stride_seq_output, int64_t stride_bz_input_sf,
-                           int64_t stride_h_input_sf, int64_t stride_seq_input_sf, cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); all required.
+struct Nvfp4DequantHwArgs {
+    const uint8_t* d_nvfp4 = nullptr;
+    const uint8_t* d_sf = nullptr;
+    half* d_output = nullptr;
+    int batch_size = 0;
+    int n_heads = 0;
+    int n_tokens = 0;
+    int head_dim = 0;
+    int64_t stride_bz_input = 0;
+    int64_t stride_h_input = 0;
+    int64_t stride_seq_input = 0;
+    int64_t stride_bz_output = 0;
+    int64_t stride_h_output = 0;
+    int64_t stride_seq_output = 0;
+    int64_t stride_bz_input_sf = 0;
+    int64_t stride_h_input_sf = 0;
+    int64_t stride_seq_input_sf = 0;
+    cudaStream_t stream = nullptr;
+};
+[[nodiscard]] bool nvfp4_dequant_hw_fp16(const Nvfp4DequantHwArgs& a);
 
 }  // namespace imp
