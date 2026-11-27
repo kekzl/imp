@@ -163,32 +163,10 @@ TEST(GdnScanArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ(a.snap2_off, 0);
 }
 
-// 18 fields, the old gdn_scan_chunkpar_{f32,bf16} parameter list in order; strip_chunks 0 = auto.
-TEST(GdnChunkparArgs, CarriesEveryFieldInDeclarationOrder) {
-    const GdnChunkparArgs<float> a{.conv_channels = 1,
-                                   .n_tokens = 2,
-                                   .n_heads = 3,
-                                   .head_dim_ssm = 4,
-                                   .state_size = 5,
-                                   .n_groups = 6,
-                                   .grouped_layout = 7,
-                                   .ws_bytes = 8,
-                                   .strip_chunks = 9};
-    const auto& [conv, cc, al, be, alog, dtb, h, y, nt, nh, hd, ss, ng, st, gl, ws, wsb, sc] = a;
-    EXPECT_EQ((std::array{cc, nt, nh, hd, ss, ng, gl, sc}), (std::array{1, 2, 3, 4, 5, 6, 7, 9}));
-    EXPECT_EQ(wsb, 8u);
-    EXPECT_EQ(GdnChunkparArgs<__nv_bfloat16>{}.strip_chunks, 0);
-}
-
-// 21 fields, the old ssm_scan_prefill parameter list in order; defaults FP32 state, no SSD.
-TEST(SsmScanPrefillArgs, CarriesEveryFieldInDeclarationOrder) {
-    const SsmScanPrefillArgs a{
-        .n_tokens = 1, .n_heads = 2, .head_dim_ssm = 3, .state_size = 4, .n_groups = 5};
-    const auto& [x, b, c, dt, alog, d, dtb, h, y, z, nt, nh, hd, ss, ng, hq, st, rn, snap, sn, ssd] = a;
-    EXPECT_EQ((std::array{nt, nh, hd, ss, ng}), (std::array{1, 2, 3, 4, 5}));
-    EXPECT_EQ(hq, imp::QType::F32);
-    EXPECT_FALSE(ssd);
-    EXPECT_EQ(rn, nullptr);
-}
+// Defaults the two field-order cases asserted (deleted: the designated-init call sites fail the
+// build on a field swap): strip_chunks 0 = auto; FP32 state, no SSD, no padding bound.
+static_assert(GdnChunkparArgs<__nv_bfloat16>{}.strip_chunks == 0);
+static_assert(SsmScanPrefillArgs{}.h_dtype == imp::QType::F32 && !SsmScanPrefillArgs{}.ssd &&
+              SsmScanPrefillArgs{}.d_real_n == nullptr);
 
 }  // namespace

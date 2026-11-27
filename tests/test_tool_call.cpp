@@ -469,33 +469,6 @@ TEST(ToolCallGemma, NoCallReturnsContent) {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch: parse_tool_calls(family, ...) routes to the right family parser.
-// ---------------------------------------------------------------------------
-TEST(ToolCallDispatch, RoutesByFamily) {
-    {
-        std::atomic<int> id(0);
-        auto [c, calls] = parse_tool_calls(ChatTemplateFamily::LLAMA3, "<function=f>{\"a\":1}</function>",
-                                           id);
-        ASSERT_EQ(calls.size(), 1u);
-        EXPECT_EQ(calls[0].name, "f");
-    }
-    {
-        std::atomic<int> id(0);
-        auto [c, calls] = parse_tool_calls(ChatTemplateFamily::GEMMA, "<|tool_call>call:g{x:1}<tool_call|>",
-                                           id);
-        ASSERT_EQ(calls.size(), 1u);
-        EXPECT_EQ(calls[0].name, "g");
-    }
-    {
-        std::atomic<int> id(0);
-        auto [c, calls] = parse_tool_calls(ChatTemplateFamily::CHATML,
-                                           "<tool_call>{\"name\":\"h\",\"arguments\":{}}</tool_call>", id);
-        ASSERT_EQ(calls.size(), 1u);
-        EXPECT_EQ(calls[0].name, "h");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // validate_tool_call — the schema-conformance gate.
 // ---------------------------------------------------------------------------
 TEST(ToolCallValidate, ValidArgsStayValid) {

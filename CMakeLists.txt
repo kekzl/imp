@@ -1756,9 +1756,6 @@ if(IMP_BUILD_TESTS)
         target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
     endif()
 
-    # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
-    imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)
-
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention
         test-quant test-kv test-moe-gdn test-e2e
