@@ -33,7 +33,7 @@ Status 2026-11-27: CPU part done 00:06Z; GPU part done 03:24Z under GPU lock `ts
 
 | Lane | Trigger | What runs |
 |---|---|---|
-| CI `Build`: `ctest -L unit -j4 --timeout 120` | every PR, push to main, nightly 03:17 UTC | `unit_core`, `unit_text`, `unit_e2e_subset` (`_unit_e2e_filter`, 79 cases), 10 `guard_*` scripts |
+| CI `Build`: `ctest -L unit -j4 --timeout 120` | every PR, push to main, nightly (dispatch by `nightly.yml`, 01:00-06:59 UTC) | `unit_core`, `unit_text`, `unit_e2e_subset` (`_unit_e2e_filter`, 79 cases), 10 `guard_*` scripts |
 | CI `Build` + hooks: `scripts/ci_static_gates.sh` | every PR; `make preflight` in both hooks | `tests/test_entrypoint.sh`, `tests/test_gpu_lock.sh`, `tests/test_image_tag.sh`, `tests/test_verify_ab_sha_once.sh`, 31 gate `--selftest` lines |
 | CI `Sanitizers` | path filter (`tools/untrusted_input_sources.txt`) + nightly | `test-core`, `test-text` under ASan/UBSan |
 | CI `Mock API contract` | every PR | `pytest tests/api -m "not perf and not tools"` against `tests/api/mock_server.py` |

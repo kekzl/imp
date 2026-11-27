@@ -8,8 +8,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "41 4 * * *"  # nightly: c-cpp left the main push (M10)
+  # Nightly: a dispatch on main by .github/workflows/nightly.yml (01:00-06:59 UTC).
   workflow_dispatch:
 
 # Push: one group per commit (a shared one queued 63 main push jobs > 60 s, max 723 s).

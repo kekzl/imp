@@ -17,13 +17,13 @@ on:
   # no longer had. Coverage is not lost (the PR run builds the tree that gets
   # squashed), but the branch's reported status is stale, and this makes it
   # refreshable without a PAT or a merge queue.
-  workflow_dispatch:
-  # Nightly, 03:17 UTC: refreshes `main`'s reported status (an auto-merge squash
+  #
+  # Nightly = a dispatch on main by .github/workflows/nightly.yml (01:00-06:59 UTC; a `schedule`
+  # trigger here fired 9-10 h late): refreshes `main`'s reported status (an auto-merge squash
   # armed with GITHUB_TOKEN starts no run, see above), runs Sanitizers without
   # its path filter, the libFuzzer job and the imp-bench build. No job here uses a GPU: there is no
   # GPU runner (docs/DESIGN_DECISIONS.md), GPU gates are local (`make verify-fast`).
-  schedule:
-    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 # A new push to a PR cancels its older run. A main push gets its own group per commit: one shared
 # group queued 20 of 60 main Builds > 60 s (max 1843 s) and replaced 6 pending main runs, since
@@ -238,7 +238,7 @@ jobs:
           # fatbin carries no 120f PTX either since C-012 (sm_120a only); the opt-in
           # build is what the `PTX fallback` job below assembles (#1650).
           # IMP_BUILD_BENCH=OFF skips imp-bench here; the step "Build imp-bench
-          # (nightly)" below compiles it on schedule and dispatch. The mxf4nvf4 probe/microbench TUs
+          # (nightly)" below compiles it on dispatch (nightly). The mxf4nvf4 probe/microbench TUs
           # build with the tests (imp_test_kernels), never into libimp.
 
       - name: Build
@@ -298,7 +298,7 @@ jobs:
       # only when someone measured (AUDIT_ARCH_2026_11_24 X-10). Nightly and on
       # demand: same build/ and flags, only the option flips, only that target builds.
       - name: Build imp-bench (nightly)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch'
         run: |
           cmake -B build -DIMP_BUILD_BENCH=ON
           cmake --build build --target imp-bench -j"$(nproc)"
@@ -946,10 +946,10 @@ jobs:
   # 2026-09-10, abandoned). The CPU lane runs its target function on every PR.
   fuzz-nightly:
     name: Fuzz (nightly, libFuzzer)
-    # workflow_dispatch too: schedule-only is why two nights of a job that
+    # Dispatch only (the nightly is one): schedule-only is why two nights of a job that
     # configured nothing went unnoticed, since there was no way to run it
     # against a branch before it landed.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     # Ubuntu 26.04 for its libstdc++: the tree's C++23 does not compile against

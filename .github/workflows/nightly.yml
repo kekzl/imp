@@ -1,0 +1,62 @@
+name: Nightly
+
+# Dispatches the nightly CI and CodeQL runs on main inside 01:00-06:59 UTC. GitHub delivered
+# `schedule` +9.3..10.5 h late (2026-11-23..27, every cron of the account), so a cron fires every
+# 3 h and the first event inside the 6 h window dispatches: window >= spacing holds for any lag.
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  # Dispatch now, whatever the hour: `gh workflow run nightly.yml`.
+  workflow_dispatch:
+  # Dry run on a change to this file: prints the decision, dispatches nothing.
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/nightly.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch the nightly runs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      # `gh workflow run`: a workflow_dispatch made with GITHUB_TOKEN does start a run.
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Decide and dispatch
+        run: |
+          set -euo pipefail
+          hour=$((10#$(date -u +%H)))
+          # Already dispatched tonight: a CI run on main started by this workflow in the last 18 h
+          # (a manual `gh workflow run CI` by a person does not count).
+          since="$(date -u -d '18 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          done_runs="$(gh api -X GET "repos/$GH_REPO/actions/workflows/ci.yml/runs" \
+            -f event=workflow_dispatch -f branch=main -f created=">=$since" -F per_page=50 \
+            --jq '[.workflow_runs[] | select(.triggering_actor.login == "github-actions[bot]")] | length')"
+          go=false
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            go=true
+          elif [ "$hour" -ge 1 ] && [ "$hour" -le 6 ] && [ "$done_runs" -eq 0 ]; then
+            go=true
+          fi
+          echo "event $GITHUB_EVENT_NAME, UTC hour $hour, nightly CI runs since $since: $done_runs, dispatch: $go"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "pull_request: dry run, nothing dispatched"
+            exit 0
+          fi
+          if [ "$go" = true ]; then
+            gh workflow run ci.yml --ref main
+            gh workflow run codeql.yml --ref main
+            echo "dispatched CI and CodeQL on main"
+          fi
