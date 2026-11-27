@@ -40,6 +40,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-26.04
+    timeout-minutes: 60
     outputs:
       code: ${{ steps.changes.outputs.code }}
 
@@ -396,6 +397,7 @@ jobs:
   mock-api:
     name: Mock API contract
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -428,6 +430,7 @@ jobs:
     needs: build
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     container:
       image: ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d # 26.04
 
@@ -505,6 +508,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -545,6 +549,7 @@ jobs:
   filesize:
     name: File size
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -568,6 +573,7 @@ jobs:
   testlanes:
     name: Test lanes
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -586,6 +592,7 @@ jobs:
   docs:
     name: Docs
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -599,6 +606,7 @@ jobs:
   hygiene:
     name: Release hygiene
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Release hygiene gate (blocking)
@@ -607,6 +615,7 @@ jobs:
   alloc-sites:
     name: Alloc sites
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -618,6 +627,7 @@ jobs:
   launchguards:
     name: Launch guards
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -646,6 +656,7 @@ jobs:
   ptx-fallback:
     name: PTX fallback
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     container:
       image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
     defaults:
@@ -751,6 +762,7 @@ jobs:
   sanitizers:
     name: Sanitizers
     runs-on: ubuntu-26.04
+    timeout-minutes: 90
     container:
       image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
@@ -935,6 +947,7 @@ jobs:
     # against a branch before it landed.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
+    timeout-minutes: 60
     # Ubuntu 26.04 for its libstdc++: the tree's C++23 does not compile against
     # the libstdc++ 12 that silkeh/clang:18 ships (std::ranges over string_view),
     # and that image had no ninja and no nvcc either, so this job configured
