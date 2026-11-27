@@ -28,8 +28,22 @@ protected:
                                      "/models/Mistral-Small-3.2-24B-Instruct-2506-NVFP4");
     }
     static std::string modelopt_coder_dir() {
-        return imp_test::env_path_or(imp_test::kEnvModelModeloptCoder, "/models/Qwen3-Coder-30B-A3B-FP4");
+        return imp_test::env_path_or(imp_test::kEnvModelModeloptCoder,
+                                     "/models/Qwen3-Coder-30B-A3B-Instruct-FP4");
     }
+
+    // One Gemma-4 llmc load for the two Gemma cases: the first loads and keeps it, the second
+    // reuses and frees it. Every other case frees it first (two checkpoints exceed 32 GB).
+    static inline ImpModel gemma4_ = nullptr;
+    static ImpError load_gemma4() {
+        return gemma4_ ? IMP_SUCCESS : imp_model_load(kGemma4Dir, IMP_FORMAT_SAFETENSORS, &gemma4_);
+    }
+    static void release_gemma4() {
+        if (gemma4_)
+            imp_model_free(gemma4_);
+        gemma4_ = nullptr;
+    }
+    static void TearDownTestSuite() { release_gemma4(); }
 };
 
 TEST_F(LlmCompressorE2E, Gemma4_LoadsWithoutIMA) {
@@ -37,12 +51,9 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsWithoutIMA) {
         GTEST_SKIP() << "Model not present at " << kGemma4Dir;
     }
 
-    ImpModel model = nullptr;
-    ImpError rc = imp_model_load(kGemma4Dir, IMP_FORMAT_SAFETENSORS, &model);
+    ImpError rc = load_gemma4();
     ASSERT_EQ(rc, IMP_SUCCESS) << "imp_model_load failed: " << imp_error_string(rc);
-    ASSERT_NE(model, nullptr);
-
-    imp_model_free(model);
+    ASSERT_NE(gemma4_, nullptr);
 }
 
 // Gemma-4 MoE coherence gate: chat-template "capital of France?" must answer "Paris".
@@ -57,8 +68,8 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsAndGeneratesCoherent) {
         GTEST_SKIP() << "Model not present at " << kGemma4Dir;
     }
 
-    ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(kGemma4Dir, IMP_FORMAT_SAFETENSORS, &model), IMP_SUCCESS);
+    ASSERT_EQ(load_gemma4(), IMP_SUCCESS);
+    ImpModel model = gemma4_;
     ASSERT_NE(model, nullptr);
 
     ImpConfig cfg = imp_config_default();
@@ -82,7 +93,7 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsAndGeneratesCoherent) {
     EXPECT_NE(result.find("Paris"), std::string::npos) << "Generated text: " << result;
 
     imp_context_free(ctx);
-    imp_model_free(model);
+    release_gemma4();
 }
 
 // Mistral3 dense coherence gate: Mistral-Small-3.2 is multimodal, but with
@@ -92,6 +103,7 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsAndGeneratesCoherent) {
 // parse_recipe_yaml() recognizes the config_groups: group_0: weights schema as NVFP4,
 // including the multi-line bracket-array ignore: [...] form.
 TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
+    release_gemma4();
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelMistral));
     const std::string mistral = mistral_dir();
     if (!dir_exists(mistral.c_str())) {
@@ -122,8 +134,9 @@ TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
 
 // Modelopt NVFP4 (NVIDIA Model Optimizer SafeTensors + hf_quant_config.json) must keep
 // working bit-identically after the Phase 1 dispatch reshuffle in load_nvfp4_config(). Loads
-// Qwen3-Coder-30B-A3B-FP4 and checks coherent generation.
+// Qwen3-Coder-30B-A3B-Instruct-FP4 and checks coherent generation.
 TEST_F(LlmCompressorE2E, Modelopt_QwenCoder30B_StillWorks) {
+    release_gemma4();
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelModeloptCoder));
     const std::string coder = modelopt_coder_dir();
     if (!dir_exists(coder.c_str())) {
