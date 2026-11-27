@@ -1,7 +1,7 @@
 #include "compute/weight_dispatch.h"
 #include "compute/gemm.h"
 #include "compute/gemm_grouped.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/mxfp4_sfatom.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
@@ -198,7 +198,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                 void* ws_buf = reinterpret_cast<uint8_t*>(act_sf) + act_sf_bytes;
                 quantize_fp16_to_nvfp4_sfatom(x.data, act_data, act_sf, M, K, stream, as);
                 // Prompt rows (M >= 33) and stream-K: gemm.nvfp4_prompt_streamk, as
-                // gemm_kernel_cutlass_nvfp4.cpp.
+                // gemm_kernel_nvfp4_sfatom.cpp.
                 const size_t ws_left = (process_diag_deterministic() ||
                                         (M > 32 && !process_diag_nvfp4_prompt_streamk()))
                                            ? 0

@@ -26,7 +26,7 @@
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_f16_tile.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"

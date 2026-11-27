@@ -1,6 +1,6 @@
 #include "model/host_expert_fit.h"
 
-#include "compute/gemm_cutlass_sm120.h"  // nvfp4_sfatom_size
+#include "compute/nvfp4_sfatom_quant.h"  // nvfp4_sfatom_size
 #include "memory/weight_snapshot.h"
 #include "model/model.h"
 #include "quant/dequant_gpu.h"

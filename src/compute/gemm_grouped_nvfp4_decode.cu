@@ -7,7 +7,7 @@
 
 #include "compute/gemm_grouped_nvfp4_decode.h"
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 
 #include "core/logging.h"
 #include "quant/fp8_utils.cuh"

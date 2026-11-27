@@ -12,7 +12,7 @@
 #include "exec/moe_nvfp4_cache_rule.h"
 #include "exec/moe_nvfp4_released_keys.h"
 #include "exec/pre_dequant_internal.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/dequant_gpu.h"
 #include "quant/gpt_oss_mxfp4_convert.h"
 #include "quant/nvfp4_quant.h"

@@ -3,7 +3,7 @@
 #include "compute/dispatch_paths.h"  // MoePrefillPath
 
 // Pure host-side model of the MoE-prefill GEMM path selection in
-// executor_forward_moe_cutlass.cpp (grouped-GEMM-vs-fallback routing, PR #574/#547), so
+// executor_forward_moe_grouped.cpp (grouped-GEMM-vs-fallback routing, PR #574/#547), so
 // it's covered by a cheap CPU unit test instead of E2E-only. Only the gates pick which
 // path runs; the caller supplies, per tier, whether that tier's device workspace is populated.
 

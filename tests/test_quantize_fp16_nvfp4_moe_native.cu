@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
-#include "compute/gemm_cutlass_sm120.h"  // nvfp4_sfatom_size (host reference)
+#include "compute/nvfp4_sfatom_quant.h"  // nvfp4_sfatom_size (host reference)
 #include <cuda_runtime.h>
 #include <vector>
 #include <cstdint>

@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 #include "compute/activation.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

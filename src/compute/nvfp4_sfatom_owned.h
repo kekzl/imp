@@ -6,7 +6,7 @@
 
 #include <utility>
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "memory/device_owned.h"
 
 namespace imp {

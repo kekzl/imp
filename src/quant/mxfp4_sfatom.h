@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 
-#include "quant/cutlass_mxfp4_weight.h"  // MxFP4SfAtomWeight
+#include "quant/mxfp4_sfatom_weight.h"  // MxFP4SfAtomWeight
 
 namespace imp {
 

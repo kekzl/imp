@@ -2,7 +2,7 @@
 
 namespace imp {
 enum class FFNActivation;  // model/model_config.h; passed by value only
-}
+}  // namespace imp
 
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -24,7 +24,7 @@ struct NvFP4SfAtomWeight {
     size_t sf_bytes = 0;  // total bytes for scale_factors buffer
 };
 
-struct NvFP4SfAtomOwned;  // compute/cutlass_nvfp4_owned.h: owns the SfAtom buffer (I5)
+struct NvFP4SfAtomOwned;  // compute/nvfp4_sfatom_owned.h: owns the SfAtom buffer (I5)
 
 // Convert imp NvFP4QuantResult to CUTLASS block-scaled format.
 // Borrows packed_data pointer (RowMajor). tensor_scale is stored for GEMM alpha.

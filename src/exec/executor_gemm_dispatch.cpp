@@ -28,7 +28,7 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_mxfp4_f16_tile.h"
 #include "compute/gemm_nvfp4_f16_tile.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/hadamard.h"
 #include "quant/quant_gemm.h"

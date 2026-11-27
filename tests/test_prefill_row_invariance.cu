@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

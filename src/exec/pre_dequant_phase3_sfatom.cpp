@@ -9,7 +9,7 @@
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/mxfp4_sfatom.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_quant.h"
@@ -91,16 +91,14 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
         // floored at it even when cudaMemGetInfo under-reports free (async frees reclaim late on
         // this driver). Floor, don't trust live-free below the guarantee (AUDIT B62).
         if (budget.mandatory_sf_bytes > ct_budget) {
-            IMP_LOG_INFO("CUTLASS NVFP4 cache: budget floored at guaranteed %.1f MiB "
-                         "(live-free-derived %.1f MiB under-reports)",
-                         budget.mandatory_sf_bytes / (1024.0 * 1024.0),
-                         ct_budget / (1024.0 * 1024.0));
+            IMP_LOG_INFO(
+                "CUTLASS NVFP4 cache: budget floored at guaranteed %.1f MiB "
+                "(live-free-derived %.1f MiB under-reports)",
+                budget.mandatory_sf_bytes / (1024.0 * 1024.0), ct_budget / (1024.0 * 1024.0));
             ct_budget = budget.mandatory_sf_bytes;
         }
     } else {
-        ct_budget = (remaining_budget > wcache_->nvfp4_bytes)
-                        ? (remaining_budget - wcache_->nvfp4_bytes)
-                        : 0;
+        ct_budget = (remaining_budget > wcache_->nvfp4_bytes) ? (remaining_budget - wcache_->nvfp4_bytes) : 0;
     }
     // SfAtom scale factors share ONE slab allocation (each entry borrows a sub-region)
     // instead of a per-tensor cudaMalloc+cudaMemsetAsync (#734). MoE experts convert in one
@@ -168,8 +166,8 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
     // Pass 1: size the slab. Groups first (each placed contiguously so the
     // batched kernel can stride by sf_per_expert), then per-tensor entries.
     std::vector<std::pair<const void*, size_t>> ct_included;  // (src ptr, slab offset)
-    size_t ct_total = 0;       // running padded slab size = real SF VRAM
-    size_t n_groups_inc = 0;   // leading moe_groups that fit the budget
+    size_t ct_total = 0;                                      // running padded slab size = real SF VRAM
+    size_t n_groups_inc = 0;                                  // leading moe_groups that fit the budget
     int ct_skipped_dead = 0;
     int ct_sfless = 0;
     bool ct_exhausted = false;
@@ -310,189 +308,190 @@ void QuantPipeline::alloc_mxfp4_gemm_scratch_(const ModelConfig& cfg) {
 // the CUTLASS cache, then for GDN/forced-fallback models dequants them into a bulk FP16
 // buffer and rewrites model weight pointers so dispatch sees FP16 instead of raw MXFP4.
 void QuantPipeline::nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream) {
-int mx_native = 0;
-size_t mx_native_bytes = 0;
-auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
-    if (qt != QType::MXFP4 || !w.data || !w.on_device)
-        return;
-    if (w.ndim < 2 || w.shape[1] % 32 != 0)
-        return;
-    if (wcache_->mxfp4_sfatom.contains(w.data))
-        return;  // already registered
-    MxFP4SfAtomWeight mw;
-    if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
-        mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
-        const size_t packed = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);  // compacted in place
-        const size_t linear_sf = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 32);
-        mx_native_bytes += mw.sf_bytes + linear_sf + packed;
-        wcache_->mxfp4_sfatom[w.data] = MxFP4SfAtomCacheEntry(std::move(mw));
-        wcache_->mxfp4_sfatom_inplace_bytes += packed;  // already in WEIGHTS
-        mx_native++;
-    }
-};
-for (int i = 0; i < cfg.n_layers; i++) {
-    const auto& L = model_->layer(i);
-    register_if_mxfp4(L.wq, L.wq.qtype, true);
-    register_if_mxfp4(L.wk, L.wk.qtype, true);
-    register_if_mxfp4(L.wv, L.wv.qtype, true);
-    register_if_mxfp4(L.wo, L.wo.qtype, true);
-    register_if_mxfp4(L.w_up, L.w_up.qtype, false);
-    register_if_mxfp4(L.w_gate, L.w_gate.qtype, false);
-    register_if_mxfp4(L.w_down, L.w_down.qtype, false);
-    // GDN-specific weights (Qwen3.5)
-    register_if_mxfp4(L.ssm_in, L.ssm_in.qtype, true);
-    register_if_mxfp4(L.ssm_out, L.ssm_out.qtype, true);
-    register_if_mxfp4(L.gdn_gate, L.gdn_gate.qtype, true);
-    register_if_mxfp4(L.gdn_alpha, L.gdn_alpha.qtype, true);
-    register_if_mxfp4(L.gdn_beta, L.gdn_beta.qtype, true);
-}
-register_if_mxfp4(model_->output_proj(), model_->out_proj_.qtype);
-if (mx_native > 0) {
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    wcache_->mxfp4_sfatom_bytes += mx_native_bytes;
-    // unpack_mxfp4_gguf compacts the GGUF raw blocks IN PLACE inside the model's source
-    // buffers: a second engine on this model handle cannot re-run the unpack (it would read
-    // the already-compacted layout as raw blocks, illegal access, #830). Engine::init
-    // rejects a second engine up front.
-    const_cast<Model*>(model_)->mark_sources_consumed();
-    // Also suspend-unsupported: a weight snapshot would capture the compacted
-    // bytes and the resume replay would compact them again.
-    const_cast<Model*>(model_)->mark_device_sources_mutated();
-    IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)", mx_native,
-                 mx_native_bytes / (1024.0 * 1024.0));
-
-    // Sync and check for errors from unpack kernels
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    {
-        cudaError_t e = cudaGetLastError();
-        if (e != cudaSuccess)
-            IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e));
-    }
-
-    // Native MXFP4 (GEMV decode, W4A16 prefill via mxfp4_prefill_gemm) unless a weight lacks linear scales.
-    bool mxfp4_gemv_available = true;
-    for (auto& [p, m] : wcache_->mxfp4_sfatom)
-        if (!m.linear_scales) {
-            mxfp4_gemv_available = false;
-            break;
+    int mx_native = 0;
+    size_t mx_native_bytes = 0;
+    auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
+        if (qt != QType::MXFP4 || !w.data || !w.on_device)
+            return;
+        if (w.ndim < 2 || w.shape[1] % 32 != 0)
+            return;
+        if (wcache_->mxfp4_sfatom.contains(w.data))
+            return;  // already registered
+        MxFP4SfAtomWeight mw;
+        if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
+            mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
+            const size_t packed = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);  // compacted in place
+            const size_t linear_sf = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 32);
+            mx_native_bytes += mw.sf_bytes + linear_sf + packed;
+            wcache_->mxfp4_sfatom[w.data] = MxFP4SfAtomCacheEntry(std::move(mw));
+            wcache_->mxfp4_sfatom_inplace_bytes += packed;  // already in WEIGHTS
+            mx_native++;
         }
-
-    if (mxfp4_gemv_available) {
-        IMP_LOG_INFO("MXFP4 GEMV: all %d weights have linear_scales, skipping FP16 fallback",
-                     mx_native);
+    };
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        register_if_mxfp4(L.wq, L.wq.qtype, true);
+        register_if_mxfp4(L.wk, L.wk.qtype, true);
+        register_if_mxfp4(L.wv, L.wv.qtype, true);
+        register_if_mxfp4(L.wo, L.wo.qtype, true);
+        register_if_mxfp4(L.w_up, L.w_up.qtype, false);
+        register_if_mxfp4(L.w_gate, L.w_gate.qtype, false);
+        register_if_mxfp4(L.w_down, L.w_down.qtype, false);
+        // GDN-specific weights (Qwen3.5)
+        register_if_mxfp4(L.ssm_in, L.ssm_in.qtype, true);
+        register_if_mxfp4(L.ssm_out, L.ssm_out.qtype, true);
+        register_if_mxfp4(L.gdn_gate, L.gdn_gate.qtype, true);
+        register_if_mxfp4(L.gdn_alpha, L.gdn_alpha.qtype, true);
+        register_if_mxfp4(L.gdn_beta, L.gdn_beta.qtype, true);
     }
+    register_if_mxfp4(model_->output_proj(), model_->out_proj_.qtype);
+    if (mx_native > 0) {
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+        wcache_->mxfp4_sfatom_bytes += mx_native_bytes;
+        // unpack_mxfp4_gguf compacts the GGUF raw blocks IN PLACE inside the model's source
+        // buffers: a second engine on this model handle cannot re-run the unpack (it would read
+        // the already-compacted layout as raw blocks, illegal access, #830). Engine::init
+        // rejects a second engine up front.
+        const_cast<Model*>(model_)->mark_sources_consumed();
+        // Also suspend-unsupported: a weight snapshot would capture the compacted
+        // bytes and the resume replay would compact them again.
+        const_cast<Model*>(model_)->mark_device_sources_mutated();
+        IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)", mx_native,
+                     mx_native_bytes / (1024.0 * 1024.0));
 
-    // Dequant MXFP4 -> FP16 for decode (only when MXFP4 GEMV unavailable). Single bulk
-    // allocation to avoid CUDA heap fragmentation.
-    size_t fp16_total = 0;
-    if (!mxfp4_gemv_available) {
-        for (auto& [p, m] : wcache_->mxfp4_sfatom) {
-            if (wcache_->fp16.contains(p))
-                continue;
-            fp16_total += static_cast<size_t>(m.N) * m.K * sizeof(half);
-        }
-    }
-
-    void* d_fp16_bulk = nullptr;
-    if (fp16_total > 0) {
-        // Pre-flight VRAM check: WSL2/WDDM cudaMalloc happily pages over the device boundary
-        // into host RAM; cuBLASLt then fails at runtime when it can't allocate its internal
-        // workspace (status 14 INVALID_VALUE) followed by a confusing downstream illegal memory
-        // access. Refuse the alloc instead of paging, to keep the failure mode legible.
-        constexpr size_t kRuntimeHeadroom = static_cast<size_t>(2) * 1024 * 1024 * 1024;
-        size_t free_mem = 0;
-        // fp16_total > 0 here, so fitting fp16_total above the headroom also covers free > headroom.
-        const bool oversubscribe = !vram_fits(fp16_total, kRuntimeHeadroom, 0, &free_mem);
-        // Oversubscription is always refused.
-        if (oversubscribe) {
-            // Inside `if (!mxfp4_gemv_available)`: this FP16 fallback is the ONLY valid decode path
-            // for these weights (native MXFP4 GEMV unavailable). Skipping it does not degrade
-            // gracefully: decode runs against weights with no usable kernel and emits uniform
-            // logits -> token-0 garbage (#934). Fail loud at load instead.
-            throw std::runtime_error(
-                "MXFP4 FP16 decode fallback would oversubscribe VRAM (need " +
-                std::to_string(fp16_total / (static_cast<int64_t>(1024) * 1024)) + " MiB + " +
-                std::to_string(kRuntimeHeadroom / (static_cast<int64_t>(1024) * 1024)) +
-                " MiB runtime headroom, " + std::to_string(free_mem / (static_cast<int64_t>(1024) * 1024)) +
-                " MiB free). The weights carry no linear scales, and it does not fit on this GPU at the "
-                "requested context length. Reduce --min-kv-tokens / max context, or use a smaller model.");
-        }
-    }
-    if (fp16_total > 0) {
-        // The fp16 entries written below are slices of this bulk; Phase 3c never runs with it
-        // (nvfp4_decode_mode == 0 there, > 0 here).
-        wcache_->fp16_bulk_data = pre_dequant_internal::alloc_fp16_bulk(fp16_total);
-        d_fp16_bulk = wcache_->fp16_bulk_data.get();
-    }
-
-    if (d_fp16_bulk) {
-        size_t offset = 0;
-        for (auto& [ptr, mw] : wcache_->mxfp4_sfatom) {
-            if (wcache_->fp16.contains(ptr))
-                continue;
-            size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
-            void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
-            offset += fp16_bytes;
-
-            // GPU-side dequant via dequant_mxfp4_to_fp16. weight_upload.cpp splits to
-            // [data(N*bpr*16) | scales(N*bpr)] before GPU upload; a CPU-side path assuming GGUF's
-            // interleaved 17-byte block layout would read scale bytes from inside data and produce
-            // garbage FP16. The GPU kernel reads the split layout correctly (data first, scales at
-            // offset N*K/2).
-            dequant_mxfp4_to_fp16(ptr, mw.N, mw.K, d_fp16, stream);
-            int64_t shape[2] = {mw.N, mw.K};
-            wcache_->fp16[ptr] = Fp16CacheEntry(Tensor(d_fp16, QType::F16, 2, shape, true));  // bulk slice
-        }
-    }  // end if (d_fp16_bulk)
-
-    if (fp16_total > 0) {
+        // Sync and check for errors from unpack kernels
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         {
             cudaError_t e = cudaGetLastError();
             if (e != cudaSuccess)
-                IMP_LOG_ERROR("MXFP4 dequant kernel error: %s", cudaGetErrorString(e));
+                IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e));
         }
-        IMP_LOG_INFO("MXFP4 decode fallback: dequant → FP16 cache %.2f MiB",
-                     fp16_total / (1024.0 * 1024.0));
 
-        // Replace model weight tensor pointers with FP16 data.
-        // This ensures ALL code paths (GEMV, direct gemm, etc.) see
-        // valid FP16 data instead of raw MXFP4 blocks.
-        auto replace_weight = [&](Tensor& w, QType& qt) {
-            auto it = wcache_->fp16.find(w.data);
-            if (it != wcache_->fp16.end() && qt == QType::MXFP4) {
-                w = it->second;
-                qt = QType::F16;
+        // Native MXFP4 (GEMV decode, W4A16 prefill via mxfp4_prefill_gemm) unless a weight lacks linear
+        // scales.
+        bool mxfp4_gemv_available = true;
+        for (auto& [p, m] : wcache_->mxfp4_sfatom)
+            if (!m.linear_scales) {
+                mxfp4_gemv_available = false;
+                break;
             }
-        };
-        for (int i = 0; i < cfg.n_layers; i++) {
-            TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
-            replace_weight(L.wq, L.wq.qtype);
-            replace_weight(L.wk, L.wk.qtype);
-            replace_weight(L.wv, L.wv.qtype);
-            replace_weight(L.wo, L.wo.qtype);
-            replace_weight(L.w_up, L.w_up.qtype);
-            replace_weight(L.w_gate, L.w_gate.qtype);
-            replace_weight(L.w_down, L.w_down.qtype);
-            // GDN-specific weights (Qwen3.5)
-            replace_weight(L.ssm_in, L.ssm_in.qtype);
-            replace_weight(L.ssm_out, L.ssm_out.qtype);
-            replace_weight(L.gdn_gate, L.gdn_gate.qtype);
-            replace_weight(L.gdn_alpha, L.gdn_alpha.qtype);
-            replace_weight(L.gdn_beta, L.gdn_beta.qtype);
+
+        if (mxfp4_gemv_available) {
+            IMP_LOG_INFO("MXFP4 GEMV: all %d weights have linear_scales, skipping FP16 fallback", mx_native);
         }
-        replace_weight(const_cast<Model*>(model_)->out_proj_,
-                       const_cast<Model*>(model_)->out_proj_.qtype);
-        // Tok-embed table: when weight tying is on, it shares GPU storage with out_proj_, so its
-        // data pointer is already a key in wcache_->fp16. Without this replace, the embedding
-        // lookup reads raw MXFP4 bytes as FP16, producing garbage hidden state and token-0 spam
-        // from the first token. Harmless when the embedding is already FP16.
-        replace_weight(const_cast<Model*>(model_)->tok_emb_,
-                       const_cast<Model*>(model_)->tok_emb_.qtype);
-        IMP_LOG_INFO("MXFP4 → FP16: replaced %d weight tensor pointers",
-                     (int)wcache_->fp16.size());
+
+        // Dequant MXFP4 -> FP16 for decode (only when MXFP4 GEMV unavailable). Single bulk
+        // allocation to avoid CUDA heap fragmentation.
+        size_t fp16_total = 0;
+        if (!mxfp4_gemv_available) {
+            for (auto& [p, m] : wcache_->mxfp4_sfatom) {
+                if (wcache_->fp16.contains(p))
+                    continue;
+                fp16_total += static_cast<size_t>(m.N) * m.K * sizeof(half);
+            }
+        }
+
+        void* d_fp16_bulk = nullptr;
+        if (fp16_total > 0) {
+            // Pre-flight VRAM check: WSL2/WDDM cudaMalloc happily pages over the device boundary
+            // into host RAM; cuBLASLt then fails at runtime when it can't allocate its internal
+            // workspace (status 14 INVALID_VALUE) followed by a confusing downstream illegal memory
+            // access. Refuse the alloc instead of paging, to keep the failure mode legible.
+            constexpr size_t kRuntimeHeadroom = static_cast<size_t>(2) * 1024 * 1024 * 1024;
+            size_t free_mem = 0;
+            // fp16_total > 0 here, so fitting fp16_total above the headroom also covers free > headroom.
+            const bool oversubscribe = !vram_fits(fp16_total, kRuntimeHeadroom, 0, &free_mem);
+            // Oversubscription is always refused.
+            if (oversubscribe) {
+                // Inside `if (!mxfp4_gemv_available)`: this FP16 fallback is the ONLY valid decode path
+                // for these weights (native MXFP4 GEMV unavailable). Skipping it does not degrade
+                // gracefully: decode runs against weights with no usable kernel and emits uniform
+                // logits -> token-0 garbage (#934). Fail loud at load instead.
+                throw std::runtime_error(
+                    "MXFP4 FP16 decode fallback would oversubscribe VRAM (need " +
+                    std::to_string(fp16_total / (static_cast<int64_t>(1024) * 1024)) + " MiB + " +
+                    std::to_string(kRuntimeHeadroom / (static_cast<int64_t>(1024) * 1024)) +
+                    " MiB runtime headroom, " +
+                    std::to_string(free_mem / (static_cast<int64_t>(1024) * 1024)) +
+                    " MiB free). The weights carry no linear scales, and it does not fit on this GPU at the "
+                    "requested context length. Reduce --min-kv-tokens / max context, or use a smaller "
+                    "model.");
+            }
+        }
+        if (fp16_total > 0) {
+            // The fp16 entries written below are slices of this bulk; Phase 3c never runs with it
+            // (nvfp4_decode_mode == 0 there, > 0 here).
+            wcache_->fp16_bulk_data = pre_dequant_internal::alloc_fp16_bulk(fp16_total);
+            d_fp16_bulk = wcache_->fp16_bulk_data.get();
+        }
+
+        if (d_fp16_bulk) {
+            size_t offset = 0;
+            for (auto& [ptr, mw] : wcache_->mxfp4_sfatom) {
+                if (wcache_->fp16.contains(ptr))
+                    continue;
+                size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
+                void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
+                offset += fp16_bytes;
+
+                // GPU-side dequant via dequant_mxfp4_to_fp16. weight_upload.cpp splits to
+                // [data(N*bpr*16) | scales(N*bpr)] before GPU upload; a CPU-side path assuming GGUF's
+                // interleaved 17-byte block layout would read scale bytes from inside data and produce
+                // garbage FP16. The GPU kernel reads the split layout correctly (data first, scales at
+                // offset N*K/2).
+                dequant_mxfp4_to_fp16(ptr, mw.N, mw.K, d_fp16, stream);
+                int64_t shape[2] = {mw.N, mw.K};
+                wcache_->fp16[ptr] = Fp16CacheEntry(
+                    Tensor(d_fp16, QType::F16, 2, shape, true));  // bulk slice
+            }
+        }  // end if (d_fp16_bulk)
+
+        if (fp16_total > 0) {
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            {
+                cudaError_t e = cudaGetLastError();
+                if (e != cudaSuccess)
+                    IMP_LOG_ERROR("MXFP4 dequant kernel error: %s", cudaGetErrorString(e));
+            }
+            IMP_LOG_INFO("MXFP4 decode fallback: dequant → FP16 cache %.2f MiB",
+                         fp16_total / (1024.0 * 1024.0));
+
+            // Replace model weight tensor pointers with FP16 data.
+            // This ensures ALL code paths (GEMV, direct gemm, etc.) see
+            // valid FP16 data instead of raw MXFP4 blocks.
+            auto replace_weight = [&](Tensor& w, QType& qt) {
+                auto it = wcache_->fp16.find(w.data);
+                if (it != wcache_->fp16.end() && qt == QType::MXFP4) {
+                    w = it->second;
+                    qt = QType::F16;
+                }
+            };
+            for (int i = 0; i < cfg.n_layers; i++) {
+                TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
+                replace_weight(L.wq, L.wq.qtype);
+                replace_weight(L.wk, L.wk.qtype);
+                replace_weight(L.wv, L.wv.qtype);
+                replace_weight(L.wo, L.wo.qtype);
+                replace_weight(L.w_up, L.w_up.qtype);
+                replace_weight(L.w_gate, L.w_gate.qtype);
+                replace_weight(L.w_down, L.w_down.qtype);
+                // GDN-specific weights (Qwen3.5)
+                replace_weight(L.ssm_in, L.ssm_in.qtype);
+                replace_weight(L.ssm_out, L.ssm_out.qtype);
+                replace_weight(L.gdn_gate, L.gdn_gate.qtype);
+                replace_weight(L.gdn_alpha, L.gdn_alpha.qtype);
+                replace_weight(L.gdn_beta, L.gdn_beta.qtype);
+            }
+            replace_weight(const_cast<Model*>(model_)->out_proj_,
+                           const_cast<Model*>(model_)->out_proj_.qtype);
+            // Tok-embed table: when weight tying is on, it shares GPU storage with out_proj_, so its
+            // data pointer is already a key in wcache_->fp16. Without this replace, the embedding
+            // lookup reads raw MXFP4 bytes as FP16, producing garbage hidden state and token-0 spam
+            // from the first token. Harmless when the embedding is already FP16.
+            replace_weight(const_cast<Model*>(model_)->tok_emb_, const_cast<Model*>(model_)->tok_emb_.qtype);
+            IMP_LOG_INFO("MXFP4 → FP16: replaced %d weight tensor pointers", (int)wcache_->fp16.size());
+        }
     }
-}
 }
 
 }  // namespace imp

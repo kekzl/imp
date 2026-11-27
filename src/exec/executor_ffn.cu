@@ -11,7 +11,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemv_dp4a_multi.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/activation.h"
 #include "compute/dispatch_record.h"
 #include "compute/hadamard.h"

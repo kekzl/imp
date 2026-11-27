@@ -55,7 +55,7 @@ struct GemmNvfp4TileSwigluQuantArgs {
                                    cudaStream_t stream, int variant = -1, void* workspace = nullptr,
                                    size_t workspace_bytes = 0);
 
-// Same kernel on MXFP4 operands (cutlass_mxfp4_weight.h bytes): A [M,K/2] / W [N,K/2] packed E2M1,
+// Same kernel on MXFP4 operands (mxfp4_sfatom_weight.h bytes): A [M,K/2] / W [N,K/2] packed E2M1,
 // UE8M0 per 32 K in SfAtom layout (mxfp4_sfatom_size). K % 128 == 0, N % 8 == 0. Variants and workspace
 // as above.
 [[nodiscard]] bool gemm_mxfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,

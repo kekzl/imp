@@ -6,7 +6,7 @@
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/moe_prefill_decision.h"  // select_moe_prefill_path — the mirror this file verifies against
 #include "core/dispatch_policy.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_decode.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_f16_tile.h"
@@ -47,7 +47,7 @@ static void verify_against_moe_routing_model(bool expert_bias_glu, const MoePref
         return;
     IMP_LOG_ERROR(
         "MoE routing model disagrees with the dispatch: dispatch ran %s, "
-        "select_moe_prefill_path() says %s. executor_forward_moe_cutlass.cu and "
+        "select_moe_prefill_path() says %s. executor_forward_moe_grouped.cu and "
         "moe_prefill_decision.h have drifted apart (F-3) — the routing unit test "
         "is now describing a dispatch that does not exist.",
         moe_prefill_path_name(chosen), moe_prefill_path_name(modeled));
@@ -273,13 +273,13 @@ static void add_expert_down_bias(bool run, MoeFfnContext& ctx, QType compute_dty
 
 bool GraphExecutor::try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
-    const auto& ly  = model_->layer(layer);
+    const auto& ly = model_->layer(layer);
     const MoEWorkspace::ActScales las = moe_.act_scales(layer);  // static act scales, gate|up and down input
-    int&  n        = ctx.n;
-    int&  d        = ctx.d;
-    int&  ne       = ctx.ne;
-    int&  eff      = ctx.eff;
-    int&  expanded = ctx.expanded;
+    int& n = ctx.n;
+    int& d = ctx.d;
+    int& ne = ctx.ne;
+    int& eff = ctx.eff;
+    int& expanded = ctx.expanded;
     bool& non_gated_experts = ctx.non_gated_experts;
     MoeRoutingResult& routing = ctx.routing;
 
@@ -397,24 +397,23 @@ bool GraphExecutor::try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t s
                 // Expert block [e0, e0 + n_e): the offset arrays are absolute prefix sums, so a
                 // block is a slice of every per-expert array with the A/D bases unchanged.
                 const int n_grp = n_e < 0 ? ne : n_e;
-                const void** d_B   = pre_d_B;
+                const void** d_B = pre_d_B;
                 const void** d_SFB = pre_d_SFB;
-                float*       d_a   = pre_d_alpha;
+                float* d_a = pre_d_alpha;
                 const float as = &weight_ids == &ly.expert_down_ids ? las.dn : las.gu;
                 if (!resolve_expert_tables(registry_, weight_ids, ne, moe_, stream, d_B, d_SFB, d_a, as))
                     return false;
 
                 imp::GroupedNvfp4DeviceArgs dargs{};
                 dargs.d_M_per = moe_.d_M_per.data() + e0;
-                dargs.d_expert_offsets = static_cast<const int32_t*>(
-                    routing.expert_offsets.data) + e0;
+                dargs.d_expert_offsets = static_cast<const int32_t*>(routing.expert_offsets.data) + e0;
                 dargs.d_sfa_offsets = moe_.d_sfa_offsets.data() + e0;
-                dargs.d_alpha          = d_a + e0;
+                dargs.d_alpha = d_a + e0;
                 dargs.base_A_packed = moe_.grouped_packed.get();
                 dargs.base_A_sf = moe_.grouped_sf.get();
-                dargs.d_B_ptrs         = d_B + e0;
-                dargs.d_SFB_ptrs       = d_SFB + e0;
-                dargs.base_D           = c_base;
+                dargs.d_B_ptrs = d_B + e0;
+                dargs.d_SFB_ptrs = d_SFB + e0;
+                dargs.base_D = c_base;
                 return imp::gemm_grouped_nvfp4_dispatch(n_grp, N_out, K_in, expanded, dargs, stream);
             };
 

@@ -1,7 +1,7 @@
 #include "exec/gemm_kernel_registry.h"
 
-#include "compute/gemm.h"                      // gemm_nvfp4_cublaslt
-#include "compute/gemm_cutlass_sm120.h"        // NvFP4SfAtomWeight, quantize_fp16_to_nvfp4_sfatom
+#include "compute/gemm.h"                // gemm_nvfp4_cublaslt
+#include "compute/nvfp4_sfatom_quant.h"  // NvFP4SfAtomWeight, quantize_fp16_to_nvfp4_sfatom
 #include "quant/nvfp4_gemm_tile.h"       // gemm_nvfp4_tile
 #include "core/config/gemm.h"            // kNvfp4TileMinM
 #include "core/log_once.h"

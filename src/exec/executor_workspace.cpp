@@ -10,7 +10,7 @@
 #include "compute/layernorm.h"
 #include "compute/rope.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/activation.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"

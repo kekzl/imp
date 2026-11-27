@@ -18,7 +18,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 // Note: quant/turboquant.h removed (TurboQuant retired Phase 5, 2026-05-17).
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/mxfp4_sfatom.h"
 #include "core/tensor.h"
 #include "compute/sampling.h"  // TopkRowArgs (row-batched sampler staging)

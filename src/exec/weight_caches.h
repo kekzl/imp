@@ -4,8 +4,8 @@
 #include "exec/weight_cache_entries.h"  // the move-only value types of the maps below
 #include "memory/device_owned.h"
 #include "quant/nvfp4_quant.h"               // NvFP4QuantResult, NvFP4MoEQuantResult
-#include "compute/gemm_cutlass_sm120.h"      // NvFP4SfAtomWeight
-#include "quant/cutlass_mxfp4_weight.h"      // MxFP4SfAtomWeight
+#include "compute/nvfp4_sfatom_quant.h"      // NvFP4SfAtomWeight
+#include "quant/mxfp4_sfatom_weight.h"       // MxFP4SfAtomWeight
 #include "quant/mxfp8_sfatom.h"              // MxFP8SfAtomWeight
 #include <cuda_fp16.h>
 #include <unordered_map>

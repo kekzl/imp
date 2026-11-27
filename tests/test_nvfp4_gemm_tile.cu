@@ -3,11 +3,11 @@
 // (informational). Timing cases: tests/bench/test_nvfp4_gemm_tile_bench.cu.
 
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
 #include "nvfp4_ref_gemm.cuh"
 #include "quant/nvfp4_gemm_tile.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 

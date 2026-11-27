@@ -10,8 +10,8 @@
 // MXFP8 (checked first at dispatch).
 
 #include "quant/mxfp8_sfatom.h"
-#include "compute/cutlass_nvfp4_owned.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_owned.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/dispatch_policy.h"
 #include "core/logging.h"
 #include "exec/quant_pipeline.h"

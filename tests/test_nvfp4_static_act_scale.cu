@@ -4,8 +4,8 @@
 // mutants that drop the scale on either side are red; every producer matches the reference quantizer.
 
 #include "compute/activation.h"
-#include "compute/cutlass_nvfp4_owned.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_owned.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/layernorm.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm.h"

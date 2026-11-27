@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 #include "compute/activation.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/moe_routing.h"
 #include "core/tensor.h"
 #include "model/model_config.h"

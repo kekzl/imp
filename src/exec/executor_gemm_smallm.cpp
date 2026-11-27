@@ -15,7 +15,7 @@
 #include "exec/executor_debug.h"
 #include "exec/executor_kernels.h"
 #include "compute/activation.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/dequant_gpu.h"
 #include "core/log_once.h"
 #include "core/logging.h"
@@ -299,7 +299,7 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
     const bool epi = swiglu_epi_eligible_(ly, no, go, uo, n, ctx.mode);
     gemm_via_handle_(ly.w_gate_id, no, go, ctx);
     if (epi) {
-        // The registry route's alpha and workspace rule (gemm_kernel_cutlass_nvfp4.cpp): same plan, same
+        // The registry route's alpha and workspace rule (gemm_kernel_nvfp4_sfatom.cpp): same plan, same
         // bits.
         const auto& hu = registry_.handle(ly.w_up_id);
         const auto& cu = hu.payload.nvfp4_sfatom;

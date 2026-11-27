@@ -2,12 +2,12 @@
 // kernel never take stream-K, whose K split follows M (Gemma-4-26B global q_proj N 8192 K 2816: 218 rows
 // data-parallel, 42 rows split in 2; prefix resend 0.179 nats).
 
-#include "compute/gemm_cutlass_sm120.h"  // NvFP4SfAtomWeight, convert_nvfp4_to_sfatom
+#include "compute/nvfp4_sfatom_quant.h"  // NvFP4SfAtomWeight, convert_nvfp4_to_sfatom
 #include "core/process_diag.h"
 #include "core/tensor.h"
 #include "exec/gemm_kernel_registry.h"
 #include "quant/nvfp4_gemm_tile.h"  // gemm_nvfp4_tile, gemm_tile_streamk_workspace_bytes
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 

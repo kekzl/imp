@@ -2,7 +2,7 @@
 #include "memory/device_alloc_all.h"
 #include "memory/device_owned.h"
 #include "compute/cublas_handle.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include <algorithm>
 #include <atomic>
 #include "compute/gemm_algo_capture.h"

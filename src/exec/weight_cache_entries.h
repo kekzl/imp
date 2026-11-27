@@ -7,18 +7,18 @@
 // The ownership flags of the base structs (borrowed, borrowed_data) always
 // read "not mine" inside an entry, so a sliced copy of the base is a view
 // and the src/quant free functions release nothing when handed one. NvFP4CacheEntry and
-// NvFP4SfAtomCacheEntry are the producer owners (quant/nvfp4_owned.h, compute/cutlass_nvfp4_owned.h)
+// NvFP4SfAtomCacheEntry are the producer owners (quant/nvfp4_owned.h, compute/nvfp4_sfatom_owned.h)
 // that can also hold a view.
 
 #include <cstddef>
 #include <utility>
 
-#include "compute/cutlass_nvfp4_owned.h"  // NvFP4SfAtomOwned
-#include "compute/gemm_cutlass_sm120.h"   // NvFP4SfAtomWeight
+#include "compute/nvfp4_sfatom_owned.h"  // NvFP4SfAtomOwned
+#include "compute/nvfp4_sfatom_quant.h"  // NvFP4SfAtomWeight
 #include "core/tensor.h"
 #include "memory/device_owned.h"
-#include "quant/cutlass_mxfp4_weight.h"  // MxFP4SfAtomWeight
-#include "quant/mxfp8_sfatom.h"          // MxFP8SfAtomWeight
+#include "quant/mxfp4_sfatom_weight.h"  // MxFP4SfAtomWeight
+#include "quant/mxfp8_sfatom.h"         // MxFP8SfAtomWeight
 #include "quant/nvfp4_owned.h"           // NvFP4Owned, NvFP4MoEOwned
 #include "quant/nvfp4_quant.h"           // NvFP4QuantResult, NvFP4MoEQuantResult
 

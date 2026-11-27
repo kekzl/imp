@@ -164,7 +164,7 @@ def selftest():
 
     cases = [
         ("clean tree", (), None, 0),
-        ("reader in src/exec", (("src/exec/executor_forward_moe_cutlass.cu",
+        ("reader in src/exec", (("src/exec/executor_forward_moe_grouped.cu",
                                  f"bool m() {{ {call} }}\n"),), None, 1),
         ("reader in src/quant", (("src/quant/nvfp4_quant.cu",
                                   f"bool m() {{ {call} }}\n"),), None, 1),

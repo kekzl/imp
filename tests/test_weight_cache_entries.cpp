@@ -10,7 +10,7 @@
 #include "exec/weight_handle.h"
 #include "memory/device_owned.h"
 #include "memory/vram_allocator.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 
 #include <algorithm>

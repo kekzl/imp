@@ -23,7 +23,7 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
@@ -381,7 +381,7 @@ bool GraphExecutor::moe_skip_gather_(int layer, const MoeFfnContext& ctx) const 
 
 bool GraphExecutor::moe_grouped_will_use_device_args_(int layer, const MoeFfnContext& ctx) const {
     // gpt-oss: only the unstaged device-args path carries its bias + GLU seam (mirror of the
-    // use_device_args gate in executor_forward_moe_cutlass.cpp).
+    // use_device_args gate in executor_forward_moe_grouped.cpp).
     if (model_->profile().moe_expert_bias_glu && ctx.staged_blocks)
         return false;
     if (!gemm_grouped_nvfp4_moe_supports(ctx.ne, ctx.d, ctx.eff))

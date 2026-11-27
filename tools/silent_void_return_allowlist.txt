@@ -21,4 +21,4 @@ src/exec/executor_sparse_prefill.cpp  # 1  fallback sparse_prefill_scratch: spar
 src/exec/pre_dequant_fp8_lm_head.cpp  # 2  fallback fp8_lm_head: no FP8 head, the head keeps its source path
 src/exec/pre_dequant_phase1_fp16_cache.cpp  # 1  fallback fp16_weight_cache: remaining weights dequantize on the fly
 src/exec/pre_dequant_phase2_fp8_cache.cpp  # 2  fallback fp8_ssm_sidecar: no FP8 SSM projections, decode reads FP16
-src/exec/pre_dequant_phase3_cutlass.cpp  # 1  fallback nvfp4_sf_slab: no SfAtom scale cache, weights keep their source route
+src/exec/pre_dequant_phase3_sfatom.cpp  # 1  fallback nvfp4_sf_slab: no SfAtom scale cache, weights keep their source route

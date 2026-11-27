@@ -1,7 +1,7 @@
 // Host-only cases of tests/test_vram_budget_reserve.cpp, in test-core (CPU lane): no CUDA call.
 #include <gtest/gtest.h>
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "exec/moe_nvfp4_cache_rule.h"
 #include "memory/vram_query.h"
 #include "model/model.h"

@@ -1,11 +1,11 @@
 // NVFP4 SfAtom layout, weight scale conversion and activation quantizers for the block-scaled NVFP4 GEMMs
 // (own tile and grouped kernels, cuBLASLt block-scaled on refusal). Moved
-// verbatim from gemm_cutlass_sm120.cu. Weight conversion (once at init): packed FP4 [N,K/2] borrowed,
+// verbatim from nvfp4_sfatom_quant.cu. Weight conversion (once at init): packed FP4 [N,K/2] borrowed,
 // micro_scales linear [N,K/16] -> SfAtom UE4M3, tensor_scale stays the GEMM alpha. Activations per prefill
 // call: FP16 [M,K] -> NVFP4 packed [M,K/2] + SfAtom UE4M3 scales. No CUTLASS include.
 
-#include "compute/gemm_cutlass_sm120.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_quant.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "memory/device_alloc_all.h"
 #include "compute/gpt_oss_glu.cuh"
 #include "model/model_config.h"

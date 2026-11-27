@@ -16,7 +16,7 @@
 #include "compute/gdn.h"        // gdn_scan_chunkpar_workspace_bytes
 #include "compute/gemm_f16_narrow_smallm.h"  // gemm_f16_narrow_smallm_workspace_bytes
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"

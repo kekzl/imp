@@ -1,12 +1,12 @@
 #include "exec/gemm_kernel_registry.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"  // NvFP4SfAtomWeight, convert_nvfp4_to_sfatom
+#include "compute/nvfp4_sfatom_quant.h"  // NvFP4SfAtomWeight, convert_nvfp4_to_sfatom
 #include "core/tensor.h"
 #include "exec/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv
 #include "exec/gemm_scratch.h"      // prewarm_mmvq_scratch
 #include "quant/dequant_gpu.h"      // generic-dequant parity test
 #include "quant/nvfp4_gemm_tile.h"  // gemm_tile_streamk_workspace_bytes
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 

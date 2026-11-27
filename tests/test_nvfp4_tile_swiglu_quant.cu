@@ -3,10 +3,10 @@
 // 128x64 / 128x128 / 128x256, stream-K uniform / hybrid / split), ragged M, both act-scale modes, 2^-9 clamp
 // blocks.
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm_tile.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 

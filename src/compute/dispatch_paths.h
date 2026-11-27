@@ -54,7 +54,7 @@ enum class MoePrefillOuter {
 };
 
 // Tiers inside try_run_moe_grouped_nvfp4_prefill_
-// (exec/executor_forward_moe_cutlass.cpp).
+// (exec/executor_forward_moe_grouped.cpp).
 enum class MoePrefillPath {
     DEVICE_ARGS,  // gemm_grouped_nvfp4_dispatch, device-args full path (fast)
     GROUPED,      // gemm_grouped_nvfp4_host_args (+ gpt-oss bias seams)

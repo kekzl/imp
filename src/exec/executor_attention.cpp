@@ -18,7 +18,7 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"

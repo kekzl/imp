@@ -3,7 +3,7 @@
 #include "exec/storage_planner.h"
 #include "exec/moe_nvfp4_cache_rule.h"
 #include "quant/dequant_gpu.h"           // dequant_gpu_supported
-#include "compute/gemm_cutlass_sm120.h"  // nvfp4_sfatom_size (SfAtom padding)
+#include "compute/nvfp4_sfatom_quant.h"  // nvfp4_sfatom_size (SfAtom padding)
 #include "compute/mmq_q8_imma.h"         // imma_q8_plane_bytes
 #include "core/kv_dtype.h"
 #include "core/logging.h"
@@ -74,7 +74,7 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
     if (!mcfg.is_nvfp4_prequant)
         return d;
 
-    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_cutlass.cpp): each slab entry is
+    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_sfatom.cpp): each slab entry is
     // align_up(nvfp4_sfatom_size(N, K), 256); contiguous MoE expert groups occupy
     // align_up(ne × sf_size, 256) as ONE entry. Wire shapes store K/2 (e2m1 pairs): logical K = 2 × shape[1].
     constexpr size_t kSfAlign = 256;

@@ -3,14 +3,14 @@
 // epilogues bit-equal to tile(gate) + tile(up) + fused_act_quantize (packed bytes and UE4M3 scales of every
 // valid row). Timing cases: tests/bench/test_gemm_grouped_nvfp4_decode_bench.cu.
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_decode.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "core/tensor.h"
 #include "model/model_config.h"
 #include "nvfp4_fp64_ref.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
