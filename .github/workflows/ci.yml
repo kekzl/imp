@@ -734,7 +734,11 @@ jobs:
 
       - name: Build the device library
         if: steps.scope.outputs.run == 'true'
-        run: cmake --build build-ptx --target imp -j"$(bash scripts/build_jobs.sh)"
+        run: |
+          jobs="$(bash scripts/build_jobs.sh)"
+          echo "-j$jobs: nproc=$(nproc) MemTotal=$(awk '/MemTotal/ {print $2}' /proc/meminfo) kB cgroup memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo n/a)"
+          cmake --build build-ptx --target imp -j"$jobs"
+          echo "cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
 
       - name: Assemble every PTX image
         if: steps.scope.outputs.run == 'true'
@@ -883,7 +887,10 @@ jobs:
           # sanitized"). The fatbin that ships is assembled and checked by the
           # `PTX fallback` job, which deliberately leaves the option at OFF.
           ccache -z
-          cmake --build build-asan --target test-core test-text -j"$(bash scripts/build_jobs.sh)"
+          jobs="$(bash scripts/build_jobs.sh)"
+          echo "-j$jobs: nproc=$(nproc) MemTotal=$(awk '/MemTotal/ {print $2}' /proc/meminfo) kB cgroup memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo n/a)"
+          cmake --build build-asan --target test-core test-text -j"$jobs"
+          echo "cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
           ccache -s
 
       # A binary that contains none of the tests reports "PASSED 0 tests" and
