@@ -20,6 +20,7 @@ namespace {
 // old contents, the mask kernel masked everything, and greedy argmax over an all -FLT_MAX row
 // picked id 0 - every constrained request answered "!!!!..." to max_tokens.
 // JsonConstrainer and SchemaConstrainer size both sides from the tokenizer and were unaffected.
+// One row per constrainer (#1493 hit both): each row is the only catcher of its copy of the bug.
 
 // Builds a tokenizer whose vocabulary is deliberately narrower than the logits
 // row the constrainer will be asked to mask.
@@ -30,8 +31,22 @@ Tokenizer make_tokenizer(std::vector<std::string>& toks) {
     return tok;
 }
 
-TEST(RegexConstrainMaskTest, ModelVocabLargerThanTokenizerMasksPadding) {
+enum class MaskKind { kRegex, kGrammar };
+
+struct MaskCase {
+    const char* name;
+    MaskKind kind;
+    const char* constraint;  // regex pattern or GBNF grammar admitting only "Paris"
+    const char* keep_msg;
+    const char* drop_msg;
+    const char* pad_msg;
+};
+
+class ConstrainMaskTest : public ::testing::TestWithParam<MaskCase> {};
+
+TEST_P(ConstrainMaskTest, ModelVocabLargerThanTokenizerMasksPadding) {
     SKIP_IF_NO_CUDA();
+    const MaskCase& c = GetParam();
 
     //                                  0        1      2       3        4       5
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "Paris", "Lyon", "xyz"};
@@ -41,41 +56,11 @@ TEST(RegexConstrainMaskTest, ModelVocabLargerThanTokenizerMasksPadding) {
     const int model_vocab = tok_vocab + 9;  // simulated lm_head padding rows
 
     RegexConstrainer rc;
-    ASSERT_TRUE(rc.init("Paris", &tok));
-
-    std::vector<float> h(model_vocab, 1.0f);
-    float* d = nullptr;
-    ASSERT_EQ(cudaMalloc(&d, model_vocab * sizeof(float)), cudaSuccess);
-    ASSERT_EQ(cudaMemcpy(d, h.data(), model_vocab * sizeof(float), cudaMemcpyHostToDevice), cudaSuccess);
-
-    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "test setup left a CUDA error behind";
-    rc.apply_mask(d, model_vocab, 0);
-    EXPECT_EQ(cudaGetLastError(), cudaSuccess)
-        << "apply_mask raised a CUDA error: the allow-list upload is sized from the model "
-           "vocabulary while the buffer is sized from the tokenizer";
-
-    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    ASSERT_EQ(cudaMemcpy(h.data(), d, model_vocab * sizeof(float), cudaMemcpyDeviceToHost), cudaSuccess);
-    cudaFree(d);
-
-    EXPECT_GT(h[3], -1e30f) << "'Paris' matches the pattern and must survive the mask";
-    EXPECT_FLOAT_EQ(h[4], -FLT_MAX) << "'Lyon' does not match the pattern and must be masked";
-    for (int i = tok_vocab; i < model_vocab; i++)
-        EXPECT_FLOAT_EQ(h[i], -FLT_MAX) << "padding id " << i << " leaked through the regex mask";
-}
-
-TEST(GrammarConstrainMaskTest, ModelVocabLargerThanTokenizerMasksPadding) {
-    SKIP_IF_NO_CUDA();
-
-    //                                  0        1      2       3        4       5
-    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "Paris", "Lyon", "xyz"};
-    Tokenizer tok = make_tokenizer(toks);
-
-    const int tok_vocab = static_cast<int>(toks.size());
-    const int model_vocab = tok_vocab + 9;
-
     GrammarConstrainer gc;
-    ASSERT_TRUE(gc.init("root ::= \"Paris\"", &tok));
+    if (c.kind == MaskKind::kRegex)
+        ASSERT_TRUE(rc.init(c.constraint, &tok));
+    else
+        ASSERT_TRUE(gc.init(c.constraint, &tok));
 
     std::vector<float> h(model_vocab, 1.0f);
     float* d = nullptr;
@@ -83,7 +68,10 @@ TEST(GrammarConstrainMaskTest, ModelVocabLargerThanTokenizerMasksPadding) {
     ASSERT_EQ(cudaMemcpy(d, h.data(), model_vocab * sizeof(float), cudaMemcpyHostToDevice), cudaSuccess);
 
     ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "test setup left a CUDA error behind";
-    gc.apply_mask(d, model_vocab, 0);
+    if (c.kind == MaskKind::kRegex)
+        rc.apply_mask(d, model_vocab, 0);
+    else
+        gc.apply_mask(d, model_vocab, 0);
     EXPECT_EQ(cudaGetLastError(), cudaSuccess)
         << "apply_mask raised a CUDA error: the allow-list upload is sized from the model "
            "vocabulary while the buffer is sized from the tokenizer";
@@ -92,11 +80,21 @@ TEST(GrammarConstrainMaskTest, ModelVocabLargerThanTokenizerMasksPadding) {
     ASSERT_EQ(cudaMemcpy(h.data(), d, model_vocab * sizeof(float), cudaMemcpyDeviceToHost), cudaSuccess);
     cudaFree(d);
 
-    EXPECT_GT(h[3], -1e30f) << "'Paris' is the only production and must survive the mask";
-    EXPECT_FLOAT_EQ(h[4], -FLT_MAX) << "'Lyon' is not in the grammar and must be masked";
+    EXPECT_GT(h[3], -1e30f) << c.keep_msg;
+    EXPECT_FLOAT_EQ(h[4], -FLT_MAX) << c.drop_msg;
     for (int i = tok_vocab; i < model_vocab; i++)
-        EXPECT_FLOAT_EQ(h[i], -FLT_MAX) << "padding id " << i << " leaked through the grammar mask";
+        EXPECT_FLOAT_EQ(h[i], -FLT_MAX) << "padding id " << i << c.pad_msg;
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Kinds, ConstrainMaskTest,
+    ::testing::Values(
+        MaskCase{"Regex", MaskKind::kRegex, "Paris", "'Paris' matches the pattern and must survive the mask",
+                 "'Lyon' does not match the pattern and must be masked", " leaked through the regex mask"},
+        MaskCase{"Grammar", MaskKind::kGrammar, "root ::= \"Paris\"",
+                 "'Paris' is the only production and must survive the mask",
+                 "'Lyon' is not in the grammar and must be masked", " leaked through the grammar mask"}),
+    [](const ::testing::TestParamInfo<MaskCase>& info) { return std::string(info.param.name); });
 
 }  // namespace
 }  // namespace imp
