@@ -48,7 +48,7 @@ inline half f16_from_bits(uint16_t b) {
 inline double f16_to_f64(half h) { return static_cast<double>(__half2float(h)); }
 // Round an fp32 to f16 and back (the kernel's final-store rounding). Saturates
 // to ±Inf on overflow, matching __float2half on values > 65504.
-inline float __float2half_then_float(float f) { return __half2float(__float2half(f)); }
+inline float float2half_then_float(float f) { return __half2float(__float2half(f)); }
 
 // fp64 REFERENCE DEQUANT derived from the ggml format definition; layout mirrors imp's
 // headers, arithmetic is reconstructed independently.

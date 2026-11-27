@@ -28,6 +28,8 @@ struct MappedFile {
     size_t size = 0;
 
     explicit MappedFile(size_t bytes) : size(bytes) {
+        if (bytes == 0)  // mmap of 0 bytes is EINVAL
+            return;
         char tmpl[] = "/tmp/imp_pagerelease_XXXXXX";
         int fd = mkstemp(tmpl);
         if (fd < 0)
@@ -38,9 +40,9 @@ struct MappedFile {
             pattern[i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFF);
         ssize_t w = write(fd, pattern.data(), pattern.size());
         (void)w;
-        base = mmap(nullptr, size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+        base = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
         if (base == MAP_FAILED)
-            base = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+            base = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
         if (base == MAP_FAILED)
             base = nullptr;
         close(fd);

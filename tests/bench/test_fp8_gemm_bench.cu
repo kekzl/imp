@@ -79,9 +79,10 @@ TEST_F(FP8GemmTest, HeadReadShapeProbe) {
         const double us = ms * 1000.0 / 300;
         printf("[ PROBE    ] %s: %.1f us, %.0f GB/s\n", name, us, static_cast<double>(M) * K / us / 1e3);
     };
-#define PROBE(C, U, TPB)                  \
-    bench("C=" #C " kU=" #U " tpb=" #TPB, \
-          [&] { probe_read_kernel<C, U><<<(warps * 32 + TPB - 1) / TPB, TPB, 0, stream_>>>(W, M, K, o); })
+#define PROBE(C, U, TPB)                                                                            \
+    bench("C=" #C " kU=" #U " tpb=" #TPB, [&] {                                                     \
+        probe_read_kernel<C, U><<<(warps * 32 + (TPB) - 1) / (TPB), TPB, 0, stream_>>>(W, M, K, o); \
+    })
     PROBE(64, 8, 128);
     PROBE(128, 8, 128);
     PROBE(256, 8, 128);

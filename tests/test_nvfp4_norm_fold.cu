@@ -60,6 +60,7 @@ protected:
         NvFP4Owned q;
         quantize_fp16_to_nvfp4(t, q, stream_);
         EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the view of the owner
         const NvFP4QuantResult view = q;
         quants_.push_back(std::move(q));
         return view;

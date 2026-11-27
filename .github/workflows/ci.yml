@@ -94,8 +94,8 @@ jobs:
         run: |
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           code=true
-          # `cpp` gates the clang-tidy steps below, which lint changed src|tools
-          # *.cpp and the host side of changed src/*.cu (#2210): no apt install
+          # `cpp` gates the clang-tidy steps below, which lint changed src|tools|tests
+          # *.cpp and the host side of changed src/*.cu, tests/*.cu (#2210): no apt install
           # when there is nothing to lint. Same FAIL-OPEN rule as `code`: any
           # uncertainty runs them.
           cpp=true
@@ -123,12 +123,12 @@ jobs:
             # check (ruleset 14716423): a syntax error here fails every PR.
             # `grep -c` reads all of stdin, so nothing ever takes EPIPE, and it
             # is POSIX. `|| true` because grep exits 1 when the count is 0.
-            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools)/.*\.cpp$|^src/.*\.cu$' || true)"
+            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$' || true)"
             [ "${n_cpp:-0}" -gt 0 ] || cpp=false
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "cpp=$cpp" >> "$GITHUB_OUTPUT"
-          printf 'non-docs changes: code=%s (src|tools .cpp or src .cu: %s)\nchanged files:\n%s\n' \
+          printf 'non-docs changes: code=%s (src|tools|tests .cpp or src|tests .cu: %s)\nchanged files:\n%s\n' \
             "$code" "$cpp" "${files:-<none>}"
 
       # The blocking static gates, FIRST, before the compile. Ruleset 14716423
@@ -308,8 +308,8 @@ jobs:
       # clang-tidy, BLOCKING since 2026-11-25 (AUDIT_ARCH_2026_11_24 X-2): as its own
       # non-required job it was red on main on 3 consecutive pushes (runs 45259686168,
       # 45259954018, 45270975645) and each merged. Here because the ruleset requires
-      # the one context `Build`. Lints only the changed src|tools .cpp and the host
-      # side of changed src .cu (clang `-x cuda --cuda-host-only`, #2210) against this
+      # the one context `Build`. Lints only the changed src|tools|tests .cpp and the host
+      # side of changed src|tests .cu (clang `-x cuda --cuda-host-only`, #2210) against this
       # job's own build/ (compile_commands.json, _deps, generated headers).
       # Cost over 8 PR runs of the former job: install 8-11 s + lint 9-37 s, median
       # 30 s, against a median 327 s `Build` on the 12 PR runs that linted.
@@ -345,8 +345,8 @@ jobs:
             echo "::error::git diff failed against base $base: the lint list would be empty"
             exit 1
           fi
-          mapfile -t files < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$|^src/.*\.cu$' || true)
-          if [ "${#files[@]}" -eq 0 ]; then echo "no src/tools .cpp or src .cu changed: nothing to lint"; exit 0; fi
+          mapfile -t files < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$' || true)
+          if [ "${#files[@]}" -eq 0 ]; then echo "no src/tools/tests .cpp or src/tests .cu changed: nothing to lint"; exit 0; fi
           echo "linting ${#files[@]} changed file(s) (a fragment lints its includer):"; printf '  %s\n' "${files[@]}"
           bash scripts/tidy_lane.sh "${files[@]}"
 

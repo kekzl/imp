@@ -151,7 +151,7 @@ TEST_F(WeightCacheEntriesTest, Nvfp4TakesAnOwnerAndViewsAPlainResult) {
     q.N = 4;
     q.K = 16;
     q.tensor_scale = 0.5f;
-    NvFP4QuantResult borrowed = q;  // a sliced copy of the owner is a view
+    NvFP4QuantResult borrowed = q;  // NOLINT(cppcoreguidelines-slicing): a sliced copy is a view
     borrowed.packed_data = at(2);
     borrowed.micro_scales = at(3);
     {
