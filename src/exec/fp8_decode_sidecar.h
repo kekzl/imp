@@ -20,11 +20,13 @@ struct Fp8SidecarScope {
     bool ffn = false;      // dense FFN: w_gate / w_up / w_down and the shared-expert trio (gemm.fp8_ffn_proj)
 };
 
-// attn_proj: "auto" (profile decides), "qo", "on", "off". ffn_proj: gemm.fp8_ffn_proj.
+// attn_proj: "auto" (profile decides), "qo", "on", "off". ffn_proj: "auto" (profile decides: Gemma-4 NVFP4),
+// "on", "off".
 [[nodiscard]] inline Fp8SidecarScope fp8_sidecar_scope(const std::string& attn_proj, bool profile_attn_full,
-                                                       bool ffn_proj) {
+                                                       const std::string& ffn_proj, bool profile_ffn) {
     const bool full = attn_proj == "on" || (attn_proj == "auto" && profile_attn_full);
-    return {.attn_qo = full || attn_proj == "qo", .attn_kv = full, .ffn = ffn_proj};
+    const bool ffn = ffn_proj == "on" || (ffn_proj == "auto" && profile_ffn);
+    return {.attn_qo = full || attn_proj == "qo", .attn_kv = full, .ffn = ffn};
 }
 
 // Candidates of one layer, nullptr = not a target. SSM rows are always candidates: at decode the fused

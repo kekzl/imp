@@ -254,11 +254,12 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // attention projections. "auto" = q/k/v/o on gpt-oss and Qwen4Exp (BF16 dense projections get
     // no NVFP4 decode cache and decode as FP16 GEMVs). "qo" restricts the sidecar to q/o as a
     // conservative middle mode; "on" forces full q/k/v/o for any full-precision attention weights.
-    // gemm.fp8_ffn_proj (B-141): the same for the dense w_gate / w_up / w_down, default off.
+    // gemm.fp8_ffn_proj (B-141): the same for the dense w_gate / w_up / w_down, "auto" = Gemma-4 NVFP4.
     // Selection and byte charge: exec/fp8_decode_sidecar.h.
     const auto& gp = dispatch_policy().gemm;
-    const Fp8SidecarScope scope = fp8_sidecar_scope(gp.fp8_attn_proj, model_->profile().fp8_attn_proj_full,
-                                                    gp.fp8_ffn_proj);
+    const auto& prof = model_->profile();
+    const Fp8SidecarScope scope = fp8_sidecar_scope(gp.fp8_attn_proj, prof.fp8_attn_proj_full,
+                                                    gp.fp8_ffn_proj, prof.fp8_ffn_proj_auto);
     const bool attn_on = scope.attn_qo || scope.attn_kv;
     const Fp8SidecarPlan plan = plan_fp8_sidecar(
         cfg.n_layers, [&](int i) -> const TransformerLayer& { return model_->layer(i); }, scope,

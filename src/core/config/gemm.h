@@ -95,8 +95,9 @@ struct GEMM {
     // cache). Other arches off pending a decode-path PPL gate (--prefill-chunk-size 1).
     std::string fp8_attn_proj = "auto";
     // Same FP8 decode sidecar for the dense full-precision FFN trio (incl. shared-expert slots), M=1 only.
-    // Gemma-4-26B-A4B: decode +6.2 %, +514 MiB, top-1 99.06 % (docs/ROADMAP.md B-141); off by default.
-    bool fp8_ffn_proj = false;
+    // Gemma-4-26B-A4B: decode +6.2 %, +514 MiB, top-1 99.06 % (docs/ROADMAP.md B-141). "auto" = on for
+    // Gemma-4 NVFP4 checkpoints (ModelProfile::fp8_ffn_proj_auto), off elsewhere; "on" / "off" force it.
+    std::string fp8_ffn_proj = "auto";
 };
 
 // Former GEMM keys, values measured once and never moved (keys removed 2026-11-14).
