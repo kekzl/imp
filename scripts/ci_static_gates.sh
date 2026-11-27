@@ -117,6 +117,12 @@ if want deps; then
     run "that gate still names its violations"        bash scripts/check_dep_pins.sh --selftest
 fi
 
+# The path rule of verify-fast's Inkling leg (B-142): Inkling and KV/BlockPool/scheduler/memory on, docs off.
+if want inkling-leg; then
+    echo "== Inkling leg rule =="
+    run "verify-fast Inkling leg path rule" bash scripts/inkling_leg.sh --selftest
+fi
+
 # The Sanitizers PR path filter reads tools/untrusted_input_sources.txt. As a regex in ci.yml it
 # missed 4 parser files on 2026-11-24 (AUDIT_ARCH_2026_11_24 X-5).
 if want untrusted; then
