@@ -539,9 +539,9 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
 // NVFP4_SFATOM tier
 // ===========================================================================
 
-// gemm_dispatch NVFP4_SFATOM tier (M>1): dispatch reconstructs CutlassNvFP4Weight from the
+// gemm_dispatch NVFP4_SFATOM tier (M>1): dispatch reconstructs NvFP4SfAtomWeight from the
 // payload and calls gemm_nvfp4_tile (auto variant, stream-K workspace), same as the direct call.
-TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
+TEST_F(WeightDispatchTest, NVFP4_SFATOM_GemmMatchesDirect) {
     // Own tile: K % 64 == 0, N % 8 == 0.
     const int M = 8, N = 16, K = 64;
 
@@ -561,13 +561,13 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
-    CutlassNvFP4Owned cw;
-    convert_nvfp4_to_cutlass(qr, cw, stream_);
+    NvFP4SfAtomOwned cw;
+    convert_nvfp4_to_sfatom(qr, cw, stream_);
     cudaStreamSynchronize(stream_);
 
     // Allocate activation scratch for direct call
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t act_sf_bytes = nvfp4_sfatom_size(M, K);
     size_t ws_needed = gemm_tile_streamk_workspace_bytes();
 
     void* d_act_data;
@@ -577,7 +577,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     void* d_ws;
     cudaMalloc(&d_ws, (ws_needed > 0) ? ws_needed : 1);
 
-    quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
+    quantize_fp16_to_nvfp4_sfatom(d_x, d_act_data, d_act_sf, M, K, stream_);
     cudaStreamSynchronize(stream_);
 
     half* d_y_direct;
@@ -596,9 +596,9 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     h.primary_tier = StorageTier::NVFP4_SFATOM;
     h.shape[0] = N;
     h.shape[1] = K;
-    h.payload.cutlass_nvfp4.weight = const_cast<void*>(cw.data);
-    h.payload.cutlass_nvfp4.sf = cw.scale_factors;
-    h.payload.cutlass_nvfp4.global_scale = const_cast<float*>(&cw.tensor_scale);
+    h.payload.nvfp4_sfatom.weight = const_cast<void*>(cw.data);
+    h.payload.nvfp4_sfatom.sf = cw.scale_factors;
+    h.payload.nvfp4_sfatom.global_scale = const_cast<float*>(&cw.tensor_scale);
 
     int64_t xshape[2] = {M, K}, yshape[2] = {M, N};
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
@@ -636,13 +636,13 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
 // (EXPECT_NO_THROW, stub returns early leaving stale output) - the #654 shape SETTLED S-22
 // removed from attention_prefill_dispatch: "no tier accepted" must be an error, not a
 // degraded answer. Routing check kept; what counts as correct behavior changed.
-TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleMemory) {
+TEST_F(WeightDispatchTest, NVFP4_SFATOM_GemvRefusesInsteadOfAnsweringWithStaleMemory) {
     const int M = 8, K = 32;
 
     void* dummy_data;
     cudaMalloc(&dummy_data, M * K / 2);
     void* dummy_sf;
-    cudaMalloc(&dummy_sf, cutlass_nvfp4_sf_size(M, K));
+    cudaMalloc(&dummy_sf, nvfp4_sfatom_size(M, K));
     float dummy_scale = 1.0f;
 
     WeightHandle h;
@@ -650,9 +650,9 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleM
     h.primary_tier = StorageTier::NVFP4_SFATOM;
     h.shape[0] = M;
     h.shape[1] = K;
-    h.payload.cutlass_nvfp4.weight = dummy_data;
-    h.payload.cutlass_nvfp4.sf = dummy_sf;
-    h.payload.cutlass_nvfp4.global_scale = &dummy_scale;
+    h.payload.nvfp4_sfatom.weight = dummy_data;
+    h.payload.nvfp4_sfatom.sf = dummy_sf;
+    h.payload.nvfp4_sfatom.global_scale = &dummy_scale;
 
     half* d_x;
     cudaMalloc(&d_x, K * sizeof(half));
@@ -688,7 +688,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleM
 // MXFP4 tier
 // ===========================================================================
 
-// gemm_dispatch MXFP4 tier (M>1): dispatch reconstructs CutlassMxFP4Weight and runs the own
+// gemm_dispatch MXFP4 tier (M>1): dispatch reconstructs MxFP4SfAtomWeight and runs the own
 // tile GEMM (gemm_mxfp4_tile) on the quantized activation. K must be a multiple of 128.
 TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
     const int M = 8, N = 16, K = 128;
@@ -706,17 +706,17 @@ TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
     void* d_w_data;
     cudaMalloc(&d_w_data, static_cast<size_t>(N) * K / 2);
     void* d_w_sf;
-    cudaMalloc(&d_w_sf, cutlass_mxfp4_sf_size(N, K));
-    cudaMemsetAsync(d_w_sf, 0, cutlass_mxfp4_sf_size(N, K), stream_);
-    quantize_fp16_to_mxfp4_cutlass(d_w, d_w_data, d_w_sf, N, K, stream_);
+    cudaMalloc(&d_w_sf, mxfp4_sfatom_size(N, K));
+    cudaMemsetAsync(d_w_sf, 0, mxfp4_sfatom_size(N, K), stream_);
+    quantize_fp16_to_mxfp4_sfatom(d_w, d_w_data, d_w_sf, N, K, stream_);
 
     const size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    const size_t act_sf_bytes = cutlass_mxfp4_sf_size(M, K);
+    const size_t act_sf_bytes = mxfp4_sfatom_size(M, K);
     void* d_act_data;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    quantize_fp16_to_mxfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
+    quantize_fp16_to_mxfp4_sfatom(d_x, d_act_data, d_act_sf, M, K, stream_);
 
     half* d_y_direct;
     cudaMalloc(&d_y_direct, M * N * sizeof(half));
@@ -778,7 +778,7 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
     uint8_t* d_lin = dev_alloc_copy(h_lin);
     half* d_x = dev_alloc_copy(h_x);
 
-    CutlassMxFP4Weight mw;
+    MxFP4SfAtomWeight mw;
     mw.data = d_packed;
     mw.linear_scales = d_lin;
     mw.N = M;

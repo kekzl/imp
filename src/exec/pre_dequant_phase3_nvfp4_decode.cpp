@@ -297,7 +297,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         return;
     // diagnostics.no_nvfp4_decode_cache skips steps that BUILD decode-cache entries. It must
     // NOT skip the CUTLASS/MXFP4 conversions further down: those only re-lay-out weights
-    // phase 0 already registered, populating wcache_->cutlass_nvfp4, which
+    // phase 0 already registered, populating wcache_->nvfp4_sfatom, which
     // infer_tier_from_wcache reads to set prefill_tier. Returning early here took the whole
     // CUTLASS prefill cache with it, silently moving dense FFN prefill from W4A4 to the
     // gemm_nvfp4 W4A16 safety net.
@@ -373,7 +373,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
 
     if (!wcache_->nvfp4.empty()) {
-        nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
+        nvfp4_decode_convert_sfatom_(cfg, budget, remaining_budget, stream);
     }
 
     alloc_mxfp4_gemm_scratch_(cfg);

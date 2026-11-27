@@ -1,5 +1,5 @@
 // gemm_nvfp4_tile_swiglu_quant: packed FP4 and SfAtom bytes of the down input
-// equal gemm_nvfp4_tile (up, fp16) + swiglu_quantize_fp16_to_nvfp4_cutlass, per tile plan (data-parallel
+// equal gemm_nvfp4_tile (up, fp16) + swiglu_quantize_fp16_to_nvfp4_sfatom, per tile plan (data-parallel
 // 128x64 / 128x128 / 128x256, stream-K uniform / hybrid / split), ragged M, both act-scale modes, 2^-9 clamp
 // blocks.
 
@@ -70,15 +70,15 @@ TEST_P(Nvfp4TileSwigluQuant, BytesEqualUnfusedPath) {
     int64_t wshape[2] = {N, K};
     Tensor wt(w.p, QType::F16, 2, wshape, true);
     NvFP4Owned qr;
-    CutlassNvFP4Owned cw;
+    NvFP4SfAtomOwned cw;
     quantize_fp16_to_nvfp4(wt, qr, s);
-    convert_nvfp4_to_cutlass(qr, cw, s);
-    Dev<uint8_t> act(size_t(M) * K / 2), act_sf(cutlass_nvfp4_sf_size(M, K));
+    convert_nvfp4_to_sfatom(qr, cw, s);
+    Dev<uint8_t> act(size_t(M) * K / 2), act_sf(nvfp4_sfatom_size(M, K));
     cudaMemsetAsync(act_sf.p, 0, act_sf.bytes, s);
-    quantize_fp16_to_nvfp4_cutlass(x.p, act.p, act_sf.p, M, K, s);
+    quantize_fp16_to_nvfp4_sfatom(x.p, act.p, act_sf.p, M, K, s);
     const size_t ws_bytes = std::max<size_t>(gemm_tile_streamk_workspace_bytes(), 4096 + (size_t(170) << 16));
     Dev<uint8_t> ws(ws_bytes);
-    const size_t sf_bytes = cutlass_nvfp4_sf_size(M, N);
+    const size_t sf_bytes = nvfp4_sfatom_size(M, N);
     Dev<uint8_t> pk_ref(size_t(M) * N / 2), sf_ref(sf_bytes), pk_own(size_t(M) * N / 2), sf_own(sf_bytes);
 
     int clamp_blocks = 0;
@@ -90,7 +90,7 @@ TEST_P(Nvfp4TileSwigluQuant, BytesEqualUnfusedPath) {
             const size_t wsb = with_ws ? ws_bytes : 0;
             ASSERT_TRUE(gemm_nvfp4_tile(act.p, act_sf.p, cw.data, cw.scale_factors, cw.tensor_scale, up.p, M,
                                         N, K, s, -1, wsp, wsb));
-            swiglu_quantize_fp16_to_nvfp4_cutlass(gate.p, up.p, so.p, pk_ref.p, sf_ref.p, M, N, s, as);
+            swiglu_quantize_fp16_to_nvfp4_sfatom(gate.p, up.p, so.p, pk_ref.p, sf_ref.p, M, N, s, as);
             ASSERT_TRUE(gemm_nvfp4_tile_swiglu_quant({.a_data = act.p,
                                                       .a_sf = act_sf.p,
                                                       .w_data = cw.data,
@@ -122,7 +122,7 @@ TEST_P(Nvfp4TileSwigluQuant, BytesEqualUnfusedPath) {
         }
     }
     EXPECT_GT(clamp_blocks, 0) << "no block reached the 2^-9 clamp";
-    cw = CutlassNvFP4Owned{};
+    cw = NvFP4SfAtomOwned{};
     qr = NvFP4Owned{};
     cudaStreamDestroy(s);
 }

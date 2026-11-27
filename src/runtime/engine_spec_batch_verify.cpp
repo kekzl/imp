@@ -698,7 +698,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
                                   .stream = stream,
                                   .d_banned = d_ban,
                                   .n_banned = n_ban,
-                                  .allow_cutlass = true,
+                                  .allow_w4a4_head = true,
                                   .d_banned_alt = d_alt,
                                   .n_banned_alt = n_alt,
                                   .h_row_alt = any_alt ? row_alt.data() : nullptr,

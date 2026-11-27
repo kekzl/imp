@@ -182,9 +182,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no.data), static_cast<half*>(no.data), 1, d,
                                         hbs, stream);
-            // Reconstruct CutlassMxFP4Weight structs from handle payloads.
+            // Reconstruct MxFP4SfAtomWeight structs from handle payloads.
             auto make_mxfp4 = [](const WeightHandle* hw) {
-                CutlassMxFP4Weight mw{};
+                MxFP4SfAtomWeight mw{};
                 mw.data = hw->payload.mxfp4.weight;
                 mw.scale_factors = hw->payload.mxfp4.scales;
                 mw.linear_scales = hw->payload.mxfp4.linear_scales;
@@ -316,8 +316,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         if (will_fuse_down_mxfp4) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            // Reconstruct CutlassMxFP4Weight from handle payload.
-            CutlassMxFP4Weight wd_mxfp4{};
+            // Reconstruct MxFP4SfAtomWeight from handle payload.
+            MxFP4SfAtomWeight wd_mxfp4{};
             wd_mxfp4.data = hwd->payload.mxfp4.weight;
             wd_mxfp4.scale_factors = hwd->payload.mxfp4.scales;
             wd_mxfp4.linear_scales = hwd->payload.mxfp4.linear_scales;

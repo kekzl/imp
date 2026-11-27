@@ -24,7 +24,7 @@ namespace imp {
 
 void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
     const ModelConfig& cfg, cudaStream_t stream) {
-    if (!(wcache_->nvfp4_decode_mode == 0 && wcache_->cutlass_mxfp4.empty()))
+    if (!(wcache_->nvfp4_decode_mode == 0 && wcache_->mxfp4_sfatom.empty()))
         return;
     // Check if any layer has MXFP4 weights
     bool has_mxfp4 = false;
@@ -102,12 +102,12 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
                 return;
             if (w.ndim < 2 || w.shape[1] % 32 != 0)
                 return;
-            if (wcache_->cutlass_mxfp4.contains(w.data))
+            if (wcache_->mxfp4_sfatom.contains(w.data))
                 return;
-            CutlassMxFP4Weight mw;
+            MxFP4SfAtomWeight mw;
             if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
                 mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
-                wcache_->cutlass_mxfp4[w.data] = CutlassMxFP4CacheEntry(std::move(mw));
+                wcache_->mxfp4_sfatom[w.data] = MxFP4SfAtomCacheEntry(std::move(mw));
                 mx_count++;
             }
         };

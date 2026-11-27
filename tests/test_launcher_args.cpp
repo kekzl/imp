@@ -199,7 +199,7 @@ static_assert(imp::GreedyArgmaxArgs{}.rep_pen == 1.0f && imp::GreedyArgmaxArgs{}
               imp::GreedyArgmaxArgs{}.pres_pen == 0.0f);
 static_assert(imp::GreedyArgmaxArgs{}.d_topm == nullptr && imp::GreedyArgmaxArgs{}.topm == 0 &&
               imp::GreedyArgmaxArgs{}.d_banned == nullptr && imp::GreedyArgmaxArgs{}.n_banned == 0);
-static_assert(!imp::GreedyArgmaxArgs{}.allow_cutlass && imp::GreedyArgmaxArgs{}.d_banned_alt == nullptr &&
+static_assert(!imp::GreedyArgmaxArgs{}.allow_w4a4_head && imp::GreedyArgmaxArgs{}.d_banned_alt == nullptr &&
               imp::GreedyArgmaxArgs{}.n_banned_alt == 0 && imp::GreedyArgmaxArgs{}.h_row_alt == nullptr);
 static_assert(imp::GreedyArgmaxArgs{}.h_row_hist == nullptr &&
               imp::GreedyArgmaxArgs{}.h_row_hist_n == nullptr &&

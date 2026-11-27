@@ -23,10 +23,10 @@ inline void bind_cache_entries(WeightHandle& h, const WeightCaches& wc) {
     h.entries.fp16 = entry(wc.fp16);
     h.entries.fp8 = entry(wc.fp8);
     h.entries.nvfp4 = entry(wc.nvfp4);
-    h.entries.cutlass_nvfp4 = entry(wc.cutlass_nvfp4);
-    h.entries.nvfp4_prefill = entry(wc.cutlass_nvfp4_prefill);
-    h.entries.mxfp8_prefill = entry(wc.cutlass_mxfp8_prefill);
-    h.entries.cutlass_mxfp4 = entry(wc.cutlass_mxfp4);
+    h.entries.nvfp4_sfatom = entry(wc.nvfp4_sfatom);
+    h.entries.nvfp4_prefill = entry(wc.nvfp4_sfatom_prefill);
+    h.entries.mxfp8_prefill = entry(wc.mxfp8_sfatom_prefill);
+    h.entries.mxfp4_sfatom = entry(wc.mxfp4_sfatom);
     h.entries.released_fp8 = entry(wc.released_fp8_view);
     h.entries.q8_planes_only = wc.q8_planes_only.contains(h.source_data);
 }

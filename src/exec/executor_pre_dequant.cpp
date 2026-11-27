@@ -206,8 +206,8 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     pre_dequant_phase0_promote_nvfp4_sidecars_(cfg, stream);
 
     // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
-    // (body extracted to pre_dequant_phase0b_register_cutlass_nvfp4_)
-    pre_dequant_phase0b_register_cutlass_nvfp4_(cfg, stream);
+    // (body extracted to pre_dequant_phase0b_register_prequant_nvfp4_)
+    pre_dequant_phase0b_register_prequant_nvfp4_(cfg, stream);
 
     // Stage 1 (one-tier-truth): builds the budget-constrained StoragePlan once
     // for the model's lifetime, AFTER Phase 0 so prequant-NVFP4 weights
@@ -289,12 +289,12 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     note_total("WEIGHT_CACHE_NVFP4", wcache_->nvfp4_bytes + wcache_->nvfp4_lm_head_bytes +
                                          wcache_->nvfp4_moe_bytes - wcache_->nvfp4_moe_noted_bytes);
     // Minus the native MXFP4 data compacted in place in the GGUF source buffers: WEIGHTS holds it.
-    note_total("WEIGHT_CACHE_CUTLASS_SF", wcache_->cutlass_nvfp4_bytes + wcache_->cutlass_mxfp4_bytes -
-                                              wcache_->cutlass_mxfp4_inplace_bytes -
-                                              wcache_->cutlass_nvfp4_noted_bytes);
+    note_total("WEIGHT_CACHE_CUTLASS_SF", wcache_->nvfp4_sfatom_bytes + wcache_->mxfp4_sfatom_bytes -
+                                              wcache_->mxfp4_sfatom_inplace_bytes -
+                                              wcache_->nvfp4_sfatom_noted_bytes);
     // Raw allocations no tag claimed, so they read as library reserve: the GDN NVFP4 prefill copy
     // (Qwen3.5-4B MXFP4: 270 MiB) and the MXFP4 FP16 decode fallback bulk (same model: 8020 MiB).
-    note_total("WEIGHT_CACHE_GDN_PREFILL", wcache_->cutlass_nvfp4_prefill_bytes);
+    note_total("WEIGHT_CACHE_GDN_PREFILL", wcache_->nvfp4_sfatom_prefill_bytes);
     note_total("WEIGHT_CACHE_MXFP4_FP16", wcache_->fp16_bulk_data.bytes());
 }
 

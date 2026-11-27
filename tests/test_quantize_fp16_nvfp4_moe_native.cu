@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
-#include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (host reference)
+#include "compute/gemm_cutlass_sm120.h"  // nvfp4_sfatom_size (host reference)
 #include <cuda_runtime.h>
 #include <vector>
 #include <cstdint>
@@ -154,7 +154,7 @@ TEST(QuantizeMoeNative, CompactAlphaActiveNoneActive) {
 }
 
 // compute_sfa_offsets_device: exclusive prefix sum of SfAtom-padded SFA byte sizes must match
-// the host cutlass_nvfp4_sf_size formula (MoE-prefill-graphs Phase 3a).
+// the host nvfp4_sfatom_size formula (MoE-prefill-graphs Phase 3a).
 TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceMatchesHost) {
     // Mixed M values exercise the ceil(M/128) padding edge: 0, exactly 128,
     // just-under-tile (127), small (1), and a couple of multi-tile values.
@@ -176,11 +176,10 @@ TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceMatchesHost) {
     int64_t got[ne + 1] = {};
     cudaMemcpy(got, d_offsets, (ne + 1) * sizeof(int64_t), cudaMemcpyDeviceToHost);
 
-    // Reference: exclusive prefix sum using host cutlass_nvfp4_sf_size.
+    // Reference: exclusive prefix sum using host nvfp4_sfatom_size.
     int64_t expected[ne + 1] = {};
     for (int e = 0; e < ne; ++e) {
-        expected[e + 1] = expected[e] +
-                          static_cast<int64_t>(imp::cutlass_nvfp4_sf_size(h_M[e], K));
+        expected[e + 1] = expected[e] + static_cast<int64_t>(imp::nvfp4_sfatom_size(h_M[e], K));
     }
 
     for (int e = 0; e <= ne; ++e) {
@@ -228,7 +227,7 @@ TEST(QuantizeMoeNative, CompactAlphaAndSfaOffsetsWide512) {
     for (int e = 0; e < ne; ++e) {
         if (h_M[e] > 0)
             exp_compact.push_back(h_alpha[e]);
-        exp_off[e + 1] = exp_off[e] + static_cast<int64_t>(imp::cutlass_nvfp4_sf_size(h_M[e], K));
+        exp_off[e + 1] = exp_off[e] + static_cast<int64_t>(imp::nvfp4_sfatom_size(h_M[e], K));
     }
     int32_t got_na = -1;
     cudaMemcpy(&got_na, d_na, sizeof(int32_t), cudaMemcpyDeviceToHost);
@@ -280,7 +279,7 @@ TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceWritesBases) {
     for (int e = 0; e < ne; ++e) {
         EXPECT_EQ(off[e], expected) << "offset[" << e << "]";
         EXPECT_EQ(got[e], static_cast<uint8_t*>(d_base) + expected) << "base[" << e << "]";
-        expected += static_cast<int64_t>(imp::cutlass_nvfp4_sf_size(h_M[e], K));
+        expected += static_cast<int64_t>(imp::nvfp4_sfatom_size(h_M[e], K));
     }
 
     cudaFree(d_M);

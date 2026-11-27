@@ -163,9 +163,9 @@ inline bool has_f16_experts(const Model& m) {
 
 // Infer StorageTier from which wcache_ map the source pointer landed in.
 inline StorageTier infer_tier_from_wcache(const WeightCaches& wc, const void* src_ptr) {
-    if (wc.cutlass_nvfp4.contains(src_ptr))
+    if (wc.nvfp4_sfatom.contains(src_ptr))
         return StorageTier::NVFP4_SFATOM;
-    if (wc.cutlass_mxfp4.contains(src_ptr))
+    if (wc.mxfp4_sfatom.contains(src_ptr))
         return StorageTier::MXFP4;
     if (wc.nvfp4.contains(src_ptr))
         return StorageTier::NVFP4_LINEAR;
@@ -209,17 +209,17 @@ inline void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc, 
             break;
         }
         case StorageTier::NVFP4_SFATOM: {
-            auto it = wc.cutlass_nvfp4.find(src_ptr);
-            if (it != wc.cutlass_nvfp4.end()) {
-                h.payload.cutlass_nvfp4.weight = const_cast<void*>(it->second.data);
-                h.payload.cutlass_nvfp4.sf = it->second.scale_factors;
-                h.payload.cutlass_nvfp4.global_scale = const_cast<float*>(&it->second.tensor_scale);
+            auto it = wc.nvfp4_sfatom.find(src_ptr);
+            if (it != wc.nvfp4_sfatom.end()) {
+                h.payload.nvfp4_sfatom.weight = const_cast<void*>(it->second.data);
+                h.payload.nvfp4_sfatom.sf = it->second.scale_factors;
+                h.payload.nvfp4_sfatom.global_scale = const_cast<float*>(&it->second.tensor_scale);
             }
             break;
         }
         case StorageTier::MXFP4: {
-            auto it = wc.cutlass_mxfp4.find(src_ptr);
-            if (it != wc.cutlass_mxfp4.end()) {
+            auto it = wc.mxfp4_sfatom.find(src_ptr);
+            if (it != wc.mxfp4_sfatom.end()) {
                 h.payload.mxfp4.weight = const_cast<void*>(it->second.data);
                 h.payload.mxfp4.scales = it->second.scale_factors;
                 h.payload.mxfp4.linear_scales = it->second.linear_scales;

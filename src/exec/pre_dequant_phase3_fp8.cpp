@@ -115,8 +115,8 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
     int kept_count = 0;
     std::vector<const void*> to_erase;
     for (auto& [ptr, tensor] : wcache_->fp16) {
-        const bool has_cutlass_nvfp4 = (wcache_->cutlass_nvfp4.contains(ptr));
-        if (has_cutlass_nvfp4) {
+        const bool has_nvfp4_sfatom = (wcache_->nvfp4_sfatom.contains(ptr));
+        if (has_nvfp4_sfatom) {
             kept_bytes += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
             kept_count++;
             continue;

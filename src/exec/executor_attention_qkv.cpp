@@ -147,9 +147,9 @@
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no.data), static_cast<half*>(no.data), 1, K,
                                         hbs, stream);
-            // Reconstruct CutlassMxFP4Weight structs from handle payloads.
+            // Reconstruct MxFP4SfAtomWeight structs from handle payloads.
             auto make_mxfp4 = [](const WeightHandle* wh) {
-                CutlassMxFP4Weight mw;
+                MxFP4SfAtomWeight mw;
                 mw.data = wh->payload.mxfp4.weight;
                 mw.scale_factors = wh->payload.mxfp4.scales;
                 mw.linear_scales = wh->payload.mxfp4.linear_scales;
@@ -157,7 +157,7 @@
                 mw.tensor_scale = 1.0f;
                 mw.N = static_cast<int>(wh->shape[0]);
                 mw.K = static_cast<int>(wh->shape[1]);
-                mw.sf_bytes = cutlass_mxfp4_sf_size(mw.N, mw.K);
+                mw.sf_bytes = mxfp4_sfatom_size(mw.N, mw.K);
                 return mw;
             };
             auto mw_q = make_mxfp4(mxfp4_hwq);
@@ -274,9 +274,9 @@
                     // quantize once (Q's dispatch) into the activation scratch, K/V skip the
                     // re-quantize via the act-quant hint. Bit-identical reuse.
                     GemmContext kv_ctx = ctx;
-                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.wq_id, n, ctx.mode) &&
-                        prefill_routes_cutlass_nvfp4_(ly.wk_id, n, ctx.mode) &&
-                        (ly.wv.data == nullptr || prefill_routes_cutlass_nvfp4_(ly.wv_id, n, ctx.mode))) {
+                    if (n > 1 && prefill_routes_nvfp4_sfatom_(ly.wq_id, n, ctx.mode) &&
+                        prefill_routes_nvfp4_sfatom_(ly.wk_id, n, ctx.mode) &&
+                        (ly.wv.data == nullptr || prefill_routes_nvfp4_sfatom_(ly.wv_id, n, ctx.mode))) {
                         kv_ctx = ctx.with_act_quant_hint(no.data, n,
                                                          static_cast<int>(no.shape[1]));
                     } else if (n > 32 && ly.wv.data != nullptr &&

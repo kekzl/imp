@@ -38,7 +38,7 @@ __device__ __host__ __forceinline__ int mx_sfatom_offset(int row, int k_group, i
     return tile_base + atom_offset;
 }
 
-size_t cutlass_mxfp4_sf_size(int rows, int K) {
+size_t mxfp4_sfatom_size(int rows, int K) {
     int n_row_tiles = (rows + kMxAtomRows - 1) / kMxAtomRows;
     int n_k_tiles = (K + kMxAtomKElems - 1) / kMxAtomKElems;
     return static_cast<size_t>(n_row_tiles) * n_k_tiles * kMxAtomSize;
@@ -85,7 +85,7 @@ __global__ void build_mxfp4_scales_kernel(
     linear_out[idx] = scale;
 }
 
-bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4Weight& dst,
+bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, MxFP4SfAtomWeight& dst,
                        cudaStream_t stream) {
     if (K % 32 != 0) {
         IMP_LOG_WARN("unpack_mxfp4_gguf: K=%lld not multiple of 32", (long long)K);
@@ -98,7 +98,7 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4We
     // Input from weight_upload: [data(N×K/2) | scales(total_blocks)] in one buffer.
     // Data is already contiguous. Build SfAtom + linear scale layouts from appended scales.
     size_t data_bytes = static_cast<size_t>(N) * (K / 2);
-    size_t sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+    size_t sf_bytes = mxfp4_sfatom_size(static_cast<int>(N), static_cast<int>(K));
     size_t linear_sf_bytes = static_cast<size_t>(total_blocks);
 
     void* d_sf = nullptr;
@@ -270,10 +270,9 @@ __device__ __forceinline__ float ue8m0_to_float(uint8_t bits) {
 }
 
 // Each thread handles one micro-block of 32 elements (MXFP4 group size).
-__global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ input,
-                                                   uint8_t* __restrict__ packed_out,
-                                                   uint8_t* __restrict__ sf_out, int M, int K,
-                                                   int n_k_tiles) {
+__global__ void quantize_fp16_mxfp4_sfatom_kernel(const half* __restrict__ input,
+                                                  uint8_t* __restrict__ packed_out,
+                                                  uint8_t* __restrict__ sf_out, int M, int K, int n_k_tiles) {
     int mb_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kMxSFVecSize;
     int total_mb = M * K_groups;
@@ -321,12 +320,12 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
     }
 }
 
-void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
-                                    cudaStream_t stream) {
-    IMP_CHECK(K % kMxSFVecSize == 0, "quantize_fp16_to_mxfp4_cutlass: K=%d must be multiple of %d", K,
+void quantize_fp16_to_mxfp4_sfatom(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
+                                   cudaStream_t stream) {
+    IMP_CHECK(K % kMxSFVecSize == 0, "quantize_fp16_to_mxfp4_sfatom: K=%d must be multiple of %d", K,
               kMxSFVecSize);
 
-    size_t sf_bytes = cutlass_mxfp4_sf_size(M, K);
+    size_t sf_bytes = mxfp4_sfatom_size(M, K);
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, sf_bytes, stream));
 
     int K_groups = K / kMxSFVecSize;
@@ -335,9 +334,10 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 
     int threads = 256;
     int blocks = (total_mb + threads - 1) / threads;
-    quantize_fp16_mxfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_data),
-        reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles);
+    quantize_fp16_mxfp4_sfatom_kernel<<<blocks, threads, 0, stream>>>(reinterpret_cast<const half*>(src_fp16),
+                                                                      reinterpret_cast<uint8_t*>(dst_data),
+                                                                      reinterpret_cast<uint8_t*>(dst_sf), M,
+                                                                      K, n_k_tiles);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

@@ -172,7 +172,7 @@ public:
     // tokens after t0, so row j also penalizes d_draft[0..j-1] (production parity).
     // d_topm/topm: writes each row's top-M post-penalty logit ids, harvested by
     // the Token-Recycling adjacency drafter.
-    // allow_cutlass: batched-decode W4A4 LM head instead of the per-row GEMV.
+    // allow_w4a4_head: batched-decode W4A4 LM head instead of the per-row GEMV.
     // d_banned_alt/h_row_alt: per-request think-stop mask for rows where
     // h_row_alt[row]!=0, in place of d_banned.
     // h_row_hist/h_row_pens: per-row penalty histories for a batched chunk's
@@ -288,7 +288,7 @@ public:
     // (read ceil(M/4)x). Only the SfAtom scale buffer is allocated; FP4 data
     // borrows the NVFP4 decode cache. No-op unless serving and LM head is NVFP4. Must run AFTER
     // pre_dequant_weights().
-    void build_lm_head_cutlass_(cudaStream_t stream);
+    void build_lm_head_sfatom_(cudaStream_t stream);
     // LM head as one NVFP4 GEMM (own tile), fp32 logits [rows, vocab] from the rows quantized into qscratch_;
     // runtime.deterministic passes no stream-K workspace. false = refused (the GEMV path takes over).
     [[nodiscard]] bool lm_head_nvfp4_gemm_f32_(int rows, float* logits, cudaStream_t stream);
@@ -677,11 +677,11 @@ private:
     // Shared eval-side LM-head driver: applies the tier-aware LM head to
     // hidden_[0..n_rows) in batches of max_logit_tokens_, calling
     // consume(logits_view, row0, csz) per batch (softcap already applied).
-    // Used by perplexity_nll_partial and greedy_argmax_all. allow_cutlass
+    // Used by perplexity_nll_partial and greedy_argmax_all. allow_w4a4_head
     // routes NVFP4 LM heads through the NVFP4-activation tile GEMM (true
     // only for the perplexity harness); spec-decode verify passes false so
     // batch=1 output stays bit-identical to the FP16-activation GEMV.
-    void for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
+    void for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_w4a4_head,
                                  const std::function<void(const Tensor&, int, int)>& consume);
     // The LM-head driver's input: lm_rows_ (logit lens, FP16 [n x d_model]) while set, else hidden_[0..n).
     const Tensor* lm_rows_ = nullptr;
@@ -1021,9 +1021,9 @@ private:
 
     // SfAtom NVFP4 LM head for the batched-decode (n>1) tile GEMM (#2937). Borrows
     // the FP4 data from the NVFP4 decode cache; owns only the SfAtom scales.
-    // Built by build_lm_head_cutlass_() when serving; freed in the destructor.
-    CutlassNvFP4CacheEntry lm_head_cutlass_;  // SfAtom owned, or a view of the prefill cache entry
-    bool lm_head_cutlass_ready_ = false;
+    // Built by build_lm_head_sfatom_() when serving; freed in the destructor.
+    NvFP4SfAtomCacheEntry lm_head_sfatom_;  // SfAtom owned, or a view of the prefill cache entry
+    bool lm_head_sfatom_ready_ = false;
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     void apply_row_filters_(float* lp, int vocab, const InferenceState& state, cudaStream_t stream);
@@ -1264,7 +1264,7 @@ private:
     // tile prefill block (which quantizes input into shared activation
     // scratch). Gates the act-quant-hint dedupe at QKV/gate-up call sites;
     // must be CONSERVATIVE: false negative just re-quantizes, false positive skips with stale scratch.
-    [[nodiscard]] bool prefill_routes_cutlass_nvfp4_(TensorID id, int M, const GemmMode& mode) const;
+    [[nodiscard]] bool prefill_routes_nvfp4_sfatom_(TensorID id, int M, const GemmMode& mode) const;
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
     void moe_ffn_phase1_setup_();
@@ -1293,12 +1293,12 @@ private:
     // Own grouped NVFP4 GEMM MoE prefill, "cutlass3x" name historical (device-args
     // / smallM / legacy host-args sub-variants). Predicate is checked
     // internally; returns true if the path ran.
-    [[nodiscard]] bool try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    [[nodiscard]] bool try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Cheap precondition mirror for the device-args fast path, read upstream
     // of moe_gather to skip the gather when the path is guaranteed to fire (it
     // reads ctx.no via sorted_token_ids and doesn't need the gathered
     // intermediate). A mismatch costs at most one wasted gather, never wrong output.
-    [[nodiscard]] bool moe_cutlass3x_will_use_device_args_(int layer, const MoeFfnContext& ctx) const;
+    [[nodiscard]] bool moe_grouped_will_use_device_args_(int layer, const MoeFfnContext& ctx) const;
     [[nodiscard]] bool moe_skip_gather_(int layer, const MoeFfnContext& ctx) const;
     // Optional shared expert (parallel dense FFN), called from run_moe_ffn
     // after routed experts wrote into h. Reads `no` (post-norm), adds its

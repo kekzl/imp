@@ -46,14 +46,14 @@ enum class MoePrefillOuter {
     NONE,            // dense model — no MoE layers
     FP16_BATCH,      // try_run_moe_fp16_batch_prefill
     FP8_BATCH,       // try_run_moe_fp8_batch_prefill
-    CUTLASS3X,       // try_run_moe_cutlass3x_nvfp4_prefill_ → MoePrefillPath (own grouped GEMM)
+    GROUPED_NVFP4,   // try_run_moe_grouped_nvfp4_prefill_ → MoePrefillPath (own grouped GEMM)
     NVFP4_DEQUANT,   // try_run_moe_nvfp4_dequant_batch_prefill_
     LEGACY,          // run_moe_legacy_fallback_
     FUSED_Q6K,       // try_run_moe_q6k_prefill (gemm.moe_imma_prefill=false only)
     FUSED_Q4K_DP4A,  // try_run_moe_q4k_prefill (gemm.moe_imma_prefill=false, eff <= 640)
 };
 
-// Tiers inside try_run_moe_cutlass3x_nvfp4_prefill_
+// Tiers inside try_run_moe_grouped_nvfp4_prefill_
 // (exec/executor_forward_moe_cutlass.cpp).
 enum class MoePrefillPath {
     DEVICE_ARGS,  // gemm_grouped_nvfp4_dispatch, device-args full path (fast)

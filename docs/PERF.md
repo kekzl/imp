@@ -199,7 +199,7 @@ What the table settles:
 - **`gemm.nvfp4_smallm=false` (key removed 2026-11-14) does not test the activation format.** It moves
   2..32 rows from the small-M kernel to the NVFP4 tile GEMM (CUTLASS when
   measured), which quantizes the activations too
-  (`src/exec/gemm_kernel_cutlass_nvfp4.cpp:44 quantize_fp16_to_nvfp4_cutlass`):
+  (`src/exec/gemm_kernel_cutlass_nvfp4.cpp:44 quantize_fp16_to_nvfp4_sfatom`):
   W4A4 in both arms, same gap (0.261 vs 0.242, 7 flips either way), about 11 %
   less aggregate throughput at 32 streams for no numerical closeness.
 - **FP16 activations at 2..32 rows are `gemm.nvfp4_smallm_a4=false`**

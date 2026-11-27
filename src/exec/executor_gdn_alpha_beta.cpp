@@ -474,7 +474,7 @@ GemmContext GraphExecutor::gdn_q8_reuse_ctx_(int layer, const Tensor& no, const 
     auto raw_q8 = [&](TensorID id) {
         return id >= 0 && id < static_cast<TensorID>(registry_.size()) &&
                registry_.handle(id).source_qtype == QType::Q8_0 &&
-               !prefill_routes_cutlass_nvfp4_(id, n, ctx.mode);
+               !prefill_routes_nvfp4_sfatom_(id, n, ctx.mode);
     };
     if (n < 2 || n > 32 || !raw_q8(ly.gdn_gate_id) || !raw_q8(ly.gdn_alpha_id) || !raw_q8(ly.gdn_beta_id))
         return ctx;

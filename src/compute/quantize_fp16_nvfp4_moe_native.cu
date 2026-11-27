@@ -108,7 +108,7 @@ void compact_alpha_active(
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Exclusive prefix sum of cutlass_nvfp4_sf_size (per-expert SfAtom-padded SFA byte size).
+// Exclusive prefix sum of nvfp4_sfatom_size (per-expert SfAtom-padded SFA byte size).
 // Single block, Hillis-Steele scan over int64 in shared memory.
 // Padding constants must stay in lockstep with kAtomRows/kAtomKElems/kAtomSize in
 // src/compute/nvfp4_sfatom_quant.cu (CUTLASS SfAtom = 128 rows x 64 K-elems x 512 bytes).

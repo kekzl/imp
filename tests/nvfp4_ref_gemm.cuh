@@ -2,7 +2,7 @@
 
 // Library-free reference for the NVFP4 GEMMs: D[m,n] = alpha * sum_k e2m1(A[m,k]) ue4m3(SA) e2m1(W[n,k])
 // ue4m3(SW), fp32 per 16-element block, one thread per output. Operands in the SfAtom layout of
-// cutlass_nvfp4_sf_size (low nibble = even k). Sums in another order than the MMA: compare with a tolerance.
+// nvfp4_sfatom_size (low nibble = even k). Sums in another order than the MMA: compare with a tolerance.
 
 #include "quant/fp8_utils.cuh"
 

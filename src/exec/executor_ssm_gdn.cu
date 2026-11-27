@@ -606,8 +606,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // scratch with no GEMM dispatches in between, so mark it shared (the
             // dispatch verifies against its scratch tag before skipping).
             GemmContext gate_ctx = q8_reuse_ctx;
-            if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n, ctx.mode) &&
-                prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n, ctx.mode))
+            if (n > 1 && prefill_routes_nvfp4_sfatom_(ly.ssm_in_id, n, ctx.mode) &&
+                prefill_routes_nvfp4_sfatom_(ly.gdn_gate_id, n, ctx.mode))
                 gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
             gemm_via_handle_(ly.gdn_gate_id, no, gate_out, gate_ctx);
         }

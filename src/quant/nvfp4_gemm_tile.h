@@ -8,7 +8,7 @@ namespace imp {
 
 // Own NVFP4 x NVFP4 prefill GEMM on the CUTLASS operand bytes: D[M,N] fp16 = alpha * A W^T.
 // A [M,K/2] / W [N,K/2] packed E2M1 row-major, scales UE4M3 in SfAtom layout
-// (cutlass_nvfp4_sf_size, rows padded to 128). K % 64 == 0 (K % 128 = 64: partial last stage), N % 8 == 0;
+// (nvfp4_sfatom_size, rows padded to 128). K % 64 == 0 (K % 128 = 64: partial last stage), N % 8 == 0;
 // false = refused. variant -1 = auto; 0 128x128, 1 128x256, 2 sync, 3 stream-K 128x128, 4 hybrid stream-K
 // (whole waves data-parallel, partial-wave tiles in 3 k-pieces; below a wave every tile in 2; else 3),
 // 5 128x64, 6 128x64 split in 2 k-pieces (else 5). workspace: stream-K partials
@@ -17,8 +17,8 @@ namespace imp {
                                    float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream,
                                    int variant = -1, void* workspace = nullptr, size_t workspace_bytes = 0);
 // Same GEMM as the up projection of a SwiGLU MLP: instead of D writes
-// quantize(swiglu(gate, fp16(D))) as packed [M,N/2] + SfAtom scales (cutlass_nvfp4_sf_size(M, N)) at
-// q_act_scale, the bytes of gemm_nvfp4_tile + swiglu_quantize_fp16_to_nvfp4_cutlass with the same workspace.
+// quantize(swiglu(gate, fp16(D))) as packed [M,N/2] + SfAtom scales (nvfp4_sfatom_size(M, N)) at
+// q_act_scale, the bytes of gemm_nvfp4_tile + swiglu_quantize_fp16_to_nvfp4_sfatom with the same workspace.
 // gate [M,N] fp16. N % 16 == 0; false = refused, nothing written. Auto variant.
 // Arguments in the old parameter order (audit D-11); workspace nullptr = data-parallel only.
 struct GemmNvfp4TileSwigluQuantArgs {
@@ -48,7 +48,7 @@ struct GemmNvfp4TileSwigluQuantArgs {
                                        size_t workspace_bytes = 0);
 
 // Same kernel on MXFP8 operands (quant/mxfp8_sfatom.h bytes): A [M,K] / W [N,K] E4M3, UE8M0 per 32 K
-// in SfAtom layout (cutlass_mxfp8_sf_size). K % 64 == 0, N % 8 == 0. col_scale (may be null): D column n
+// in SfAtom layout (mxfp8_sfatom_size). K % 64 == 0, N % 8 == 0. col_scale (may be null): D column n
 // times col_scale[n], the FP8 row-scale view. Variants and workspace as above.
 [[nodiscard]] bool gemm_mxfp8_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
                                    const float* col_scale, void* d_fp16, int M, int N, int K,
@@ -56,7 +56,7 @@ struct GemmNvfp4TileSwigluQuantArgs {
                                    size_t workspace_bytes = 0);
 
 // Same kernel on MXFP4 operands (cutlass_mxfp4_weight.h bytes): A [M,K/2] / W [N,K/2] packed E2M1,
-// UE8M0 per 32 K in SfAtom layout (cutlass_mxfp4_sf_size). K % 128 == 0, N % 8 == 0. Variants and workspace
+// UE8M0 per 32 K in SfAtom layout (mxfp4_sfatom_size). K % 128 == 0, N % 8 == 0. Variants and workspace
 // as above.
 [[nodiscard]] bool gemm_mxfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
                                    float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream,

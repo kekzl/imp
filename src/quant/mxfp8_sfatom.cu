@@ -32,7 +32,7 @@ __device__ __host__ __forceinline__ int mx8_sfatom_offset(int row, int k_group, 
     return (((tile_row * n_k_tiles) + tile_k) * kMx8AtomSize) + (n0 * 16) + (n1 * 4) + k_local;
 }
 
-size_t cutlass_mxfp8_sf_size(int rows, int K) {
+size_t mxfp8_sfatom_size(int rows, int K) {
     const int n_row_tiles = (rows + kMx8AtomRows - 1) / kMx8AtomRows;
     const int n_k_tiles = (K + kMx8AtomKElems - 1) / kMx8AtomKElems;
     return static_cast<size_t>(n_row_tiles) * n_k_tiles * kMx8AtomSize;
@@ -65,9 +65,9 @@ __device__ __forceinline__ uint16_t mx8_pack_e4m3_pair(float v0, float v1) {
 }
 
 // One thread per 32-element block: 64 B in (4 x uint4), 32 B out (2 x uint4), one scale byte.
-__global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ input, uint8_t* __restrict__ out,
-                                                   uint8_t* __restrict__ sf_out, int rows, int K,
-                                                   int n_k_tiles) {
+__global__ void quantize_fp16_mxfp8_sfatom_kernel(const half* __restrict__ input, uint8_t* __restrict__ out,
+                                                  uint8_t* __restrict__ sf_out, int rows, int K,
+                                                  int n_k_tiles) {
     const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     const int K_groups = K / kMx8SFVecSize;
     if (idx >= rows * K_groups)
@@ -109,19 +109,20 @@ __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ inpu
     dst[1] = make_uint4(words[4], words[5], words[6], words[7]);
 }
 
-void quantize_fp16_to_mxfp8_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
-                                    cudaStream_t stream) {
-    IMP_CHECK(K % kMx8SFVecSize == 0, "quantize_fp16_to_mxfp8_cutlass: K=%d must be a multiple of %d", K,
+void quantize_fp16_to_mxfp8_sfatom(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
+                                   cudaStream_t stream) {
+    IMP_CHECK(K % kMx8SFVecSize == 0, "quantize_fp16_to_mxfp8_sfatom: K=%d must be a multiple of %d", K,
               kMx8SFVecSize);
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, cutlass_mxfp8_sf_size(M, K), stream));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, mxfp8_sfatom_size(M, K), stream));
     const int K_groups = K / kMx8SFVecSize;
     const int total = M * K_groups;
     const int n_k_tiles = (K + kMx8AtomKElems - 1) / kMx8AtomKElems;
     const int threads = 256;
     const int blocks = (total + threads - 1) / threads;
-    quantize_fp16_mxfp8_cutlass_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_data),
-        reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles);
+    quantize_fp16_mxfp8_sfatom_kernel<<<blocks, threads, 0, stream>>>(reinterpret_cast<const half*>(src_fp16),
+                                                                      reinterpret_cast<uint8_t*>(dst_data),
+                                                                      reinterpret_cast<uint8_t*>(dst_sf), M,
+                                                                      K, n_k_tiles);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -152,7 +153,7 @@ void mxfp8_sf_from_row_scales(const float* row_scales, void* dst_sf, float* dst_
                               cudaStream_t stream) {
     IMP_CHECK(row_scales && dst_sf && dst_col_scale && rows > 0 && K % kMx8SFVecSize == 0,
               "mxfp8_sf_from_row_scales: empty input or K=%d not a multiple of %d", K, kMx8SFVecSize);
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, cutlass_mxfp8_sf_size(rows, K), stream));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, mxfp8_sfatom_size(rows, K), stream));
     const int K_groups = K / kMx8SFVecSize;
     const int n_k_tiles = (K + kMx8AtomKElems - 1) / kMx8AtomKElems;
     const int total = rows * K_groups;
@@ -162,11 +163,11 @@ void mxfp8_sf_from_row_scales(const float* row_scales, void* dst_sf, float* dst_
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Inverse of quantize_fp16_mxfp8_cutlass_kernel: one thread per 32-element block.
-__global__ void dequantize_mxfp8_cutlass_fp16_kernel(const uint8_t* __restrict__ data,
-                                                     const uint8_t* __restrict__ sf,
-                                                     const float* __restrict__ row_scale,
-                                                     half* __restrict__ out, int rows, int K, int n_k_tiles) {
+// Inverse of quantize_fp16_mxfp8_sfatom_kernel: one thread per 32-element block.
+__global__ void dequantize_mxfp8_sfatom_fp16_kernel(const uint8_t* __restrict__ data,
+                                                    const uint8_t* __restrict__ sf,
+                                                    const float* __restrict__ row_scale,
+                                                    half* __restrict__ out, int rows, int K, int n_k_tiles) {
     const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     const int K_groups = K / kMx8SFVecSize;
     if (idx >= rows * K_groups)
@@ -196,15 +197,15 @@ __global__ void dequantize_mxfp8_cutlass_fp16_kernel(const uint8_t* __restrict__
     }
 }
 
-void dequantize_mxfp8_cutlass_to_fp16(const CutlassMxFP8Weight& w, void* dst_fp16, cudaStream_t stream) {
+void dequantize_mxfp8_sfatom_to_fp16(const MxFP8SfAtomWeight& w, void* dst_fp16, cudaStream_t stream) {
     IMP_CHECK(w.data && w.scale_factors && dst_fp16 && w.K % kMx8SFVecSize == 0,
-              "dequantize_mxfp8_cutlass_to_fp16: empty weight or K=%lld not a multiple of %d",
+              "dequantize_mxfp8_sfatom_to_fp16: empty weight or K=%lld not a multiple of %d",
               static_cast<long long>(w.K), kMx8SFVecSize);
     const int rows = static_cast<int>(w.N), K = static_cast<int>(w.K);
     const int total = rows * (K / kMx8SFVecSize);
     const int n_k_tiles = (K + kMx8AtomKElems - 1) / kMx8AtomKElems;
     const int threads = 256;
-    dequantize_mxfp8_cutlass_fp16_kernel<<<(total + threads - 1) / threads, threads, 0, stream>>>(
+    dequantize_mxfp8_sfatom_fp16_kernel<<<(total + threads - 1) / threads, threads, 0, stream>>>(
         static_cast<const uint8_t*>(w.data), static_cast<const uint8_t*>(w.scale_factors), w.col_scale,
         static_cast<half*>(dst_fp16), rows, K, n_k_tiles);
     IMP_CUDA_CHECK_LAUNCH();

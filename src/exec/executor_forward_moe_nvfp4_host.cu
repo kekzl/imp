@@ -240,7 +240,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
             continue;
         const int64_t N = experts[0].shape[0];
         const int64_t K = experts[0].shape[1] * 2;
-        const size_t sf_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+        const size_t sf_expert = nvfp4_sfatom_size(static_cast<int>(N), static_cast<int>(K));
         if (static_cast<size_t>(ne) * sf_expert > moe_.layer_stage_sf_proj_bytes)
             continue;
         char* sf_base = static_cast<char*>(moe_.layer_stage_sf.get()) +
@@ -251,7 +251,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         // The pointer arrays are filled from stack vectors, so this call is
         // not graph-capturable - which is fine, graphs are already off under
         // host-resident experts.
-        out[p].cutlass_ready = true;
+        out[p].sfatom_ready = true;
     }
     return any;
 }
@@ -296,7 +296,7 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
         }
         const int64_t N = experts[0].shape[0];
         const int64_t K = experts[0].shape[1] * 2;
-        const size_t sf_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+        const size_t sf_expert = nvfp4_sfatom_size(static_cast<int>(N), static_cast<int>(K));
         if (static_cast<size_t>(n) * sf_expert > moe_.layer_stage_sf_proj_bytes)
             return false;
         char* sf_base = static_cast<char*>(moe_.layer_stage_sf.get()) +
@@ -408,7 +408,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
     if (!ctx.staged_done)
         return false;
     ctx.staged_alpha = stage_alpha_row_(layer, stream);
-    const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
+    const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].sfatom_ready; };
     return ready(ExpertProj::Up) && ready(ExpertProj::Down) &&
            (ctx.non_gated_experts || ready(ExpertProj::Gate));
 }
@@ -422,7 +422,7 @@ bool GraphExecutor::build_staged_device_args_(
     if (!(ctx.staged_done || ctx.staged_blocks) || !moe_.layer_stage_b_ptrs.get() ||
         moe_.layer_stage_ptr_stride <= 0 || !ctx.staged_alpha)
         return false;
-    const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
+    const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].sfatom_ready; };
     if (!ctx.staged_blocks &&
         (!ready(ExpertProj::Up) || !ready(ExpertProj::Down) || (!non_gated && !ready(ExpertProj::Gate))))
         return false;

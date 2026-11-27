@@ -870,7 +870,7 @@ void build_post_cache_gemm_buffers(const EngineConfig& ec, GraphExecutor& execut
     // perplexity harness lazy-builds its own). Must run AFTER pre_dequant_weights
     // and BEFORE decode-graph capture so the captured topology includes it.
     if (ec.max_batch_size > 1)
-        executor.build_lm_head_cutlass_(stream);
+        executor.build_lm_head_sfatom_(stream);
     if (ec.use_fp8_prefill)
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
 }

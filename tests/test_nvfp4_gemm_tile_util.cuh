@@ -24,7 +24,7 @@ namespace {
 struct Operands {
     int M = 0, N = 0, K = 0;
     NvFP4Owned qr;
-    CutlassNvFP4Owned cw;
+    NvFP4SfAtomOwned cw;
     void* act = nullptr;
     void* act_sf = nullptr;
     void* ws = nullptr;
@@ -56,11 +56,11 @@ void make_operands(Operands& o, int M, int N, int K, cudaStream_t s) {
     int64_t wshape[2] = {N, K};
     Tensor wt(w, QType::F16, 2, wshape, true);
     quantize_fp16_to_nvfp4(wt, o.qr, s);
-    convert_nvfp4_to_cutlass(o.qr, o.cw, s);
+    convert_nvfp4_to_sfatom(o.qr, o.cw, s);
     ASSERT_EQ(cudaMalloc(&o.act, size_t(M) * K / 2), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&o.act_sf, cutlass_nvfp4_sf_size(M, K)), cudaSuccess);
-    cudaMemsetAsync(o.act_sf, 0, cutlass_nvfp4_sf_size(M, K), s);
-    quantize_fp16_to_nvfp4_cutlass(x, o.act, o.act_sf, M, K, s);
+    ASSERT_EQ(cudaMalloc(&o.act_sf, nvfp4_sfatom_size(M, K)), cudaSuccess);
+    cudaMemsetAsync(o.act_sf, 0, nvfp4_sfatom_size(M, K), s);
+    quantize_fp16_to_nvfp4_sfatom(x, o.act, o.act_sf, M, K, s);
     // Stream-K need: 4 KiB flags + 170 x 64 KiB partials (the 5090 SM count) as the floor.
     o.ws_bytes = std::max<size_t>(gemm_tile_streamk_workspace_bytes(), 4096 + (size_t(170) << 16));
     ASSERT_EQ(cudaMalloc(&o.ws, std::max<size_t>(o.ws_bytes, 1)), cudaSuccess);
@@ -72,7 +72,7 @@ void make_operands(Operands& o, int M, int N, int K, cudaStream_t s) {
 }
 
 void free_operands(Operands& o) {
-    o.cw = CutlassNvFP4Owned{};
+    o.cw = NvFP4SfAtomOwned{};
     o.qr = NvFP4Owned{};
     cudaFree(o.act);
     cudaFree(o.act_sf);

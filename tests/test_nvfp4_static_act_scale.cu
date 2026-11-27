@@ -185,17 +185,17 @@ std::vector<float> tile_y(const std::vector<half>& x, const Weight& w, int M, in
                           Arm arm) {
     const float qs = (arm == Arm::kScaled || arm == Arm::kMutantAlphaDropsScale) ? s : 1.0f;
     const float as = (arm == Arm::kScaled || arm == Arm::kMutantQuantDropsScale) ? s : 1.0f;
-    CutlassNvFP4Owned cw;
-    convert_nvfp4_to_cutlass(w.nv, cw, nullptr);
+    NvFP4SfAtomOwned cw;
+    convert_nvfp4_to_sfatom(w.nv, cw, nullptr);
     half* dx = dev_upload(x);
     void *ad = nullptr, *asf = nullptr;
     half* dy = nullptr;
-    const size_t sfb = cutlass_nvfp4_sf_size(M, K);
+    const size_t sfb = nvfp4_sfatom_size(M, K);
     EXPECT_EQ(cudaMalloc(&ad, size_t(M) * K / 2), cudaSuccess);
     EXPECT_EQ(cudaMalloc(&asf, sfb), cudaSuccess);
     EXPECT_EQ(cudaMemset(asf, 0, sfb), cudaSuccess);
     EXPECT_EQ(cudaMalloc(&dy, size_t(M) * N * sizeof(half)), cudaSuccess);
-    quantize_fp16_to_nvfp4_cutlass(dx, ad, asf, M, K, nullptr, qs);
+    quantize_fp16_to_nvfp4_sfatom(dx, ad, asf, M, K, nullptr, qs);
     EXPECT_TRUE(
         gemm_nvfp4_tile(ad, asf, cw.data, cw.scale_factors, cw.tensor_scale * as, dy, M, N, K, nullptr));
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -296,8 +296,8 @@ TEST(Nvfp4StaticActScaleTest, ProducersMatchReferenceQuantize) {
         ref_plain(dout, M, K, s, rp, rs);
         EXPECT_EQ(dev_download<uint8_t>(xq, rp.size()), rp) << "swiglu_quantize_nvfp4 packed, s=" << s;
         EXPECT_EQ(dev_download<uint8_t>(xs, rs.size()), rs) << "swiglu_quantize_nvfp4 scales, s=" << s;
-        // SfAtom: swiglu_quantize_fp16_to_nvfp4_cutlass vs swiglu + quantize_fp16_to_nvfp4_cutlass
-        const size_t sfb = cutlass_nvfp4_sf_size(M, K);
+        // SfAtom: swiglu_quantize_fp16_to_nvfp4_sfatom vs swiglu + quantize_fp16_to_nvfp4_sfatom
+        const size_t sfb = nvfp4_sfatom_size(M, K);
         void *a1 = nullptr, *s1 = nullptr, *a2 = nullptr, *s2 = nullptr;
         ASSERT_EQ(cudaMalloc(&a1, size_t(M) * K / 2), cudaSuccess);
         ASSERT_EQ(cudaMalloc(&a2, size_t(M) * K / 2), cudaSuccess);
@@ -305,14 +305,14 @@ TEST(Nvfp4StaticActScaleTest, ProducersMatchReferenceQuantize) {
         ASSERT_EQ(cudaMalloc(&s2, sfb), cudaSuccess);
         ASSERT_EQ(cudaMemset(s1, 0, sfb), cudaSuccess);
         ASSERT_EQ(cudaMemset(s2, 0, sfb), cudaSuccess);
-        swiglu_quantize_fp16_to_nvfp4_cutlass(dg, du, dout, a1, s1, M, K, nullptr, s);
-        quantize_fp16_to_nvfp4_cutlass(dout, a2, s2, M, K, nullptr, s);
+        swiglu_quantize_fp16_to_nvfp4_sfatom(dg, du, dout, a1, s1, M, K, nullptr, s);
+        quantize_fp16_to_nvfp4_sfatom(dout, a2, s2, M, K, nullptr, s);
         EXPECT_EQ(dev_download<uint8_t>(a1, size_t(M) * K / 2), dev_download<uint8_t>(a2, size_t(M) * K / 2))
             << "SfAtom swiglu packed, s=" << s;
         EXPECT_EQ(dev_download<uint8_t>(s1, sfb), dev_download<uint8_t>(s2, sfb))
             << "SfAtom swiglu scales, s=" << s;
         if (s == 1.0f) {  // unit scale = the pre-existing default-argument bytes
-            quantize_fp16_to_nvfp4_cutlass(dout, a2, s2, M, K, nullptr);
+            quantize_fp16_to_nvfp4_sfatom(dout, a2, s2, M, K, nullptr);
             EXPECT_EQ(dev_download<uint8_t>(a1, size_t(M) * K / 2),
                       dev_download<uint8_t>(a2, size_t(M) * K / 2));
         }
@@ -383,7 +383,7 @@ TEST(Nvfp4TinyBlockScaleTest, SfAtomBytesEqualPlainQuantize) {
     constexpr int M = 144, K = 1024;
     const auto x = tiny_activations(M, K, 23u);
     half* dx = dev_upload(x);
-    const size_t sfb = cutlass_nvfp4_sf_size(M, K);
+    const size_t sfb = nvfp4_sfatom_size(M, K);
     void *a = nullptr, *sf = nullptr;
     ASSERT_EQ(cudaMalloc(&a, size_t(M) * K / 2), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&sf, sfb), cudaSuccess);
@@ -391,7 +391,7 @@ TEST(Nvfp4TinyBlockScaleTest, SfAtomBytesEqualPlainQuantize) {
         std::vector<uint8_t> rp, rs;
         ref_plain(dx, M, K, s, rp, rs);
         ASSERT_EQ(cudaMemset(sf, 0xFF, sfb), cudaSuccess);
-        quantize_fp16_to_nvfp4_cutlass(dx, a, sf, M, K, nullptr, s);
+        quantize_fp16_to_nvfp4_sfatom(dx, a, sf, M, K, nullptr, s);
         const auto ap = dev_download<uint8_t>(a, rp.size());
         const auto as = dev_download<uint8_t>(sf, sfb);
         size_t bad_s = 0, floor_blocks = 0;

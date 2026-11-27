@@ -86,7 +86,7 @@ struct MoeQuantFixture {
         for (int r : kRowsPerExpert)
             offsets.push_back(offsets.back() + r);
         expanded = offsets.back();
-        sf_bytes = cutlass_nvfp4_sf_size(*std::max_element(kRowsPerExpert.begin(), kRowsPerExpert.end()), kK);
+        sf_bytes = nvfp4_sfatom_size(*std::max_element(kRowsPerExpert.begin(), kRowsPerExpert.end()), kK);
         d_offsets = std::make_unique<DevBuf>(offsets.size() * sizeof(int));
         d_offsets->upload(offsets);
         d_sfa = std::make_unique<DevBuf>(sf_bytes * ne);
@@ -158,8 +158,8 @@ TEST(GptOssMoeFusedBias, FusedGluQuantizeIsByteIdenticalToTheFourLaunchSequence)
     Tensor tg(d_gate_ref.p, QType::F16, 2, shape, true), tu(d_up_ref.p, QType::F16, 2, shape, true),
         ta(d_act.p, QType::F16, 2, shape, true);
     gpt_oss_glu(tg, tu, ta, nullptr);
-    quantize_fp16_to_nvfp4_cutlass_moe(d_act.p, fx.d_packed->p, fx.sfa_bases(), fx.offs(), fx.expanded, kK,
-                                       fx.ne, nullptr);
+    quantize_fp16_to_nvfp4_sfatom_moe(d_act.p, fx.d_packed->p, fx.sfa_bases(), fx.offs(), fx.expanded, kK,
+                                      fx.ne, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     const auto ref_packed = fx.d_packed->bytes();
     const auto ref_sfa = fx.d_sfa->bytes();
@@ -169,9 +169,9 @@ TEST(GptOssMoeFusedBias, FusedGluQuantizeIsByteIdenticalToTheFourLaunchSequence)
     ASSERT_GT(nonzero, ref_packed.size() / 2) << "reference is degenerate";
 
     fx.clear();
-    fused_act_quantize_fp16_to_nvfp4_cutlass_moe(d_gate.p, d_up.p, fx.d_packed->p, fx.sfa_bases(), fx.offs(),
-                                                 fx.expanded, kK, fx.ne, FFNActivation::GPT_OSS_GLU, nullptr,
-                                                 d_gb.p, d_ub.p);
+    fused_act_quantize_fp16_to_nvfp4_sfatom_moe(d_gate.p, d_up.p, fx.d_packed->p, fx.sfa_bases(), fx.offs(),
+                                                fx.expanded, kK, fx.ne, FFNActivation::GPT_OSS_GLU, nullptr,
+                                                d_gb.p, d_ub.p);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     const auto got_packed = fx.d_packed->bytes();
     const auto got_sfa = fx.d_sfa->bytes();
@@ -215,9 +215,9 @@ TEST(GptOssMoeFusedBias, NonGptOssFusedQuantizeBytesUnchanged) {
     d_up.upload(to_half(up));
     for (const auto& c : cases) {
         fx.clear();
-        fused_act_quantize_fp16_to_nvfp4_cutlass_moe(c.act == FFNActivation::RELU_SQR ? nullptr : d_gate.p,
-                                                     d_up.p, fx.d_packed->p, fx.sfa_bases(), fx.offs(),
-                                                     fx.expanded, kK, fx.ne, c.act, nullptr);
+        fused_act_quantize_fp16_to_nvfp4_sfatom_moe(c.act == FFNActivation::RELU_SQR ? nullptr : d_gate.p,
+                                                    d_up.p, fx.d_packed->p, fx.sfa_bases(), fx.offs(),
+                                                    fx.expanded, kK, fx.ne, c.act, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         const uint64_t hp = fnv1a(fx.d_packed->bytes()), hs = fnv1a(fx.d_sfa->bytes());
         EXPECT_EQ(hp, c.packed) << "act " << static_cast<int>(c.act);

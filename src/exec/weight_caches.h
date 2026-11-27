@@ -4,9 +4,9 @@
 #include "exec/weight_cache_entries.h"  // the move-only value types of the maps below
 #include "memory/device_owned.h"
 #include "quant/nvfp4_quant.h"               // NvFP4QuantResult, NvFP4MoEQuantResult
-#include "compute/gemm_cutlass_sm120.h"      // CutlassNvFP4Weight
-#include "quant/cutlass_mxfp4_weight.h"      // CutlassMxFP4Weight
-#include "quant/mxfp8_sfatom.h"              // CutlassMxFP8Weight
+#include "compute/gemm_cutlass_sm120.h"      // NvFP4SfAtomWeight
+#include "quant/cutlass_mxfp4_weight.h"      // MxFP4SfAtomWeight
+#include "quant/mxfp8_sfatom.h"              // MxFP8SfAtomWeight
 #include <cuda_fp16.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -128,37 +128,37 @@ struct WeightCaches {
     size_t nvfp4_moe_noted_bytes = 0;
 
     // --- CUTLASS sm_120 block-scaled NVFP4 ---
-    std::unordered_map<const void*, CutlassNvFP4CacheEntry> cutlass_nvfp4;
-    size_t cutlass_nvfp4_bytes = 0;
-    // Part of cutlass_nvfp4_bytes VRAMAllocator already noted (MoE SfAtom slabs): the
+    std::unordered_map<const void*, NvFP4SfAtomCacheEntry> nvfp4_sfatom;
+    size_t nvfp4_sfatom_bytes = 0;
+    // Part of nvfp4_sfatom_bytes VRAMAllocator already noted (MoE SfAtom slabs): the
     // WEIGHT_CACHE_CUTLASS_SF note excludes it (gpt-oss-20b GGUF: 1164 MiB counted twice).
-    size_t cutlass_nvfp4_noted_bytes = 0;
+    size_t nvfp4_sfatom_noted_bytes = 0;
     // NVFP4 PREFILL copies of full-precision GDN projections (gemm.nvfp4_gdn_proj_prefill),
     // keyed by the F16 source pointer; the source stays the M=1 / M<=32 path. The packed
-    // data is owned by the entries of cutlass_nvfp4_prefill_src (micro-scales already freed),
+    // data is owned by the entries of nvfp4_sfatom_prefill_src (micro-scales already freed),
     // the SfAtom buffer by the map entry: clear the map before the vector.
-    std::unordered_map<const void*, CutlassNvFP4CacheEntry> cutlass_nvfp4_prefill;
-    std::vector<NvFP4CacheEntry> cutlass_nvfp4_prefill_src;
-    size_t cutlass_nvfp4_prefill_bytes = 0;
+    std::unordered_map<const void*, NvFP4SfAtomCacheEntry> nvfp4_sfatom_prefill;
+    std::vector<NvFP4CacheEntry> nvfp4_sfatom_prefill_src;
+    size_t nvfp4_sfatom_prefill_bytes = 0;
     // MXFP8 prefill copies (gemm.mxfp8_gdn_proj_prefill), same keying; checked ahead of the
     // NVFP4 map at dispatch. Entries own their data and SfAtom buffers.
-    std::unordered_map<const void*, CutlassMxFP8CacheEntry> cutlass_mxfp8_prefill;
-    size_t cutlass_mxfp8_prefill_bytes = 0;
+    std::unordered_map<const void*, MxFP8SfAtomCacheEntry> mxfp8_sfatom_prefill;
+    size_t mxfp8_sfatom_prefill_bytes = 0;
 
-    // Single bulk allocation backing the SfAtom scale factors of the cutlass_nvfp4 entries
+    // Single bulk allocation backing the SfAtom scale factors of the nvfp4_sfatom entries
     // Phase 3b builds (plain family): one slab instead of thousands of per-tensor allocations
     // on large MoE loads. Those entries hold slices and no owner. Reset after the map is cleared.
-    DeviceOwned<void> cutlass_sf_slab;
+    DeviceOwned<void> nvfp4_sfatom_slab;
     // Per-(layer, projection) SfAtom slabs built by the MoE phase (VRAMAllocator, forced); their
-    // per-expert slices are cutlass_nvfp4 entries without an owner. Never in
+    // per-expert slices are nvfp4_sfatom entries without an owner. Never in
     // Model::gpu_allocations_ (stream-ordered release, #834).
     std::vector<DeviceOwned<void>> owned_sf_slabs;
 
     // --- CUTLASS sm_120 MXFP4 ---
-    std::unordered_map<const void*, CutlassMxFP4CacheEntry> cutlass_mxfp4;
-    size_t cutlass_mxfp4_bytes = 0;
+    std::unordered_map<const void*, MxFP4SfAtomCacheEntry> mxfp4_sfatom;
+    size_t mxfp4_sfatom_bytes = 0;
     // Native MXFP4 GGUF: packed data compacted in place in the source buffers (already WEIGHTS).
-    size_t cutlass_mxfp4_inplace_bytes = 0;
+    size_t mxfp4_sfatom_inplace_bytes = 0;
 
     // Dual-path mode: FP8 attention + NVFP4 FFN
     bool dual_path_quant = false;

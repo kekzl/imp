@@ -255,7 +255,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         const StoragePlan& ideal_plan = storage_plan_;
         size_t plan_overlay = 0;
         size_t plan_fp16 = 0, plan_fp8 = 0, plan_nvfp4 = 0;
-        size_t plan_cutlass_nvfp4 = 0, plan_mxfp4 = 0, plan_fp32 = 0;
+        size_t plan_nvfp4_sfatom = 0, plan_mxfp4 = 0, plan_fp32 = 0;
         for (const auto& e : ideal_plan.entries) {
             switch (e.tier) {
                 case StorageTier::FP16:
@@ -271,7 +271,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                     ++plan_overlay;
                     break;
                 case StorageTier::NVFP4_SFATOM:
-                    ++plan_cutlass_nvfp4;
+                    ++plan_nvfp4_sfatom;
                     ++plan_overlay;
                     break;
                 case StorageTier::MXFP4:
@@ -318,14 +318,14 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         }
         IMP_LOG_INFO(
             "Phase-4 plan-ideal tiers: fp16=%zu fp8=%zu nvfp4=%zu "
-            "cutlass_nvfp4=%zu mxfp4=%zu fp32=%zu",
-            plan_fp16, plan_fp8, plan_nvfp4, plan_cutlass_nvfp4, plan_mxfp4, plan_fp32);
+            "nvfp4_sfatom=%zu mxfp4=%zu fp32=%zu",
+            plan_fp16, plan_fp8, plan_nvfp4, plan_nvfp4_sfatom, plan_mxfp4, plan_fp32);
         IMP_LOG_INFO(
             "Phase-4 wcache actual: fp16=%zu fp8=%zu nvfp4=%zu "
-            "cutlass_nvfp4=%zu cutlass_mxfp4=%zu nvfp4_moe=%zu "
+            "nvfp4_sfatom=%zu mxfp4_sfatom=%zu nvfp4_moe=%zu "
             "fused_kv=%zu fused_gate_up=%zu",
-            wcache_->fp16.size(), wcache_->fp8.size(), wcache_->nvfp4.size(), wcache_->cutlass_nvfp4.size(),
-            wcache_->cutlass_mxfp4.size(), wcache_->nvfp4_moe.size(), wcache_->fused_kv.size(),
+            wcache_->fp16.size(), wcache_->fp8.size(), wcache_->nvfp4.size(), wcache_->nvfp4_sfatom.size(),
+            wcache_->mxfp4_sfatom.size(), wcache_->nvfp4_moe.size(), wcache_->fused_kv.size(),
             wcache_->fused_gate_up.size());
 
         // Stage 1 plan-vs-actual parity diagnostic: for every plan entry whose tier is an
@@ -335,7 +335,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // plan doesn't yet encode) before migration. Pure diagnostic; logs only.
         {
             // "Present in the planned tier's map?", not first-hit: a GGUF weight legitimately
-            // appears in BOTH wcache_->nvfp4 (its tier) AND wcache_->cutlass_nvfp4 (the dead G3 SF
+            // appears in BOTH wcache_->nvfp4 (its tier) AND wcache_->nvfp4_sfatom (the dead G3 SF
             // buffer); first-hit would falsely flag it. Matched = landed in the map the plan chose;
             // different map = real tier mismatch; nowhere = evicted (budget/native fallback, benign).
             auto present_in = [&](StorageTier t, const void* src) -> bool {
@@ -347,16 +347,16 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                     case StorageTier::NVFP4_LINEAR:
                         return wcache_->nvfp4.contains(src);
                     case StorageTier::NVFP4_SFATOM:
-                        return wcache_->cutlass_nvfp4.contains(src);
+                        return wcache_->nvfp4_sfatom.contains(src);
                     case StorageTier::MXFP4:
-                        return wcache_->cutlass_mxfp4.contains(src);
+                        return wcache_->mxfp4_sfatom.contains(src);
                     default: return false;
                 }
             };
             auto any_overlay = [&](const void* src) -> bool {
                 return wcache_->fp16.contains(src) || wcache_->fp8.contains(src) ||
-                       wcache_->nvfp4.contains(src) || wcache_->cutlass_nvfp4.contains(src) ||
-                       wcache_->cutlass_mxfp4.contains(src);
+                       wcache_->nvfp4.contains(src) || wcache_->nvfp4_sfatom.contains(src) ||
+                       wcache_->mxfp4_sfatom.contains(src);
             };
             int mismatch = 0, evicted = 0, matched = 0;
             for (const auto& e : ideal_plan.entries) {
@@ -452,12 +452,11 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                     if (ids[e] == kInvalidTensorID)
                         return false;
                     const auto& h = registry_->handle(ids[e]);
-                    if (!h.payload.cutlass_nvfp4.weight ||
-                        !h.payload.cutlass_nvfp4.sf)
+                    if (!h.payload.nvfp4_sfatom.weight || !h.payload.nvfp4_sfatom.sf)
                         return false;
-                    h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
-                    h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
-                    h_alpha[e] = h.cutlass_nvfp4_alpha(proj_act_scale);
+                    h_B_ptrs[e] = h.payload.nvfp4_sfatom.weight;
+                    h_SFB_ptrs[e] = h.payload.nvfp4_sfatom.sf;
+                    h_alpha[e] = h.nvfp4_sfatom_alpha(proj_act_scale);
                 }
                 cudaError_t err;
                 err = device_alloc_all(dev_req(d_B, ne * sizeof(const void*)));
@@ -567,7 +566,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 "NVFP4 da_cache: only %d/%d MoE-eligible layers populated. "
                 "Failing layers: [%s]. Partial coverage forces the per-layer "
                 "fallback dispatch (~5× slower decode on NVFP4 MoE models). "
-                "Likely cause: missing expert_*_ids, invalid CutlassNvFP4 "
+                "Likely cause: missing expert_*_ids, invalid NvFP4SfAtom "
                 "weight handles, or cudaMalloc failure for the per-layer "
                 "ptr arrays. Aborting before the engine silently ships a "
                 "slow build.",
@@ -640,7 +639,7 @@ int QuantPipeline::release_f16_attn_sources_(const ModelConfig& cfg, cudaStream_
 
 // Free a GGUF source allocation only when NO path still reads it: try_mark frees a
 // source iff it's a base allocation AND not present in wcache_->nvfp4 /
-// wcache_->cutlass_nvfp4. Decode-cached weights ARE present there (M>1 prefill still
+// wcache_->nvfp4_sfatom. Decode-cached weights ARE present there (M>1 prefill still
 // reads the GGUF source), so they are correctly SKIPPED; near-zero sources freed today,
 // by design. Also sets Tensor.dropped_source so any raw-deref path that lost its source
 // logs a coverage-gap warning instead of reading freed memory.
@@ -673,8 +672,8 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             return false;
         // Native MXFP4 unpacks in place: the cache entry IS these bytes (freeing them let later allocations
         // overwrite the served weights from the second prefill chunk on, Qwen3.5-4B-mxfp4 PPL 11.7 -> 4377).
-        if (wcache_->cutlass_nvfp4.contains(t.data) || wcache_->nvfp4.contains(t.data) ||
-            wcache_->cutlass_mxfp4.contains(t.data) ||
+        if (wcache_->nvfp4_sfatom.contains(t.data) || wcache_->nvfp4.contains(t.data) ||
+            wcache_->mxfp4_sfatom.contains(t.data) ||
             wcache_->lm_head_fp8.weight.data == t.data) {  // checkpoint FP8 head is served (#2479)
             ++skipped_shared_count;
             skipped_shared_bytes += bytes;
@@ -737,7 +736,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         const bool out_view = out_fp8 != wcache_->fp8.end() && out_fp8->second.d_row_scales != nullptr;
         const bool copies = pack_sidecar && L.gdn_packed_conv_channels == L.ssm_in.shape[0] &&
                             L.gdn_packed_inner == L.gdn_gate.shape[0] &&
-                            (out_view || wcache_->cutlass_mxfp8_prefill.contains(L.ssm_out.data));
+                            (out_view || wcache_->mxfp8_sfatom_prefill.contains(L.ssm_out.data));
         if (!(host_experts || wcache_->gdn_fp8rows) || !copies || !releasable(L.ssm_in, L.ssm_in_id) ||
             !releasable(L.gdn_gate, L.gdn_gate_id) || !releasable(L.ssm_out, L.ssm_out_id))
             continue;
@@ -775,7 +774,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         const size_t dropped = wcache_->dropped_gdn_bytes + wcache_->dropped_attn_bytes;
         const size_t released = std::min(dropped, pool_released + trim_device_mempool());
         const size_t price = wcache_->released_f16_scratch.bytes() +
-                             (released_layers > 0 ? wcache_->cutlass_mxfp8_prefill_bytes : 0);
+                             (released_layers > 0 ? wcache_->mxfp8_sfatom_prefill_bytes : 0);
         wcache_->dropped_released_bytes = released - std::min(released, price);
         IMP_LOG_INFO(
             "Phase-4b: freed %d F16 GDN input packs, the F16 in/gate/out of %d layers (%.1f MiB) and "
@@ -830,12 +829,12 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
         IMP_LOG_INFO("FP8 LM head: the checkpoint head is the served head, nothing to free");
         return;
     }
-    const auto ct = wcache_->cutlass_nvfp4.find(head.data);
+    const auto ct = wcache_->nvfp4_sfatom.find(head.data);
     // speculative.mtp_nvfp4_head=false: the MTP draft reads the source head.
     const bool mtp_reads_source = nvfp4_head && model_->mtp_ && !dispatch_policy().speculative.mtp_nvfp4_head;
     if (head.data == model_->tok_emb_.data || !mut_model->is_base_gpu_allocation(head.data) ||
         (fp8_head && wcache_->nvfp4.contains(head.data)) || mtp_reads_source ||
-        (ct != wcache_->cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) ||
+        (ct != wcache_->nvfp4_sfatom.end() && ct->second.scale_factors != nullptr) ||
         wcache_->fp16.contains(head.data) || wcache_->fp8.contains(head.data)) {
         IMP_LOG_INFO("%s LM head: source retained (tied, shared allocation, or keyed by another cache)",
                      served);

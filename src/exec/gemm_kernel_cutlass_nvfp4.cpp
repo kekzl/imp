@@ -1,7 +1,7 @@
 #include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm.h"                      // gemm_nvfp4_cublaslt
-#include "compute/gemm_cutlass_sm120.h"        // CutlassNvFP4Weight, quantize_fp16_to_nvfp4_cutlass
+#include "compute/gemm_cutlass_sm120.h"        // NvFP4SfAtomWeight, quantize_fp16_to_nvfp4_sfatom
 #include "quant/nvfp4_gemm_tile.h"       // gemm_nvfp4_tile
 #include "core/config/gemm.h"            // kNvfp4TileMinM
 #include "core/log_once.h"
@@ -11,29 +11,28 @@
 
 namespace imp {
 
-// Adapter: quantizes the FP16 activation into cutlass_act_data/_sf, then runs the own tile GEMM
+// Adapter: quantizes the FP16 activation into tile_act_data/_sf, then runs the own tile GEMM
 // (gemm_nvfp4_tile, cuBLASLt on refusal) against the pre-converted SfAtom weight. Preferred NVFP4
-// GEMM path when cutlass_nvfp4_cache + workspace pointers are populated; else the
+// GEMM path when nvfp4_sfatom + workspace pointers are populated; else the
 // dequant fallback (gemm_nvfp4) takes over. Decode (M==1) never reaches here (uses
 // gemv_nvfp4_kpar); only the prefill strategy is registered.
 // Preconditions: input/output/weight_payload non-null, input qtype F16,
-// cutlass_act_data+cutlass_act_sf mandatory (cutlass_workspace optional). Any
+// tile_act_data+tile_act_sf mandatory (tile_workspace optional). Any
 // precondition or can_implement failure returns PreconditionFail (caller falls back).
-static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) {
-    IMP_CHECK(args.input != nullptr, "cutlass_nvfp4_gemm_kernel: input is null");
-    IMP_CHECK(args.output != nullptr, "cutlass_nvfp4_gemm_kernel: output is null");
-    IMP_CHECK(args.weight_payload != nullptr, "cutlass_nvfp4_gemm_kernel: weight_payload is null");
-    IMP_CHECK(args.input->qtype == QType::F16, "cutlass_nvfp4_gemm_kernel: input qtype must be F16");
+static GemmDispatchResult nvfp4_sfatom_gemm_kernel(const GemmKernelArgs& args) {
+    IMP_CHECK(args.input != nullptr, "nvfp4_sfatom_gemm_kernel: input is null");
+    IMP_CHECK(args.output != nullptr, "nvfp4_sfatom_gemm_kernel: output is null");
+    IMP_CHECK(args.weight_payload != nullptr, "nvfp4_sfatom_gemm_kernel: weight_payload is null");
+    IMP_CHECK(args.input->qtype == QType::F16, "nvfp4_sfatom_gemm_kernel: input qtype must be F16");
 
-    // Workspace precondition: only act_data+act_sf are mandatory. cutlass_workspace may be
+    // Workspace precondition: only act_data+act_sf are mandatory. tile_workspace may be
     // null (allocate_auxiliary_buffers sizes it at the max shape, 0 allocates nothing).
     // A refusal here or from the GEMM itself returns PreconditionFail -> dequant fallback.
-    if (args.cutlass_act_data == nullptr || args.cutlass_act_sf == nullptr) {
+    if (args.tile_act_data == nullptr || args.tile_act_sf == nullptr) {
         return GemmDispatchResult::PreconditionFail;
     }
 
-    const CutlassNvFP4Weight& payload =
-        *static_cast<const CutlassNvFP4Weight*>(args.weight_payload);
+    const NvFP4SfAtomWeight& payload = *static_cast<const NvFP4SfAtomWeight*>(args.weight_payload);
 
     const int M = static_cast<int>(args.input->shape[0]);
     const int K = static_cast<int>(args.input->shape[1]);
@@ -42,8 +41,8 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // act_prequantized: scratch already holds quantize(input) from a prior dispatch on the
     // same input (QKV / gate-up dedupe); skip re-quantizing.
     if (!args.act_prequantized)
-        quantize_fp16_to_nvfp4_cutlass(args.input->data, args.cutlass_act_data, args.cutlass_act_sf, M, K,
-                                       args.stream, args.act_scale);
+        quantize_fp16_to_nvfp4_sfatom(args.input->data, args.tile_act_data, args.tile_act_sf, M, K,
+                                      args.stream, args.act_scale);
     const float alpha = payload.tensor_scale * args.act_scale;  // weight x activation tensor scale
     // The NVFP4 tile epilogue has no beta (beta = 0); a beta=1 call would overwrite
     // the residual instead of adding, producing silent garbage. Refuse (caller falls to the
@@ -53,15 +52,15 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
         return GemmDispatchResult::PreconditionFail;
     // Own TMA GEMM on the SfAtom bytes from imp::cfg::kNvfp4TileMinM; cuBLASLt on refusal.
     if (M >= imp::cfg::kNvfp4TileMinM &&
-        gemm_nvfp4_tile(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
-                        alpha, args.output->data, M, N, K, args.stream, /*variant=*/-1,
+        gemm_nvfp4_tile(args.tile_act_data, args.tile_act_sf, payload.data, payload.scale_factors, alpha,
+                        args.output->data, M, N, K, args.stream, /*variant=*/-1,
                         // no workspace = no stream-K: its partial sums take another order than the
                         // data-parallel tile and the pick follows M, so a prompt row (chunks >= 33 rows,
                         // runtime/prompt_tail.h) moves with its chunk (#2152): gemm.nvfp4_prompt_streamk
                         (process_diag_deterministic() || (M > 32 && !process_diag_nvfp4_prompt_streamk()))
                             ? nullptr
-                            : args.cutlass_workspace,
-                        args.cutlass_workspace_size)) {
+                            : args.tile_workspace,
+                        args.tile_workspace_size)) {
         static LogOnce logged;  // activity proof, once
         if (logged.first()) {
             IMP_LOG_INFO("nvfp4_tile: own NVFP4 prefill GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
@@ -72,16 +71,16 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // runtime.deterministic).
     const int lt_min_m = process_diag_nvfp4_cublaslt_min_m();
     if (lt_min_m > 0 && M >= lt_min_m &&
-        gemm_nvfp4_cublaslt(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
-                            alpha, args.output->data, M, N, K, args.stream))
+        gemm_nvfp4_cublaslt(args.tile_act_data, args.tile_act_sf, payload.data, payload.scale_factors, alpha,
+                            args.output->data, M, N, K, args.stream))
         return GemmDispatchResult::Ok;
     return GemmDispatchResult::PreconditionFail;  // both refused: the dequant fallback
 }
 
 // Only the (M>1) prefill slot: (M==1) decode always picks the gemv_nvfp4_kpar fast path.
-void register_cutlass_nvfp4_gemm_kernels(GemmKernelRegistry& reg) {
+void register_nvfp4_sfatom_gemm_kernels(GemmKernelRegistry& reg) {
     reg.register_kernel(GemmStrategy{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false},
-                        &cutlass_nvfp4_gemm_kernel);
+                        &nvfp4_sfatom_gemm_kernel);
 }
 
 }  // namespace imp

@@ -1,5 +1,5 @@
 // Dense prefill SwiGLU + CUTLASS NVFP4 quantize (#2470): FP16 output, packed FP4 and SfAtom
-// scales byte-identical to swiglu() followed by quantize_fp16_to_nvfp4_cutlass().
+// scales byte-identical to swiglu() followed by quantize_fp16_to_nvfp4_sfatom().
 
 #include <gtest/gtest.h>
 #include "compute/activation.h"
@@ -44,15 +44,15 @@ void run_case(int M, int K, float range) {
     Buf dg(n * 2), du(n * 2), out_ref(n * 2), out_fused(n * 2);
     ASSERT_EQ(cudaMemcpy(dg.p, g.data(), n * 2, cudaMemcpyHostToDevice), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(du.p, u.data(), n * 2, cudaMemcpyHostToDevice), cudaSuccess);
-    const size_t sf = cutlass_nvfp4_sf_size(M, K);
+    const size_t sf = nvfp4_sfatom_size(M, K);
     Buf pk_ref(n / 2), sf_ref(sf), pk_fused(n / 2), sf_fused(sf);
 
     int64_t shape[2] = {M, K};
     Tensor tg(dg.p, QType::F16, 2, shape, true), tu(du.p, QType::F16, 2, shape, true),
         to(out_ref.p, QType::F16, 2, shape, true);
     swiglu(tg, tu, to, nullptr);
-    quantize_fp16_to_nvfp4_cutlass(out_ref.p, pk_ref.p, sf_ref.p, M, K, nullptr);
-    swiglu_quantize_fp16_to_nvfp4_cutlass(dg.p, du.p, out_fused.p, pk_fused.p, sf_fused.p, M, K, nullptr);
+    quantize_fp16_to_nvfp4_sfatom(out_ref.p, pk_ref.p, sf_ref.p, M, K, nullptr);
+    swiglu_quantize_fp16_to_nvfp4_sfatom(dg.p, du.p, out_fused.p, pk_fused.p, sf_fused.p, M, K, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     EXPECT_EQ(out_ref.bytes(), out_fused.bytes()) << "M=" << M;
@@ -60,7 +60,7 @@ void run_case(int M, int K, float range) {
     EXPECT_EQ(sf_ref.bytes(), sf_fused.bytes()) << "M=" << M;
 }
 
-TEST(SwigluQuantizeCutlass, ByteIdenticalToSwigluThenQuantize) {
+TEST(SwigluQuantizeSfAtom, ByteIdenticalToSwigluThenQuantize) {
     run_case(33, 17408, 8.0f);
     run_case(200, 17408, 8.0f);
     run_case(129, 1024, 40.0f);

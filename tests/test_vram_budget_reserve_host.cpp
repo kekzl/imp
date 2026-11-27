@@ -16,7 +16,7 @@ using namespace imp;
 using namespace imp::vram_fixture;
 
 // compute_native_cache_demand must mirror phase 3b's SfAtom slab sizing exactly
-// (cutlass_nvfp4_sf_size + 256-byte alignment, contiguous expert groups as ONE entry) and
+// (nvfp4_sfatom_size + 256-byte alignment, contiguous expert groups as ONE entry) and
 // include the GDN/SSM projections phase 0b registers; the old elems/16 heuristic omitted
 // them and was not an upper bound under SfAtom padding.
 
@@ -24,13 +24,13 @@ namespace {
 
 size_t sf_entry(int n, int k_packed) {
     constexpr size_t kSfAlign = 256;
-    size_t sz = imp::cutlass_nvfp4_sf_size(n, k_packed * 2);
+    size_t sz = imp::nvfp4_sfatom_size(n, k_packed * 2);
     return (sz + kSfAlign - 1) / kSfAlign * kSfAlign;
 }
 
 size_t sf_group(int ne, int n, int k_packed) {
     constexpr size_t kSfAlign = 256;
-    size_t sz = static_cast<size_t>(ne) * imp::cutlass_nvfp4_sf_size(n, k_packed * 2);
+    size_t sz = static_cast<size_t>(ne) * imp::nvfp4_sfatom_size(n, k_packed * 2);
     return (sz + kSfAlign - 1) / kSfAlign * kSfAlign;
 }
 

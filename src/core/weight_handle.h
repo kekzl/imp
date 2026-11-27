@@ -18,9 +18,9 @@ namespace imp {
 struct Fp16CacheEntry;          // exec/weight_cache_entries.h
 struct FP8CacheEntry;           // exec/weight_caches.h
 struct NvFP4CacheEntry;         // exec/weight_cache_entries.h
-struct CutlassNvFP4CacheEntry;  // exec/weight_cache_entries.h
-struct CutlassMxFP8CacheEntry;  // exec/weight_cache_entries.h
-struct CutlassMxFP4CacheEntry;  // exec/weight_cache_entries.h
+struct NvFP4SfAtomCacheEntry;   // exec/weight_cache_entries.h
+struct MxFP8SfAtomCacheEntry;   // exec/weight_cache_entries.h
+struct MxFP4SfAtomCacheEntry;   // exec/weight_cache_entries.h
 
 // The WeightCaches entries keyed by a handle's source_data (audit D-3), bound by
 // bind_cache_entries (exec/weight_tier_entries.h); null = that map holds none.
@@ -28,10 +28,10 @@ struct WeightCacheRefs {
     const Fp16CacheEntry* fp16 = nullptr;
     const FP8CacheEntry* fp8 = nullptr;
     const NvFP4CacheEntry* nvfp4 = nullptr;
-    const CutlassNvFP4CacheEntry* cutlass_nvfp4 = nullptr;
-    const CutlassNvFP4CacheEntry* nvfp4_prefill = nullptr;  // cutlass_nvfp4_prefill
-    const CutlassMxFP8CacheEntry* mxfp8_prefill = nullptr;  // cutlass_mxfp8_prefill
-    const CutlassMxFP4CacheEntry* cutlass_mxfp4 = nullptr;
+    const NvFP4SfAtomCacheEntry* nvfp4_sfatom = nullptr;
+    const NvFP4SfAtomCacheEntry* nvfp4_prefill = nullptr;  // nvfp4_sfatom_prefill
+    const MxFP8SfAtomCacheEntry* mxfp8_prefill = nullptr;  // mxfp8_sfatom_prefill
+    const MxFP4SfAtomCacheEntry* mxfp4_sfatom = nullptr;
     const FP8CacheEntry* released_fp8 = nullptr;  // released_fp8_view (Phase 4b)
     bool q8_planes_only = false;                  // Phase 4c freed the Q8_0 source
 };
@@ -88,7 +88,7 @@ struct WeightHandle {
             void* weight;
             void* sf;
             float* global_scale;
-        } cutlass_nvfp4;
+        } nvfp4_sfatom;
         struct {
             void* weight;
             void* scales;
@@ -105,8 +105,8 @@ struct WeightHandle {
     // Conservative: true only when source_data is present AND the tier covers
     // both M=1 and M>1 paths; actual freeing needs a dispatch-site audit too.
     // W4A4 GEMM alpha of an NVFP4_SFATOM payload: weight tensor scale (1.0 when absent) x `act_scale`.
-    [[nodiscard]] float cutlass_nvfp4_alpha(float act) const {
-        return (payload.cutlass_nvfp4.global_scale ? *payload.cutlass_nvfp4.global_scale : 1.0f) * act;
+    [[nodiscard]] float nvfp4_sfatom_alpha(float act) const {
+        return (payload.nvfp4_sfatom.global_scale ? *payload.nvfp4_sfatom.global_scale : 1.0f) * act;
     }
 
     bool can_drop_source() const {

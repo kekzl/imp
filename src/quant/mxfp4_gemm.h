@@ -9,35 +9,35 @@ namespace imp {
 // MXFP4 GEMV for decode (M=1): FP4 E2M1 packed nibbles + UE8M0 scale per 32 elements, same
 // prmt LUT nibble decoding as NVFP4 but different scale handling (NVFP4: FP8 E4M3 per 16
 // elements + FP32 tensor_scale; MXFP4: UE8M0 per 32 elements, tensor_scale absorbed).
-// 128 threads (4 warps), 1 row/block; uses CutlassMxFP4Weight.linear_scales (sequential),
+// 128 threads (4 warps), 1 row/block; uses MxFP4SfAtomWeight.linear_scales (sequential),
 // not SfAtom.
 
 // Basic GEMV: y[N] = W_mxfp4[N,K] @ x[K]
-void gemv_mxfp4_kpar(const CutlassMxFP4Weight& W, const half* x, half* y, int N, int K, cudaStream_t stream);
+void gemv_mxfp4_kpar(const MxFP4SfAtomWeight& W, const half* x, half* y, int N, int K, cudaStream_t stream);
 
 // FP32 output for LM head
-void gemv_mxfp4_kpar_fp32(const CutlassMxFP4Weight& W, const half* x, float* y, int N, int K,
+void gemv_mxfp4_kpar_fp32(const MxFP4SfAtomWeight& W, const half* x, float* y, int N, int K,
                           cudaStream_t stream);
 
 // Fused QKV: 3 weight matrices, shared input, separate outputs
-void gemv_mxfp4_qkv_fused(const CutlassMxFP4Weight& wq, const CutlassMxFP4Weight& wk,
-                          const CutlassMxFP4Weight& wv, const half* x, half* yq, half* yk, half* yv,
+void gemv_mxfp4_qkv_fused(const MxFP4SfAtomWeight& wq, const MxFP4SfAtomWeight& wk,
+                          const MxFP4SfAtomWeight& wv, const half* x, half* yq, half* yk, half* yv,
                           int q_rows, int k_rows, int v_rows, int K, cudaStream_t stream);
 
 // Fused Gate+Up: 2 weight matrices, shared input, separate outputs
-void gemv_mxfp4_gate_up_fused(const CutlassMxFP4Weight& wg, const CutlassMxFP4Weight& wu, const half* x,
+void gemv_mxfp4_gate_up_fused(const MxFP4SfAtomWeight& wg, const MxFP4SfAtomWeight& wu, const half* x,
                               half* yg, half* yu, int rows, int K, cudaStream_t stream);
 
 // GEMV with residual add: y[N] = W_mxfp4[N,K] @ x[K] + residual[N]
-void gemv_mxfp4_residual(const CutlassMxFP4Weight& W, const half* x, half* y, const half* residual, int N,
+void gemv_mxfp4_residual(const MxFP4SfAtomWeight& W, const half* x, half* y, const half* residual, int N,
                          int K, cudaStream_t stream);
 
 // Fused SwiGLU + GEMV + residual
-void gemv_mxfp4_swiglu_residual(const CutlassMxFP4Weight& W, const half* gate, const half* up, half* y,
+void gemv_mxfp4_swiglu_residual(const MxFP4SfAtomWeight& W, const half* gate, const half* up, half* y,
                                 const half* residual, int N, int K, cudaStream_t stream);
 
 // Fused GeGLU + GEMV + residual
-void gemv_mxfp4_geglu_residual(const CutlassMxFP4Weight& W, const half* gate, const half* up, half* y,
+void gemv_mxfp4_geglu_residual(const MxFP4SfAtomWeight& W, const half* gate, const half* up, half* y,
                                const half* residual, int N, int K, cudaStream_t stream);
 
 // One-time L1 cache carveout setup for MXFP4 GEMV kernels.

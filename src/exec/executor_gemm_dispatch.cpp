@@ -120,7 +120,7 @@ static bool source_gemv(const WeightHandle& h, const Tensor& input, Tensor& outp
 
 static DensePath gemm_handle_last_route(const WeightHandle& h, const Tensor& input, Tensor& output,
                                         const GemmContext& ctx, bool decode_rows, void* ws, size_t ws_size) {
-    if (h.primary_tier == StorageTier::NVFP4_SFATOM && h.payload.cutlass_nvfp4.sf == nullptr &&
+    if (h.primary_tier == StorageTier::NVFP4_SFATOM && h.payload.nvfp4_sfatom.sf == nullptr &&
         h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
         static LogOnce logged;
         if (logged.first()) {
@@ -141,39 +141,39 @@ static DensePath gemm_handle_last_route(const WeightHandle& h, const Tensor& inp
 // or a nonzero beta (the epilogue bakes beta=0), so the caller falls through to a beta-honouring route.
 // pre_act / pre_sf: activation bytes quantized elsewhere at act_scale (gemm_nvfp4_prequant_), read instead of
 // the scratch; the scratch's tag stays.
-static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const Tensor& input, Tensor& output,
-                                           const GemmContext& ctx, int M, float act_scale = 1.0f,
-                                           const void* pre_act = nullptr, const void* pre_sf = nullptr) {
+static bool dispatch_nvfp4_sfatom_prefill(const NvFP4SfAtomWeight& cw, const Tensor& input, Tensor& output,
+                                          const GemmContext& ctx, int M, float act_scale = 1.0f,
+                                          const void* pre_act = nullptr, const void* pre_sf = nullptr) {
     const auto* qs = ctx.qscratch;
-    if (!cw.scale_factors || !qs || !qs->cutlass_act_data.get() || !qs->cutlass_act_sf.get())
+    if (!cw.scale_factors || !qs || !qs->tile_act_data.get() || !qs->tile_act_sf.get())
         return false;
     GemmKernelArgs args{};
     args.input = &input;
     args.output = &output;
     args.stream = ctx.stream;
     args.weight_payload = &cw;
-    args.cutlass_act_data = pre_act ? const_cast<void*>(pre_act) : qs->cutlass_act_data.get();
-    args.cutlass_act_sf = pre_act ? const_cast<void*>(pre_sf) : qs->cutlass_act_sf.get();
-    args.cutlass_workspace = qs->cutlass_workspace.get();
-    args.cutlass_workspace_size = qs->cutlass_workspace_size;
+    args.tile_act_data = pre_act ? const_cast<void*>(pre_act) : qs->tile_act_data.get();
+    args.tile_act_sf = pre_act ? const_cast<void*>(pre_sf) : qs->tile_act_sf.get();
+    args.tile_workspace = qs->tile_workspace.get();
+    args.tile_workspace_size = qs->tile_workspace_size;
     args.act_prequantized = pre_act != nullptr ||
                             ((ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
                               ctx.act_quant_hint_m == M &&
                               ctx.act_quant_hint_k == static_cast<int>(input.shape[1])) &&
-                             qs->cutlass_act_scale == act_scale);
+                             qs->tile_act_scale == act_scale);
     args.act_scale = act_scale;
     if (!args.act_prequantized)
-        qs->cutlass_act_scale = act_scale;  // the kernel quantizes before any refusal
+        qs->tile_act_scale = act_scale;  // the kernel quantizes before any refusal
     args.beta = ctx.beta;
     GemmStrategy strat{StorageTier::NVFP4_SFATOM, QType::F16, false};
     return GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok;
 }
 
-static CutlassNvFP4Weight cutlass_weight_of(const WeightHandle& h) {
-    CutlassNvFP4Weight cw;
-    cw.data = h.payload.cutlass_nvfp4.weight;
-    cw.scale_factors = h.payload.cutlass_nvfp4.sf;
-    cw.tensor_scale = h.payload.cutlass_nvfp4.global_scale ? *h.payload.cutlass_nvfp4.global_scale : 1.0f;
+static NvFP4SfAtomWeight sfatom_weight_of(const WeightHandle& h) {
+    NvFP4SfAtomWeight cw;
+    cw.data = h.payload.nvfp4_sfatom.weight;
+    cw.scale_factors = h.payload.nvfp4_sfatom.sf;
+    cw.tensor_scale = h.payload.nvfp4_sfatom.global_scale ? *h.payload.nvfp4_sfatom.global_scale : 1.0f;
     cw.N = h.shape[0];
     cw.K = h.shape[1] * 2;
     return cw;
@@ -184,8 +184,8 @@ void GraphExecutor::gemm_nvfp4_prequant_(TensorID id, const Tensor& input, const
     const auto& h = registry_.handle(id);
     const int M = static_cast<int>(input.shape[0]);
     const bool ok = h.primary_tier == StorageTier::NVFP4_SFATOM && ctx.beta == 0.0f &&
-                    dispatch_cutlass_nvfp4_prefill(cutlass_weight_of(h), input, output, ctx, M, h.act_scale,
-                                                   act, act_sf);
+                    dispatch_nvfp4_sfatom_prefill(sfatom_weight_of(h), input, output, ctx, M, h.act_scale,
+                                                  act, act_sf);
     IMP_CHECK(ok, "gemm_nvfp4_prequant_: %s M=%d refused, no FP16 input to fall back on",
               tensor_kind_name(h.kind), M);
     dispatch_record::set_dense(h.kind, DensePath::NVFP4_PREQUANT);
@@ -201,8 +201,8 @@ static bool nvfp4_prefill_copy_routes(const WeightHandle& h, int M, bool spec_ve
                                       const QuantScratch& qs) {
     return M > 32 && !spec_verify && h.source_qtype == QType::F16 &&
            (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
-           wc.cutlass_nvfp4_prefill.contains(h.source_data) && qs.cutlass_act_data.get() != nullptr &&
-           qs.cutlass_act_sf.get() != nullptr;
+           wc.nvfp4_sfatom_prefill.contains(h.source_data) && qs.tile_act_data.get() != nullptr &&
+           qs.tile_act_sf.get() != nullptr;
 }
 
 // One ACTIVE / DECLINED line per tensor kind and model load (log only).
@@ -231,12 +231,12 @@ static void log_mxfp8_prefill_copy_route(const WeightHandle& h, int M, float bet
 // Own MXFP8 GEMM on the quantized activation (column scale fused); false on refusal (N % 8 != 0), the caller
 // keeps the handle's previous route. Stream-K borrows the NVFP4 prefill workspace (same stream); none under
 // runtime.deterministic.
-static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight& cw, void* out, int M, int K,
+static bool mxfp8_prefill_gemm(const QuantScratch& qs, const MxFP8SfAtomWeight& cw, void* out, int M, int K,
                                cudaStream_t stream) {
     const int N = static_cast<int>(cw.N);
-    void* ws = process_diag_deterministic() ? nullptr : qs.cutlass_workspace.get();
+    void* ws = process_diag_deterministic() ? nullptr : qs.tile_workspace.get();
     if (!gemm_mxfp8_tile(qs.mxfp8_act_data.get(), qs.mxfp8_act_sf.get(), cw.data, cw.scale_factors,
-                         cw.col_scale, out, M, N, K, stream, /*variant=*/-1, ws, qs.cutlass_workspace_size))
+                         cw.col_scale, out, M, N, K, stream, /*variant=*/-1, ws, qs.tile_workspace_size))
         return false;
     static LogOnce logged;  // activity proof, once
     if (logged.first()) {
@@ -341,7 +341,7 @@ GemmContext GraphExecutor::gemm_ctx_(cudaStream_t stream, bool verify_small_m_ro
 // the dispatch is guaranteed to reach the NVFP4 tile prefill block
 // (which quantizes input into the shared activation scratch). Every
 // earlier-return route in gemm_via_handle_ must answer false here.
-bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M, const GemmMode& mode) const {
+bool GraphExecutor::prefill_routes_nvfp4_sfatom_(TensorID id, int M, const GemmMode& mode) const {
     if (id == kInvalidTensorID)
         return false;
     const auto& h = registry_.handle(id);
@@ -367,7 +367,7 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M, const Gemm
     if (h.source_data != nullptr && dequant_gpu_supported(h.source_qtype))
         return false;
     // The NVFP4 tile block itself requires the activation scratch.
-    return qscratch_.cutlass_act_data.get() != nullptr && qscratch_.cutlass_act_sf.get() != nullptr;
+    return qscratch_.tile_act_data.get() != nullptr && qscratch_.tile_act_sf.get() != nullptr;
 }
 
 // gemm_via_handle_: WeightHandle dispatch for all registered weights. M>1
@@ -452,10 +452,10 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
                       (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
                       qs.mxfp8_act_data.get() != nullptr && qs.mxfp8_act_sf.get() != nullptr &&
                       static_cast<size_t>(Mp) * Kp <= qs.mxfp8_act_data_size &&
-                      cutlass_mxfp8_sf_size(Mp, Kp) <= qs.mxfp8_act_sf_size;
+                      mxfp8_sfatom_size(Mp, Kp) <= qs.mxfp8_act_sf_size;
         if (active) {
-            quantize_fp16_to_mxfp8_cutlass(input.data, qs.mxfp8_act_data.get(), qs.mxfp8_act_sf.get(), Mp, Kp,
-                                           ctx.stream);
+            quantize_fp16_to_mxfp8_sfatom(input.data, qs.mxfp8_act_data.get(), qs.mxfp8_act_sf.get(), Mp, Kp,
+                                          ctx.stream);
             active = mxfp8_prefill_gemm(qs, cw, output.data, Mp, Kp, ctx.stream);
         }
         log_mxfp8_prefill_copy_route(h, Mp, ctx.beta, active);
@@ -471,7 +471,7 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
         const int Mp = static_cast<int>(input.shape[0]);
         const bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                             nvfp4_prefill_copy_routes(h, Mp, ctx.mode.spec_verify, wcache_, qscratch_) &&
-                            dispatch_cutlass_nvfp4_prefill(*h.entries.nvfp4_prefill, input, output, ctx, Mp);
+                            dispatch_nvfp4_sfatom_prefill(*h.entries.nvfp4_prefill, input, output, ctx, Mp);
         log_nvfp4_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
             return DensePath::NVFP4_PREFILL_COPY;
@@ -587,7 +587,7 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
         // step per verify). Also aligns verify argmax with the decode path. M cap
         // = largest capture bucket (33). Scoped to dequantable GGUF sources;
         // native-ST NVFP4 weights read NVFP4 directly via the NVFP4 tile block below
-        // (prefill_routes_cutlass_nvfp4_ must answer false here for those).
+        // (prefill_routes_nvfp4_sfatom_ must answer false here for those).
         // A graph-captured verify routes the chunk to the small-M block instead.
         if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 && h.source_data != nullptr &&
@@ -803,7 +803,7 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
     if (M > 1 && h.primary_tier == StorageTier::NVFP4_SFATOM) {
         // Act-quant dedupe (QKV / gate-up share one normed input, see the
         // with_act_quant_hint call sites) and the beta=1 decline live in the helper.
-        if (dispatch_cutlass_nvfp4_prefill(cutlass_weight_of(h), input, output, ctx, M, h.act_scale))
+        if (dispatch_nvfp4_sfatom_prefill(sfatom_weight_of(h), input, output, ctx, M, h.act_scale))
             return DensePath::NVFP4_TILE;
         // FP8 fallback for NVFP4_SFATOM (legacy path)
         if (const FP8CacheEntry* fp8 = h.entries.fp8) {

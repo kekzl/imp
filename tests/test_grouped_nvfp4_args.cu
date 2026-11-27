@@ -49,7 +49,7 @@ protected:
 
 struct SyntheticExpert {
     NvFP4Owned nvfp4{};
-    CutlassNvFP4Owned cutlass_w{};
+    NvFP4SfAtomOwned sfatom_w{};
 };
 
 static void make_expert(SyntheticExpert& e, int N, int K, float wscale, uint64_t seed, cudaStream_t stream) {
@@ -64,13 +64,13 @@ static void make_expert(SyntheticExpert& e, int N, int K, float wscale, uint64_t
     int64_t w_shape[2] = {N, K};
     Tensor w_input(d_w_fp16, QType::F16, 2, w_shape, true);
     quantize_fp16_to_nvfp4(w_input, e.nvfp4, stream);
-    convert_nvfp4_to_cutlass(e.nvfp4, e.cutlass_w, stream);
+    convert_nvfp4_to_sfatom(e.nvfp4, e.sfatom_w, stream);
     cudaStreamSynchronize(stream);
     cudaFree(d_w_fp16);
 }
 
 static void free_expert(SyntheticExpert& e) {
-    e.cutlass_w = CutlassNvFP4Owned{};
+    e.sfatom_w = NvFP4SfAtomOwned{};
     e.nvfp4 = NvFP4Owned{};  // releases at the old free point
 }
 
@@ -94,22 +94,22 @@ struct Problem {
         sfa_off.assign(ne + 1, 0);
         for (int e = 0; e < ne; ++e) {
             offsets[e + 1] = offsets[e] + M_per[e];
-            sfa_off[e + 1] = sfa_off[e] + static_cast<int64_t>(cutlass_nvfp4_sf_size(M_per[e], K));
+            sfa_off[e + 1] = sfa_off[e] + static_cast<int64_t>(nvfp4_sfatom_size(M_per[e], K));
         }
         M_total = offsets[ne];
         b_stride = static_cast<size_t>(N) * K / 2;
-        sfb_stride = cutlass_nvfp4_sf_size(N, K);
+        sfb_stride = nvfp4_sfatom_size(N, K);
         cudaMalloc(&b, b_stride * ne);
         cudaMalloc(&b_sf, sfb_stride * ne);
         experts.resize(ne);
         alpha.resize(ne);
         for (int e = 0; e < ne; ++e) {
             make_expert(experts[e], N, K, 0.25f * static_cast<float>(1 + e), seed + e, s);
-            cudaMemcpyAsync(static_cast<char*>(b) + (e * b_stride), experts[e].cutlass_w.data, b_stride,
+            cudaMemcpyAsync(static_cast<char*>(b) + (e * b_stride), experts[e].sfatom_w.data, b_stride,
                             cudaMemcpyDeviceToDevice, s);
-            cudaMemcpyAsync(static_cast<char*>(b_sf) + (e * sfb_stride), experts[e].cutlass_w.scale_factors,
+            cudaMemcpyAsync(static_cast<char*>(b_sf) + (e * sfb_stride), experts[e].sfatom_w.scale_factors,
                             sfb_stride, cudaMemcpyDeviceToDevice, s);
-            alpha[e] = experts[e].cutlass_w.tensor_scale;
+            alpha[e] = experts[e].sfatom_w.tensor_scale;
         }
         std::mt19937 agen(static_cast<unsigned>(seed));
         std::uniform_real_distribution<float> adist(-1.0f, 1.0f);
@@ -124,11 +124,11 @@ struct Problem {
         cudaMemsetAsync(a_sf, 0, sfa_off[ne], s);
         for (int e = 0; e < ne; ++e)
             if (M_per[e] > 0)
-                quantize_fp16_to_nvfp4_cutlass(static_cast<const half*>(x) +
-                                                   (static_cast<size_t>(offsets[e]) * K),
-                                               static_cast<char*>(a) +
-                                                   (static_cast<size_t>(offsets[e]) * K / 2),
-                                               static_cast<char*>(a_sf) + sfa_off[e], M_per[e], K, s);
+                quantize_fp16_to_nvfp4_sfatom(static_cast<const half*>(x) +
+                                                  (static_cast<size_t>(offsets[e]) * K),
+                                              static_cast<char*>(a) +
+                                                  (static_cast<size_t>(offsets[e]) * K / 2),
+                                              static_cast<char*>(a_sf) + sfa_off[e], M_per[e], K, s);
         cudaStreamSynchronize(s);
         cudaFree(x);
     }
@@ -194,7 +194,7 @@ TEST_F(GroupedNvfp4ArgsTest, HostArgsMatchesPerExpertDense) {
     for (int e = 0; e < p.ne; ++e) {
         if (p.M_per[e] == 0)
             continue;
-        const CutlassNvFP4Weight& w = p.experts[e].cutlass_w;
+        const NvFP4SfAtomWeight& w = p.experts[e].sfatom_w;
         ASSERT_TRUE(imp::test::ref_nvfp4_gemm(
             static_cast<const char*>(p.a) + (static_cast<size_t>(p.offsets[e]) * p.K / 2),
             static_cast<const char*>(p.a_sf) + p.sfa_off[e], w.data, w.scale_factors, w.tensor_scale,

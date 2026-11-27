@@ -54,12 +54,12 @@ G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const
                         pe->kind == TensorKind::EXPERT_DOWN;
     if (expert || !dequant_gpu_supported(pe->source_qtype))
         return G3::SfAtom;
-    CutlassNvFP4Weight cw;
+    NvFP4SfAtomWeight cw;
     cw.data = nvfp4.packed_data;
     cw.tensor_scale = nvfp4.tensor_scale;
     cw.N = nvfp4.N;
     cw.K = nvfp4.K;
-    wc.cutlass_nvfp4[ptr] = CutlassNvFP4CacheEntry(std::move(cw));
+    wc.nvfp4_sfatom[ptr] = NvFP4SfAtomCacheEntry(std::move(cw));
     return G3::SfLess;
 }
 
@@ -68,8 +68,8 @@ G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const
 // Phase 3b: convert NVFP4 weights into CUTLASS sm_120 block-scaled format. Must run
 // after FP16-free; the CUTLASS cache approximately doubles NVFP4 VRAM (repacked data +
 // SfAtom scales). Budget-aware: stops if VRAM runs out and logs an info line.
-void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget,
-                                                  size_t& remaining_budget, cudaStream_t stream) {
+void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                                 size_t& remaining_budget, cudaStream_t stream) {
     // After incremental mode, remaining_budget is stale.  Use actual free VRAM.
     size_t ct_budget;
     if (wcache_->nvfp4_decode_mode == 2) {
@@ -77,8 +77,8 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         // imp's own books, not the device (I4): identical on identical starts.
         const size_t free_mem = vram_planned_free_bytes();
         const size_t total_mem = vram_budget_total_bytes();
-        vram_i4_probe("cutlass_sf_budget");
-        // Intentionally NOT using dctx.safety_reserve here: populating cutlass_nvfp4 in mode 2
+        vram_i4_probe("nvfp4_sfatom_budget");
+        // Intentionally NOT using dctx.safety_reserve here: populating nvfp4_sfatom in mode 2
         // destabilised CUDA-graph capture on some models. The dense in-loop safety relaxation
         // already delivers its decode win; the CUTLASS path stays conservative until the
         // capture-failure root cause is understood.
@@ -147,7 +147,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         g.ne = ne;
         g.N = N;
         g.K = K;
-        g.sf_per_expert = cutlass_nvfp4_sf_size(N, K);
+        g.sf_per_expert = nvfp4_sfatom_size(N, K);
         g.slab_off = 0;
         g.tscale.resize(ne);
         g.data_ptrs.resize(ne);
@@ -191,8 +191,8 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
                 ++(g3 == G3::SkipQ8 ? ct_skipped_dead : ct_sfless);
                 continue;
             }
-            size_t est = align_up(
-                cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N), static_cast<int>(nvfp4.K)), kSfAlign);
+            size_t est = align_up(nvfp4_sfatom_size(static_cast<int>(nvfp4.N), static_cast<int>(nvfp4.K)),
+                                  kSfAlign);
             if (ct_total + est > ct_budget) {
                 ct_exhausted = true;
                 break;
@@ -223,21 +223,21 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         // Zero every entry's SfAtom padding rows at once (convert kernels write
         // only valid (n, k_group) cells).
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(sf_slab, 0, ct_total, stream));
-        wcache_->cutlass_sf_slab = std::move(sf_slab_own);  // the entries below slice it
+        wcache_->nvfp4_sfatom_slab = std::move(sf_slab_own);  // the entries below slice it
         auto* slab = static_cast<uint8_t*>(sf_slab);
         // Pass 2a: one batched convert per MoE group → per-expert borrowed slices.
         for (size_t gi = 0; gi < n_groups_inc; ++gi) {
             const MoeGroup& g = moe_groups[gi];
             convert_nvfp4_moe_scales_to_sfatom(g.base_ms, slab + g.slab_off, g.ne, g.N, g.K, stream);
             for (int e = 0; e < g.ne; ++e) {
-                CutlassNvFP4Weight cw;
+                NvFP4SfAtomWeight cw;
                 cw.data = g.data_ptrs[e];
                 cw.scale_factors = slab + g.slab_off + (static_cast<size_t>(e) * g.sf_per_expert);
                 cw.tensor_scale = g.tscale[e];
                 cw.N = g.N;
                 cw.K = g.K;
                 cw.sf_bytes = g.sf_per_expert;
-                wcache_->cutlass_nvfp4[g.data_ptrs[e]] = CutlassNvFP4CacheEntry(std::move(cw));
+                wcache_->nvfp4_sfatom[g.data_ptrs[e]] = NvFP4SfAtomCacheEntry(std::move(cw));
                 ++ct_count;
             }
         }
@@ -246,17 +246,17 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
             auto it = wcache_->nvfp4.find(ptr);
             if (it == wcache_->nvfp4.end())
                 continue;
-            CutlassNvFP4Weight cw;
-            convert_nvfp4_to_cutlass_borrowed(it->second, cw, slab + off, stream);
+            NvFP4SfAtomWeight cw;
+            convert_nvfp4_to_sfatom_borrowed(it->second, cw, slab + off, stream);
             if (cw.data) {
-                wcache_->cutlass_nvfp4[ptr] = CutlassNvFP4CacheEntry(std::move(cw));
+                wcache_->nvfp4_sfatom[ptr] = NvFP4SfAtomCacheEntry(std::move(cw));
                 ct_count++;
             }
         }
     }
     if (ct_count > 0 || ct_sfless > 0) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        wcache_->cutlass_nvfp4_bytes = ct_total;
+        wcache_->nvfp4_sfatom_bytes = ct_total;
         deduct_budget(remaining_budget, ct_total + wcache_->nvfp4_bytes);
         IMP_LOG_INFO(
             "CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB; %d GGUF-source weights "
@@ -299,11 +299,10 @@ void QuantPipeline::alloc_mxfp4_gemm_scratch_(const ModelConfig& cfg) {
         qscratch_->mxfp4_slice_out = DeviceOwned<void>::allocate(vram_alloc_, qscratch_->mxfp4_wdeq_size,
                                                                  "mxfp4_slice_out");
     }
-    if (max_k > 0 && !qscratch_->cutlass_act_data.get()) {
-        qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
-        qscratch_->cutlass_act_data = DeviceOwned<void>::allocate(vram_alloc_,
-                                                                  qscratch_->cutlass_act_data_size,
-                                                                  "cutlass_act_data");
+    if (max_k > 0 && !qscratch_->tile_act_data.get()) {
+        qscratch_->tile_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
+        qscratch_->tile_act_data = DeviceOwned<void>::allocate(vram_alloc_, qscratch_->tile_act_data_size,
+                                                               "tile_act_data");
     }
 }
 
@@ -318,16 +317,16 @@ auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
         return;
     if (w.ndim < 2 || w.shape[1] % 32 != 0)
         return;
-    if (wcache_->cutlass_mxfp4.contains(w.data))
+    if (wcache_->mxfp4_sfatom.contains(w.data))
         return;  // already registered
-    CutlassMxFP4Weight mw;
+    MxFP4SfAtomWeight mw;
     if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
         mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
         const size_t packed = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);  // compacted in place
         const size_t linear_sf = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 32);
         mx_native_bytes += mw.sf_bytes + linear_sf + packed;
-        wcache_->cutlass_mxfp4[w.data] = CutlassMxFP4CacheEntry(std::move(mw));
-        wcache_->cutlass_mxfp4_inplace_bytes += packed;  // already in WEIGHTS
+        wcache_->mxfp4_sfatom[w.data] = MxFP4SfAtomCacheEntry(std::move(mw));
+        wcache_->mxfp4_sfatom_inplace_bytes += packed;  // already in WEIGHTS
         mx_native++;
     }
 };
@@ -350,7 +349,7 @@ for (int i = 0; i < cfg.n_layers; i++) {
 register_if_mxfp4(model_->output_proj(), model_->out_proj_.qtype);
 if (mx_native > 0) {
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    wcache_->cutlass_mxfp4_bytes += mx_native_bytes;
+    wcache_->mxfp4_sfatom_bytes += mx_native_bytes;
     // unpack_mxfp4_gguf compacts the GGUF raw blocks IN PLACE inside the model's source
     // buffers: a second engine on this model handle cannot re-run the unpack (it would read
     // the already-compacted layout as raw blocks, illegal access, #830). Engine::init
@@ -372,7 +371,7 @@ if (mx_native > 0) {
 
     // Native MXFP4 (GEMV decode, W4A16 prefill via mxfp4_prefill_gemm) unless a weight lacks linear scales.
     bool mxfp4_gemv_available = true;
-    for (auto& [p, m] : wcache_->cutlass_mxfp4)
+    for (auto& [p, m] : wcache_->mxfp4_sfatom)
         if (!m.linear_scales) {
             mxfp4_gemv_available = false;
             break;
@@ -387,7 +386,7 @@ if (mx_native > 0) {
     // allocation to avoid CUDA heap fragmentation.
     size_t fp16_total = 0;
     if (!mxfp4_gemv_available) {
-        for (auto& [p, m] : wcache_->cutlass_mxfp4) {
+        for (auto& [p, m] : wcache_->mxfp4_sfatom) {
             if (wcache_->fp16.contains(p))
                 continue;
             fp16_total += static_cast<size_t>(m.N) * m.K * sizeof(half);
@@ -428,7 +427,7 @@ if (mx_native > 0) {
 
     if (d_fp16_bulk) {
         size_t offset = 0;
-        for (auto& [ptr, mw] : wcache_->cutlass_mxfp4) {
+        for (auto& [ptr, mw] : wcache_->mxfp4_sfatom) {
             if (wcache_->fp16.contains(ptr))
                 continue;
             size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);

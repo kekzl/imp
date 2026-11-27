@@ -163,10 +163,9 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         // fallback. Mirrors cache_moe_native_nvfp4's re-stamp block: shared SfAtom buffer per
         // projection + per-expert Tensor slices so Phase 4's register_tensor() sees CUTLASS-tier
         // wcache entries.
-        auto register_cutlass = [&](NvFP4MoEQuantResult& r, std::vector<Tensor>& experts,
-                                    const std::vector<float>& h_ts) -> bool {
-            const size_t sf_per_expert =
-                cutlass_nvfp4_sf_size(static_cast<int>(r.N), static_cast<int>(r.K));
+        auto register_sfatom = [&](NvFP4MoEQuantResult& r, std::vector<Tensor>& experts,
+                                   const std::vector<float>& h_ts) -> bool {
+            const size_t sf_per_expert = nvfp4_sfatom_size(static_cast<int>(r.N), static_cast<int>(r.K));
             const size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
             auto sfatom_own = DeviceOwned<void>::allocate(vram_alloc_, sfatom_total, "gptoss_moe_sfatom",
                                                           /*force=*/true);
@@ -203,22 +202,21 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                 nv.K = r.K;
                 wcache_->nvfp4[data_slice] = NvFP4CacheEntry(std::move(nv));
 
-                CutlassNvFP4Weight cw;
+                NvFP4SfAtomWeight cw;
                 cw.data = data_slice;
                 cw.scale_factors = static_cast<char*>(d_sfatom) + (static_cast<size_t>(e) * sf_per_expert);
                 cw.tensor_scale = h_ts[e];
                 cw.N = r.N;
                 cw.K = r.K;
                 cw.sf_bytes = sf_per_expert;
-                wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
+                wcache_->nvfp4_sfatom[data_slice] = NvFP4SfAtomCacheEntry(std::move(cw));
             }
-            wcache_->cutlass_nvfp4_bytes += sfatom_total;
-            wcache_->cutlass_nvfp4_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
+            wcache_->nvfp4_sfatom_bytes += sfatom_total;
+            wcache_->nvfp4_sfatom_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
             return true;
         };
-        bool ct_ok = register_cutlass(g, L.expert_w_gate, g_ts) &&
-                     register_cutlass(u, L.expert_w_up, u_ts) &&
-                     register_cutlass(d, L.expert_w_down, d_ts);
+        bool ct_ok = register_sfatom(g, L.expert_w_gate, g_ts) && register_sfatom(u, L.expert_w_up, u_ts) &&
+                     register_sfatom(d, L.expert_w_down, d_ts);
         if (i == 0)
             IMP_LOG_INFO("gpt-oss: CUTLASS grouped prefill %s", ct_ok ? "registered" : "UNAVAILABLE");
 
@@ -410,7 +408,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         // engages the fast gemv_nvfp4_moe_* decode kernels instead of the grouped GEMM
         // (CUTLASS under-utilized the GPU at M=1 decode). Guarded by a strict contiguity/shape
         // check; on mismatch, fall through to leaving the experts on the grouped GEMM path.
-        if (wcache_->cutlass_nvfp4.contains(experts[0].data)) {
+        if (wcache_->nvfp4_sfatom.contains(experts[0].data)) {
             const int ne_z = static_cast<int>(experts.size());
             const int64_t N_z = experts[0].shape[0];
             const int64_t Kp_z = experts[0].shape[1];
@@ -697,9 +695,9 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         // and register NVFP4_SFATOM entries so the MoE prefill fast path can fire instead of
         // dequant->FP16->cuBLASLt. The cleanup loop above nulled experts[e].data (per-expert
         // source freed); the executor needs valid slice pointers for register_tensor() and the
-        // wcache_->cutlass_nvfp4 lookup. Without this, expert_*_ids[e] = kInvalidTensorID and
+        // wcache_->nvfp4_sfatom lookup. Without this, expert_*_ids[e] = kInvalidTensorID and
         // covers_ids() rejects the fast path.
-        size_t sf_per_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+        size_t sf_per_expert = nvfp4_sfatom_size(static_cast<int>(N), static_cast<int>(K));
         size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
         auto sfatom_own = (sfatom_total <= moe_logical_avail)
                               ? DeviceOwned<void>::allocate(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom",
@@ -721,18 +719,18 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 w.on_device = true;
                 w.tensor_scale = h_ts[e];
                 void* sf_slice = static_cast<char*>(d_sfatom) + (static_cast<size_t>(e) * sf_per_expert);
-                CutlassNvFP4Weight cw;
+                NvFP4SfAtomWeight cw;
                 cw.data = data_slice;
                 cw.scale_factors = sf_slice;
                 cw.tensor_scale = h_ts[e];
                 cw.N = N;
                 cw.K = K;
                 cw.sf_bytes = sf_per_expert;
-                wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
+                wcache_->nvfp4_sfatom[data_slice] = NvFP4SfAtomCacheEntry(std::move(cw));
             }
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            wcache_->cutlass_nvfp4_bytes += sfatom_total;
-            wcache_->cutlass_nvfp4_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
+            wcache_->nvfp4_sfatom_bytes += sfatom_total;
+            wcache_->nvfp4_sfatom_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
             moe_logical_avail = (moe_logical_avail > sfatom_total) ? (moe_logical_avail - sfatom_total) : 0;
         } else {
             IMP_LOG_WARN(

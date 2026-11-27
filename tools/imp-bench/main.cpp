@@ -14,7 +14,7 @@ namespace imp {
 // bool, not void (#1584): each returns early with no CUDA device, previously silently exit 0.
 // A benchmark that measured nothing must be visible to a CI job or shell script as a failure.
 bool bench_gemm();
-bool bench_gemm_nvfp4_cutlass();
+bool bench_gemm_nvfp4_sfatom();
 bool bench_q8_imma();
 bool bench_attention();
 bool bench_paged_attention();
@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
     };
 
     run_one(run_gemm, "gemm", imp::bench_gemm);
-    run_one(run_gemm_nvfp4, "nvfp4", imp::bench_gemm_nvfp4_cutlass);
+    run_one(run_gemm_nvfp4, "nvfp4", imp::bench_gemm_nvfp4_sfatom);
     run_one(run_q8_imma, "q8imma", imp::bench_q8_imma);
     run_one(run_attention, "attention", imp::bench_attention);
     run_one(run_decode_attn, "decode-attn", imp::bench_paged_attention);

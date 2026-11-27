@@ -57,16 +57,16 @@ TEST(WeightTierEntries, BindTakesTheMapNodesOfTheSource) {
 // taken before 4b / 4c keyed the released source sees none of them until the rebind.
 TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
     WeightCaches wc;
-    wc.cutlass_nvfp4.emplace(&g_src_a, imp::CutlassNvFP4CacheEntry{});
-    wc.cutlass_nvfp4_prefill.emplace(&g_src_a, imp::CutlassNvFP4CacheEntry{});
-    wc.cutlass_mxfp8_prefill.emplace(&g_src_a, imp::CutlassMxFP8CacheEntry{});
-    wc.cutlass_mxfp4.emplace(&g_src_a, imp::CutlassMxFP4CacheEntry{});
+    wc.nvfp4_sfatom.emplace(&g_src_a, imp::NvFP4SfAtomCacheEntry{});
+    wc.nvfp4_sfatom_prefill.emplace(&g_src_a, imp::NvFP4SfAtomCacheEntry{});
+    wc.mxfp8_sfatom_prefill.emplace(&g_src_a, imp::MxFP8SfAtomCacheEntry{});
+    wc.mxfp4_sfatom.emplace(&g_src_a, imp::MxFP4SfAtomCacheEntry{});
     WeightHandle h = handle(&g_src_a, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
     imp::bind_cache_entries(h, wc);
-    EXPECT_EQ(h.entries.cutlass_nvfp4, &wc.cutlass_nvfp4.at(&g_src_a));
-    EXPECT_EQ(h.entries.nvfp4_prefill, &wc.cutlass_nvfp4_prefill.at(&g_src_a));
-    EXPECT_EQ(h.entries.mxfp8_prefill, &wc.cutlass_mxfp8_prefill.at(&g_src_a));
-    EXPECT_EQ(h.entries.cutlass_mxfp4, &wc.cutlass_mxfp4.at(&g_src_a));
+    EXPECT_EQ(h.entries.nvfp4_sfatom, &wc.nvfp4_sfatom.at(&g_src_a));
+    EXPECT_EQ(h.entries.nvfp4_prefill, &wc.nvfp4_sfatom_prefill.at(&g_src_a));
+    EXPECT_EQ(h.entries.mxfp8_prefill, &wc.mxfp8_sfatom_prefill.at(&g_src_a));
+    EXPECT_EQ(h.entries.mxfp4_sfatom, &wc.mxfp4_sfatom.at(&g_src_a));
     EXPECT_EQ(h.entries.released_fp8, nullptr);
     EXPECT_FALSE(h.entries.q8_planes_only);
 
@@ -80,7 +80,7 @@ TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
     // Another source sees none of them.
     WeightHandle other = handle(&g_src_b, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
     imp::bind_cache_entries(other, wc);
-    EXPECT_EQ(other.entries.cutlass_nvfp4, nullptr);
+    EXPECT_EQ(other.entries.nvfp4_sfatom, nullptr);
     EXPECT_EQ(other.entries.mxfp8_prefill, nullptr);
     EXPECT_EQ(other.entries.released_fp8, nullptr);
     EXPECT_FALSE(other.entries.q8_planes_only);

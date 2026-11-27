@@ -28,7 +28,7 @@ namespace {
 
 struct SyntheticExpert {
     NvFP4Owned nvfp4{};
-    CutlassNvFP4Owned cutlass_w{};
+    NvFP4SfAtomOwned sfatom_w{};
 };
 
 static void make_expert(SyntheticExpert& e, int N, int K, float wscale, uint64_t seed, cudaStream_t stream) {
@@ -43,13 +43,13 @@ static void make_expert(SyntheticExpert& e, int N, int K, float wscale, uint64_t
     int64_t w_shape[2] = {N, K};
     Tensor w_input(d_w_fp16, QType::F16, 2, w_shape, true);
     quantize_fp16_to_nvfp4(w_input, e.nvfp4, stream);
-    convert_nvfp4_to_cutlass(e.nvfp4, e.cutlass_w, stream);
+    convert_nvfp4_to_sfatom(e.nvfp4, e.sfatom_w, stream);
     cudaStreamSynchronize(stream);
     cudaFree(d_w_fp16);
 }
 
 static void free_expert(SyntheticExpert& e) {
-    e.cutlass_w = CutlassNvFP4Owned{};
+    e.sfatom_w = NvFP4SfAtomOwned{};
     e.nvfp4 = NvFP4Owned{};  // releases at the old free point
 }
 
@@ -91,7 +91,7 @@ protected:
         for (int e = 0; e < ne; ++e) {
             h.offsets[e + 1] = h.offsets[e] + M_per[e];
             h.sfa_off[e] = sfa_total;
-            sfa_total += cutlass_nvfp4_sf_size(M_per[e], K);
+            sfa_total += nvfp4_sfatom_size(M_per[e], K);
         }
         const int M_total = h.offsets[ne];
         ASSERT_GT(M_total, 0) << "all-empty distribution is meaningless";
@@ -103,13 +103,13 @@ protected:
         h.b.resize(ne);
         h.b_sf.resize(ne);
         const size_t b_bytes = static_cast<size_t>(N) * K / 2;
-        const size_t sfb_bytes = cutlass_nvfp4_sf_size(N, K);
+        const size_t sfb_bytes = nvfp4_sfatom_size(N, K);
         for (int i = 0; i < ne; ++i) {
             make_expert(experts[i], N, K, /*wscale=*/0.25f * static_cast<float>(1 + (i % 5)), seed + 1000 + i,
                         stream_);
-            hB[i] = experts[i].cutlass_w.data;
-            hSFB[i] = experts[i].cutlass_w.scale_factors;
-            h.alpha[i] = experts[i].cutlass_w.tensor_scale;
+            hB[i] = experts[i].sfatom_w.data;
+            hSFB[i] = experts[i].sfatom_w.scale_factors;
+            h.alpha[i] = experts[i].sfatom_w.tensor_scale;
             h.b[i].resize(b_bytes);
             h.b_sf[i].resize(sfb_bytes);
             cudaMemcpy(h.b[i].data(), hB[i], b_bytes, cudaMemcpyDeviceToHost);
@@ -132,7 +132,7 @@ protected:
         cudaMemset(d_a_sf, 0, sfa_total);
         for (int e = 0; e < ne; ++e)
             if (M_per[e] > 0)
-                quantize_fp16_to_nvfp4_cutlass(
+                quantize_fp16_to_nvfp4_sfatom(
                     static_cast<const half*>(d_A_fp16) + (static_cast<size_t>(h.offsets[e]) * K),
                     static_cast<char*>(d_a) + (static_cast<size_t>(h.offsets[e]) * K / 2),
                     static_cast<char*>(d_a_sf) + h.sfa_off[e], M_per[e], K, stream_);

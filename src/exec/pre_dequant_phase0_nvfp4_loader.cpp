@@ -625,8 +625,8 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     }
 }
 
-void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
-    const ModelConfig& cfg, cudaStream_t /*stream*/) {
+void QuantPipeline::pre_dequant_phase0b_register_prequant_nvfp4_(const ModelConfig& cfg,
+                                                                 cudaStream_t /*stream*/) {
     if (!cfg.is_nvfp4_prequant)
         return;
     Model* mut_model = const_cast<Model*>(model_);
@@ -660,8 +660,8 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
         tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
         // Register in NVFP4 cache for decode GEMV (gemv_nvfp4_kpar needs per-16 FP8
         // micro_scales, not SfAtom). Do NOT build the CUTLASS SfAtom buffer here: Phase 3b
-        // (nvfp4_decode_convert_cutlass_) iterates this same map and unconditionally rebuilds
-        // cutlass_nvfp4[ptr] for every entry, so a SfAtom built here is immediately orphaned
+        // (nvfp4_decode_convert_sfatom_) iterates this same map and unconditionally rebuilds
+        // nvfp4_sfatom[ptr] for every entry, so a SfAtom built here is immediately orphaned
         // (leaked, never freed) rather than reused. Phase 3b is the authoritative, budget-aware
         // builder; seeding nvfp4 here is all Phase 0b needs to do.
         wcache_->nvfp4[w.data] = NvFP4CacheEntry(std::move(tmp));
