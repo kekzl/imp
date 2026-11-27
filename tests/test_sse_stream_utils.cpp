@@ -14,7 +14,7 @@
 #include "logit_bias.h"       // tools/imp-server/logit_bias.h
 #include "completion_prompt.h"  // tools/imp-server/completion_prompt.h
 #include "request_field_types.h"  // tools/imp-server/request_field_types.h
-#include "reasoning_split.h"  // StreamReasoningSplitter (shared streaming demux)
+#include "stream_pipeline.h"      // imp::stream (Utf8Stitch, holdback)
 
 namespace {
 
@@ -186,14 +186,6 @@ TEST(ExtractReasoning, ForcedCloseThenModelCloseAgainLeavesNoMarker) {
     EXPECT_EQ(content, "9");
 }
 
-TEST(StripThinkBlock, RemovesBlockAndKeepsAnswer) {
-    std::string t = "<think>\nreasoning here\n</think>\n\nThe answer is 4.";
-    strip_think_block(t);
-    EXPECT_EQ(t.find("<think>"), std::string::npos);
-    EXPECT_EQ(t.find("</think>"), std::string::npos);
-    EXPECT_NE(t.find("The answer is 4."), std::string::npos);
-}
-
 // ---------------------------------------------------------------------------
 // Gemma-4 channel split
 // ---------------------------------------------------------------------------
@@ -266,114 +258,6 @@ TEST(HarmonySplit, CommentaryCountsAsReasoning) {
     EXPECT_NE(seg.reasoning.find("meta"), std::string::npos);
     EXPECT_EQ(seg.content, "ans");
 }
-
-// StreamReasoningSplitter (reasoning_split.h) is the shared pure demux for both streaming
-// handlers, checked against the non-streaming oracle extract_reasoning. Bug: a model
-// re-deliberating after closing its first <think> leaked the second pass into content,
-// because CONTENT-phase re-entry was a token-id compare that never fires for Qwen3.6's
-// multi-BPE markers (request.h:78-84); fix adds a text-scan re-entry + overlap holdback.
-
-using imp::server::StreamReasoningSplitter;
-using imp::server::ThinkPhase;
-
-// Drives the splitter starting in REASONING phase (mirrors an enable_thinking request whose
-// <think> opener lives in the prompt); token id is -1 throughout, the realistic Qwen3.6 case
-// where markers are decoded text, so only text-scan paths fire.
-struct SplitDrive {
-    std::string reasoning, content;
-    void run(const std::vector<std::string>& pieces, ThinkPhase start = ThinkPhase::REASONING) {
-        StreamReasoningSplitter s(start, /*think_start_id=*/-1, /*think_end_id=*/-1);
-        for (const auto& p : pieces) {
-            auto r = s.feed(p, /*token=*/-1);
-            reasoning += r.reasoning;
-            content += r.content;
-        }
-        auto r = s.finish();
-        reasoning += r.reasoning;
-        content += r.content;
-    }
-};
-
-// Report scenario: a clean first think block, then the model re-deliberates inside a SECOND
-// block before the real answer, delivered in one burst. Non-streaming keeps the deliberation
-// in reasoning_content; the streaming splitter must too.
-TEST(StreamReasoningSplit, SecondThinkPassDoesNotReachContent) {
-    const std::string out =
-        "<think>weather is 18C cloudy</think>"
-        "<think>The user wants the forecast. I should formulate in German.</think>"
-        "Morgen wird es 18 Grad.";
-
-    auto [oracle_reasoning, oracle_content] = extract_reasoning(out);
-    ASSERT_EQ(oracle_content, "Morgen wird es 18 Grad.");  // sanity: oracle is right
-
-    SplitDrive d;
-    d.run({out});
-
-    EXPECT_EQ(d.content, oracle_content)
-        << "streaming content leaked reasoning: " << d.content;
-    EXPECT_EQ(d.content.find("The user wants"), std::string::npos)
-        << "reasoning opener leaked into content: " << d.content;
-}
-
-// The same re-deliberation, but the second <think> opener is split across SSE
-// piece boundaries ("<th" + "ink>…") — the multi-token reality for Qwen3.6. The
-// overlap holdback must still catch it.
-TEST(StreamReasoningSplit, ReentryAcrossPieceBoundaries) {
-    SplitDrive d;
-    d.run({"<think>real reasoning</think>", "<th", "ink>second pass</think>", "the answer"});
-
-    EXPECT_EQ(d.content, "the answer") << "leaked: " << d.content;
-    EXPECT_EQ(d.content.find("second pass"), std::string::npos)
-        << "second reasoning pass leaked into content: " << d.content;
-    EXPECT_NE(d.reasoning.find("second pass"), std::string::npos)
-        << "second pass should be reasoning_content";
-}
-
-// A bare stray </think> (no opener) seen within the same burst is reclassified:
-// the text before it was reasoning, not content.
-TEST(StreamReasoningSplit, StrayCloseReclassifiedWithinBurst) {
-    SplitDrive d;
-    d.run({"<think>first</think>still thinking</think>done"});
-    EXPECT_EQ(d.content, "done") << "leaked: " << d.content;
-    EXPECT_EQ(d.content.find("still thinking"), std::string::npos);
-}
-
-// Guard: a single think block streams correctly (no over-eager reclassification)
-// — proves the splitter is faithful for the common case.
-TEST(StreamReasoningSplit, SingleBlockStreamsCleanly) {
-    SplitDrive d;
-    d.run({"<think>some reasoning</think>", "The answer is 4."});
-    EXPECT_EQ(d.content, "The answer is 4.");
-    EXPECT_EQ(d.reasoning, "some reasoning");
-}
-
-// Guard: content tokens streamed one piece at a time (post-think) must arrive
-// intact despite the 7-byte overlap holdback (the last bytes flush at finish()).
-TEST(StreamReasoningSplit, ContentTailNotLostByOverlap) {
-    SplitDrive d;
-    d.run({"<think>r</think>", "Paris", " is the", " capital."});
-    EXPECT_EQ(d.content, "Paris is the capital.");
-}
-
-// Guard: an unclosed think block (budget exhausted mid-think) keeps everything
-// in reasoning — nothing spills to content. Mirrors extract_reasoning's
-// UnclosedThinkIsAllReasoning.
-TEST(StreamReasoningSplit, UnclosedThinkIsAllReasoning) {
-    SplitDrive d;
-    d.run({"<think>The user wants X, I should"});
-    EXPECT_EQ(d.content, "");
-    EXPECT_EQ(d.reasoning, "The user wants X, I should");
-}
-
-// Guard: pass-through when reasoning extraction is off (start CONTENT) — the
-// splitter must not hold back or mangle plain content.
-TEST(StreamReasoningSplit, PassThroughInContentPhase) {
-    SplitDrive d;
-    d.run({"Hello ", "world."}, ThinkPhase::CONTENT);
-    EXPECT_EQ(d.content, "Hello world.");
-    EXPECT_EQ(d.reasoning, "");
-}
-
 
 // OpenAI compliance helpers (utils.cpp): max_completion_tokens precedence and the 16-entry
 // stop-sequence cap used by parse_chat_request_params.

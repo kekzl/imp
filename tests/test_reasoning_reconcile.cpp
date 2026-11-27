@@ -56,9 +56,16 @@ TEST(ThinkingReconcile, StrayCloseWithoutOpenKeepsCurrent) {
                                                     /*think=*/false, /*close=*/true));
 }
 
-// strip_think_block edge cases from the shared split_last_think helper (happy path covered
-// in test_sse_stream_utils.cpp, #557): an unclosed trailing/leading <think> is discarded
+// strip_think_block from the shared split_last_think helper (#557): the happy path keeps the
+// answer; an unclosed trailing/leading <think> is discarded
 // since the model never finished the block.
+TEST(StripThinkBlock, RemovesBlockAndKeepsAnswer) {
+    std::string t = "<think>\nreasoning here\n</think>\n\nThe answer is 4.";
+    strip_think_block(t);
+    EXPECT_EQ(t.find("<think>"), std::string::npos);
+    EXPECT_EQ(t.find("</think>"), std::string::npos);
+    EXPECT_NE(t.find("The answer is 4."), std::string::npos);
+}
 
 TEST(StripThinkBlock, DiscardsUnclosedTrailingThink) {
     std::string text = "<think>reasoning</think><think>unclosed";

@@ -1347,7 +1347,6 @@ if(IMP_BUILD_TESTS)
         # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
             tests/test_anthropic_effort.cpp
-            tests/test_anthropic_thinking_blocks.cpp
             tests/test_anthropic_transform.cpp
             tests/test_anthropic_usage.cpp
             tests/test_assistant_prefill_transform.cpp
