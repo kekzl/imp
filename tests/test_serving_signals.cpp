@@ -319,8 +319,12 @@ TEST(ServingSignalsTest, FirstShortPromptsReplayPrewarmedPrefillGraphs) {
         while (!sr->pop_token(ev, 500)) {}
         const double ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        Served s{sr};
-        (void)drain(s, 10000);
+        // max_tokens = 1: the first event is already the last; draining after it waited the full
+        // 10 s for an event that never comes (15 requests, 150 s of the case).
+        if (!ev.is_last) {
+            Served s{sr};
+            (void)drain(s, 10000);
+        }
         return ms;
     };
     const int captures0 = eng->prefill_graphs().captures();
