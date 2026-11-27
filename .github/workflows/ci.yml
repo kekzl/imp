@@ -709,6 +709,7 @@ jobs:
       - name: Build the device library
         if: steps.scope.outputs.run == 'true'
         run: |
+          # build_jobs.sh = -j2 here: cold -j4 took 668 s against 572 s at -j2 (runs 46083056552, 46082782818)
           jobs="$(bash scripts/build_jobs.sh)"
           echo "-j$jobs: nproc=$(nproc) MemTotal=$(awk '/MemTotal/ {print $2}' /proc/meminfo) kB cgroup memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo n/a)"
           cmake --build build-ptx --target imp -j"$jobs"
@@ -843,7 +844,8 @@ jobs:
           # sanitized"). The fatbin that ships is assembled and checked by the
           # `PTX fallback` job, which deliberately leaves the option at OFF.
           ccache -z
-          jobs="$(bash scripts/build_jobs.sh)"
+          # -j$(nproc) = 4: cold build 1855 -> 1396 s, anon peak 1.88 -> 3.06 GB of 16 GB (runs 46082782818, 46083056552)
+          jobs="$(nproc)"
           echo "-j$jobs: nproc=$(nproc) MemTotal=$(awk '/MemTotal/ {print $2}' /proc/meminfo) kB cgroup memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo n/a)"
           cmake --build build-asan --target test-core test-text -j"$jobs"
           echo "cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
