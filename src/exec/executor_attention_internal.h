@@ -162,10 +162,26 @@ struct ApaPagedPrefillArgs {
     if (cap_replay || cache->qtype() != QType::F16 || !apa_serves(a, n, att_off + n) || sliding_window > 0 ||
         softcap != 0.0f || sinks != nullptr || process_diag_deterministic())
         return false;
-    return attention_apa_prefill_paged(*q, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
-                                       static_cast<const half*>(cache->v_ptr(kv_layer, 0)), past_bt, kv_bs,
-                                       *kk, *vv, att_off, *o, n, att_off + n, nh, nkv, hd, scale, att_off,
-                                       a.apa_eps, kv_layer, owner, stream);
+    return attention_apa_prefill_paged({.q = q,
+                                        .k_pool = static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
+                                        .v_pool = static_cast<const half*>(cache->v_ptr(kv_layer, 0)),
+                                        .block_table = past_bt,
+                                        .block_size = kv_bs,
+                                        .k_tail = kk,
+                                        .v_tail = vv,
+                                        .tail = att_off,
+                                        .o = o,
+                                        .n = n,
+                                        .kv_len = att_off + n,
+                                        .nh = nh,
+                                        .nkv = nkv,
+                                        .hd = hd,
+                                        .scale = scale,
+                                        .q_offset = att_off,
+                                        .eps = a.apa_eps,
+                                        .kv_layer = kv_layer,
+                                        .owner = owner,
+                                        .stream = stream});
 }
 
 // FP4 prefill tiers, tried before FA2: APA (attention.apa_eps > 0, apa_serves), then

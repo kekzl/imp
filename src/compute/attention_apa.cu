@@ -138,11 +138,13 @@ static apa::KvState* kv_state(int layer, int nkv, int kv_len, int owner) {
     return &s_kvs[layer];
 }
 
-bool attention_apa_prefill_paged(const Tensor& q, const half* k_pool, const half* v_pool,
-                                 const int* block_table, int block_size, const Tensor& k_tail,
-                                 const Tensor& v_tail, int tail, Tensor& o, int n, int kv_len, int nh,
-                                 int nkv, int hd, float scale, int q_offset, float eps, int kv_layer,
-                                 int owner, cudaStream_t stream) {
+bool attention_apa_prefill_paged(const AttnApaPagedArgs& a) {
+    const auto& [q_p, k_pool, v_pool, block_table, block_size, k_tail_p, v_tail_p, tail, o_p, n, kv_len, nh,
+                 nkv, hd, scale, q_offset, eps, kv_layer, owner, stream] = a;
+    const Tensor& q = *q_p;
+    const Tensor& k_tail = *k_tail_p;
+    const Tensor& v_tail = *v_tail_p;
+    Tensor& o = *o_p;
     if (q.qtype != QType::F16 || k_tail.qtype != QType::F16 || v_tail.qtype != QType::F16 ||
         o.qtype != QType::F16 || hd != 128 || eps <= 0.0f || block_table == nullptr)
         return false;
@@ -202,11 +204,32 @@ void attention_apa_warmup(int nh, int nkv, int hd, int d_model, float eps, cudaS
     const float scale = 0.08838835f;  // 1/sqrt(128)
     s_warming = true;
     bool ok = attention_apa_prefill(tq, tk, tv, to, n, kv, nh, nkv, hd, scale, tail, eps, stream);
-    ok = ok && attention_apa_prefill_paged(tq, k, v, bt, bs, kt, vt, tail, to, n, kv, nh, nkv, hd, scale,
-                                           tail, eps, -1, -1, stream);
-    if (ok && s_kvs_layers > 0)  // tile cache: incremental kernels; any real request is another owner
-        ok = attention_apa_prefill_paged(tq, k, v, bt, bs, kt, vt, tail, to, n, kv, nh, nkv, hd, scale, tail,
-                                         eps, 0, INT_MAX, stream);
+    AttnApaPagedArgs paged{.q = &tq,
+                           .k_pool = k,
+                           .v_pool = v,
+                           .block_table = bt,
+                           .block_size = bs,
+                           .k_tail = &kt,
+                           .v_tail = &vt,
+                           .tail = tail,
+                           .o = &to,
+                           .n = n,
+                           .kv_len = kv,
+                           .nh = nh,
+                           .nkv = nkv,
+                           .hd = hd,
+                           .scale = scale,
+                           .q_offset = tail,
+                           .eps = eps,
+                           .kv_layer = -1,
+                           .owner = -1,
+                           .stream = stream};
+    ok = ok && attention_apa_prefill_paged(paged);
+    if (ok && s_kvs_layers > 0) {  // tile cache: incremental kernels; any real request is another owner
+        paged.kv_layer = 0;
+        paged.owner = INT_MAX;
+        ok = attention_apa_prefill_paged(paged);
+    }
     s_warming = false;
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     IMP_LOG_INFO("apa prefill: kernels loaded at warmup%s", ok ? "" : " (declined, FA2 serves)");

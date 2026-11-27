@@ -81,13 +81,26 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
 // out_slots/snap_slots (batched speculative verify): group z commits at d_real_n rows into
 // out_slots[z] instead of in place, and at d_snap_n rows into snap_slots[z]. snap_slots
 // requires out_slots; snap_slots[z] may equal seq_slots[z].
-void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_slots, int64_t slot_stride,
-                                         int n_seq, const Tensor& x_in, const Tensor& weight,
-                                         const Tensor& bias, float* x_out_f32, int conv_kernel,
-                                         cudaStream_t stream, const int* d_real_n = nullptr,
-                                         void* conv_snap = nullptr, const int* d_snap_n = nullptr,
-                                         const void* conv_prev = nullptr, const int* out_slots = nullptr,
-                                         const int* snap_slots = nullptr);
+// Arguments in the old parameter order (audit D-11); Tensors by pointer, required up to stream.
+struct SsmConv1dGroupedArgs {
+    void* conv_state_pool = nullptr;
+    const int* seq_slots = nullptr;
+    int64_t slot_stride = 0;
+    int n_seq = 0;
+    const Tensor* x_in = nullptr;
+    const Tensor* weight = nullptr;
+    const Tensor* bias = nullptr;
+    float* x_out_f32 = nullptr;
+    int conv_kernel = 0;
+    cudaStream_t stream = nullptr;
+    const int* d_real_n = nullptr;
+    void* conv_snap = nullptr;
+    const int* d_snap_n = nullptr;
+    const void* conv_prev = nullptr;
+    const int* out_slots = nullptr;
+    const int* snap_slots = nullptr;
+};
+void ssm_conv1d_prefill_f32_silu_grouped(const SsmConv1dGroupedArgs& a);
 
 // Mamba2 SSM scan decode (single step/sequence). x:[inner_size]; B,C:[n_groups*state_size];
 // dt:[n_heads] (raw, pre-softplus); A_log/D/dt_bias:[n_heads] float;
@@ -95,19 +108,53 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
 // y:[inner_size]; z:[inner_size] gate (nullptr=no fusion, else y*=SiLU(z), saves 2 kernels).
 // h_dtype: FP32 default, FP16 for VRAM savings; computation always FP32, dtype affects
 // load/store only.
-void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt, const Tensor& A_log,
-                     const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y, const void* z,
-                     int n_heads, int head_dim_ssm, int state_size, int n_groups, QType h_dtype = QType::F32,
-                     cudaStream_t stream = nullptr);
+// Arguments in the old parameter order (audit D-11); Tensors by pointer, all required up to n_groups.
+struct SsmScanDecodeArgs {
+    const Tensor* x = nullptr;
+    const Tensor* B = nullptr;
+    const Tensor* C = nullptr;
+    const Tensor* dt = nullptr;
+    const Tensor* A_log = nullptr;
+    const Tensor* D = nullptr;
+    const Tensor* dt_bias = nullptr;
+    void* h_state = nullptr;
+    Tensor* y = nullptr;
+    const void* z = nullptr;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    QType h_dtype = QType::F32;
+    cudaStream_t stream = nullptr;
+};
+void ssm_scan_decode(const SsmScanDecodeArgs& a);
 
 // Batched Mamba2 scan decode, one token per sequence: x/y/z [n_seq, inner], B/C [n_seq,
 // n_groups*state_size], dt [n_seq, n_heads]; row i advances the h_state of pool slot
 // seq_slots[i] (device table). Per row bit-identical to ssm_scan_decode.
-void ssm_scan_decode_batched(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
-                             const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state_pool,
-                             const int* seq_slots, size_t h_slot_stride_bytes, Tensor& y, const void* z,
-                             int n_seq, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                             QType h_dtype, cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); Tensors by pointer, all required.
+struct SsmScanDecodeBatchedArgs {
+    const Tensor* x = nullptr;
+    const Tensor* B = nullptr;
+    const Tensor* C = nullptr;
+    const Tensor* dt = nullptr;
+    const Tensor* A_log = nullptr;
+    const Tensor* D = nullptr;
+    const Tensor* dt_bias = nullptr;
+    void* h_state_pool = nullptr;
+    const int* seq_slots = nullptr;
+    size_t h_slot_stride_bytes = 0;
+    Tensor* y = nullptr;
+    const void* z = nullptr;
+    int n_seq = 0;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    QType h_dtype = QType::F32;
+    cudaStream_t stream = nullptr;
+};
+void ssm_scan_decode_batched(const SsmScanDecodeBatchedArgs& a);
 
 // SSM scan prefill: iterates scan_decode over all tokens sequentially. z:[n_tokens,
 // inner_size] gate (nullptr=no fusion).

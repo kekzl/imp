@@ -159,8 +159,25 @@ void scan_rows_match(QType h_dtype) {
     Tensor tx = view(d_x, QType::F16, {kSeq, inner}), ty = view(d_y, QType::F16, {kSeq, inner});
     Tensor tB = view(d_B, QType::F16, {kSeq, bc}), tC = view(d_C, QType::F16, {kSeq, bc});
     Tensor tdt = view(d_dt, QType::F16, {kSeq, n_heads});
-    ssm_scan_decode_batched(tx, tB, tC, tdt, tA, tD, tdtb, d_pool, d_slots, stride, ty, d_z, kSeq, n_heads,
-                            hd, ss, n_groups, h_dtype, nullptr);
+    ssm_scan_decode_batched({.x = &tx,
+                             .B = &tB,
+                             .C = &tC,
+                             .dt = &tdt,
+                             .A_log = &tA,
+                             .D = &tD,
+                             .dt_bias = &tdtb,
+                             .h_state_pool = d_pool,
+                             .seq_slots = d_slots,
+                             .h_slot_stride_bytes = stride,
+                             .y = &ty,
+                             .z = d_z,
+                             .n_seq = kSeq,
+                             .n_heads = n_heads,
+                             .head_dim_ssm = hd,
+                             .state_size = ss,
+                             .n_groups = n_groups,
+                             .h_dtype = h_dtype,
+                             .stream = nullptr});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     const auto got_y = to_host<half>(d_y, static_cast<size_t>(kSeq) * inner);
     const auto got_pool = to_host<unsigned char>(d_pool, pool.size());
@@ -177,8 +194,22 @@ void scan_rows_match(QType h_dtype) {
         Tensor C1 = view(d_C + (static_cast<size_t>(s) * bc), QType::F16, {bc});
         Tensor dt1 = view(d_dt + (static_cast<size_t>(s) * n_heads), QType::F16, {n_heads});
         Tensor y1 = view(d_y1, QType::F16, {inner});
-        ssm_scan_decode(x1, B1, C1, dt1, tA, tD, tdtb, d_slot, y1, d_z + (static_cast<size_t>(s) * inner),
-                        n_heads, hd, ss, n_groups, h_dtype, nullptr);
+        ssm_scan_decode({.x = &x1,
+                         .B = &B1,
+                         .C = &C1,
+                         .dt = &dt1,
+                         .A_log = &tA,
+                         .D = &tD,
+                         .dt_bias = &tdtb,
+                         .h_state = d_slot,
+                         .y = &y1,
+                         .z = d_z + (static_cast<size_t>(s) * inner),
+                         .n_heads = n_heads,
+                         .head_dim_ssm = hd,
+                         .state_size = ss,
+                         .n_groups = n_groups,
+                         .h_dtype = h_dtype,
+                         .stream = nullptr});
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         const auto want_y = to_host<half>(d_y1, inner);
         const auto want_slot = to_host<unsigned char>(d_slot, slot.size());

@@ -504,14 +504,14 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
                          d_real_n, nullptr, 0, 1, stream);
 }
 
-void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_slots, int64_t slot_stride,
-                                         int n_seq, const Tensor& x_in, const Tensor& weight,
-                                         const Tensor& bias, float* x_out_f32, int conv_kernel,
-                                         cudaStream_t stream, const int* d_real_n, void* conv_snap,
-                                         const int* d_snap_n, const void* conv_prev, const int* out_slots,
-                                         const int* snap_slots) {
+void ssm_conv1d_prefill_f32_silu_grouped(const SsmConv1dGroupedArgs& a) {
+    const auto& [conv_state_pool, seq_slots, slot_stride, n_seq, x_in_p, weight_p, bias_p, x_out_f32,
+                 conv_kernel, stream, d_real_n, conv_snap, d_snap_n, conv_prev, out_slots, snap_slots] = a;
     if (n_seq <= 0)
         return;
+    const Tensor& x_in = *x_in_p;
+    const Tensor& weight = *weight_p;
+    const Tensor& bias = *bias_p;
     if (snap_slots && !out_slots)
         throw std::runtime_error(
             "ssm_conv1d_prefill_f32_silu_grouped: snap_slots needs out_slots (an in-place commit would "
@@ -755,14 +755,13 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C, const h
         ssm_scan_legacy_launch(a, fp16);
 }
 
-void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt, const Tensor& A_log,
-                     const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y, const void* z,
-                     int n_heads, int head_dim_ssm, int state_size, int n_groups, QType h_dtype,
-                     cudaStream_t stream) {
-    ssm_scan_launch(static_cast<const half*>(x.data), static_cast<const half*>(B.data),
-                    static_cast<const half*>(C.data), static_cast<const half*>(dt.data),
-                    static_cast<const float*>(A_log.data), static_cast<const float*>(D.data),
-                    static_cast<const float*>(dt_bias.data), h_state, static_cast<half*>(y.data),
+void ssm_scan_decode(const SsmScanDecodeArgs& a) {
+    const auto& [x, B, C, dt, A_log, D, dt_bias, h_state, y, z, n_heads, head_dim_ssm, state_size, n_groups,
+                 h_dtype, stream] = a;
+    ssm_scan_launch(static_cast<const half*>(x->data), static_cast<const half*>(B->data),
+                    static_cast<const half*>(C->data), static_cast<const half*>(dt->data),
+                    static_cast<const float*>(A_log->data), static_cast<const float*>(D->data),
+                    static_cast<const float*>(dt_bias->data), h_state, static_cast<half*>(y->data),
                     static_cast<const half*>(z), 1, n_heads, head_dim_ssm, state_size, n_groups, h_dtype,
                     stream);
 }
@@ -778,11 +777,9 @@ void ssm_scan_prefill(const SsmScanPrefillArgs& a) {
                     h_dtype, stream, d_real_n, h_snap, d_snap_n, ssd);
 }
 
-void ssm_scan_decode_batched(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
-                             const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state_pool,
-                             const int* seq_slots, size_t h_slot_stride_bytes, Tensor& y, const void* z,
-                             int n_seq, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                             QType h_dtype, cudaStream_t stream) {
+void ssm_scan_decode_batched(const SsmScanDecodeBatchedArgs& a) {
+    const auto& [x, B, C, dt, A_log, D, dt_bias, h_state_pool, seq_slots, h_slot_stride_bytes, y, z, n_seq,
+                 n_heads, head_dim_ssm, state_size, n_groups, h_dtype, stream] = a;
     if (n_seq <= 0)
         return;
     // Legacy kernel at the s_tiles the register kernel uses: bit-identical to ssm_scan_decode per row.
@@ -791,14 +788,14 @@ void ssm_scan_decode_batched(const Tensor& x, const Tensor& B, const Tensor& C, 
     const int threads = hd * s_tiles;
     const size_t smem_bytes = (s_tiles > 1) ? static_cast<size_t>(hd) * s_tiles * sizeof(float) : 0;
     const dim3 grid(n_heads, n_seq);
-    const auto* xp = static_cast<const half*>(x.data);
-    const auto* bp = static_cast<const half*>(B.data);
-    const auto* cp = static_cast<const half*>(C.data);
-    const auto* dtp = static_cast<const half*>(dt.data);
-    const auto* ap = static_cast<const float*>(A_log.data);
-    const auto* dp = static_cast<const float*>(D.data);
-    const auto* dbp = static_cast<const float*>(dt_bias.data);
-    auto* yp = static_cast<half*>(y.data);
+    const auto* xp = static_cast<const half*>(x->data);
+    const auto* bp = static_cast<const half*>(B->data);
+    const auto* cp = static_cast<const half*>(C->data);
+    const auto* dtp = static_cast<const half*>(dt->data);
+    const auto* ap = static_cast<const float*>(A_log->data);
+    const auto* dp = static_cast<const float*>(D->data);
+    const auto* dbp = static_cast<const float*>(dt_bias->data);
+    auto* yp = static_cast<half*>(y->data);
     const auto* zp = static_cast<const half*>(z);
 #define SSM_SCAN_BATCHED(H_FP16_V, FUSE_V)                                                                 \
     do {                                                                                                   \

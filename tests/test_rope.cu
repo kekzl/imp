@@ -693,9 +693,23 @@ TEST(RoPETest, MtpMropeMatchesMainYarn) {
     // --- MTP draft path: same params, Qwen3.6 mrope section split [11,11,10] ---
     __half* q_mtp = to_device(qh.data(), qn);
     __half* k_mtp = to_device(kh.data(), kn);
-    mtp_apply_mrope(q_mtp, n_heads, k_mtp, n_kv_heads, head_dim, rope_dim, theta, /*sec0=*/11,
-                    /*sec1=*/11, /*sec2=*/10, pos, /*inv_scaling=*/1.0f / freq_scale, ext_factor,
-                    attn_factor, corr[0], corr[1], /*stream=*/nullptr);
+    mtp_apply_mrope({.d_q = q_mtp,
+                     .n_heads = n_heads,
+                     .d_k = k_mtp,
+                     .n_kv_heads = n_kv_heads,
+                     .head_dim = head_dim,
+                     .rope_dim = rope_dim,
+                     .theta = theta,
+                     .sec0 = 11,
+                     .sec1 = 11,
+                     .sec2 = 10,
+                     .pos = pos,
+                     .inv_scaling = 1.0f / freq_scale,
+                     .ext_factor = ext_factor,
+                     .attn_factor = attn_factor,
+                     .corr_dim_0 = corr[0],
+                     .corr_dim_1 = corr[1],
+                     .stream = nullptr});
     CUDA_CHECK(cudaDeviceSynchronize());
     auto q_mtp_out = to_host(q_mtp, qn);
     auto k_mtp_out = to_host(k_mtp, kn);
@@ -715,9 +729,23 @@ TEST(RoPETest, MtpMropeMatchesMainYarn) {
     // parity above could pass trivially (both silently ignoring the params).
     __half* q_plain = to_device(qh.data(), qn);
     __half* k_plain = to_device(kh.data(), kn);
-    mtp_apply_mrope(q_plain, n_heads, k_plain, n_kv_heads, head_dim, rope_dim, theta, 11, 11, 10, pos,
-                    /*inv_scaling=*/1.0f, /*ext_factor=*/0.0f, /*attn_factor=*/1.0f, 0.0f, 0.0f,
-                    /*stream=*/nullptr);
+    mtp_apply_mrope({.d_q = q_plain,
+                     .n_heads = n_heads,
+                     .d_k = k_plain,
+                     .n_kv_heads = n_kv_heads,
+                     .head_dim = head_dim,
+                     .rope_dim = rope_dim,
+                     .theta = theta,
+                     .sec0 = 11,
+                     .sec1 = 11,
+                     .sec2 = 10,
+                     .pos = pos,
+                     .inv_scaling = 1.0f,
+                     .ext_factor = 0.0f,
+                     .attn_factor = 1.0f,
+                     .corr_dim_0 = 0.0f,
+                     .corr_dim_1 = 0.0f,
+                     .stream = nullptr});
     CUDA_CHECK(cudaDeviceSynchronize());
     auto q_plain_out = to_host(q_plain, qn);
     float max_diff = 0.0f;

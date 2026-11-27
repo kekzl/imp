@@ -544,10 +544,22 @@ void run_conv_factor_row(int drafts) {
     xg.shape[0] = static_cast<int64_t>(rows);
     xg.shape[1] = channels;
     xg.qtype = QType::F16;
-    ssm_conv1d_prefill_f32_silu_grouped(d_pool, d_live, static_cast<int64_t>(win), n_seq, xg, w, b, d_out,
-                                        ksize, nullptr, d_all, /*conv_snap=*/nullptr, d_one,
-                                        /*conv_prev=*/nullptr,
-                                        /*out_slots=*/d_spare, /*snap_slots=*/d_live);
+    ssm_conv1d_prefill_f32_silu_grouped({.conv_state_pool = d_pool,
+                                         .seq_slots = d_live,
+                                         .slot_stride = static_cast<int64_t>(win),
+                                         .n_seq = n_seq,
+                                         .x_in = &xg,
+                                         .weight = &w,
+                                         .bias = &b,
+                                         .x_out_f32 = d_out,
+                                         .conv_kernel = ksize,
+                                         .stream = nullptr,
+                                         .d_real_n = d_all,
+                                         .conv_snap = nullptr,
+                                         .d_snap_n = d_one,
+                                         .conv_prev = nullptr,
+                                         .out_slots = d_spare,
+                                         .snap_slots = d_live});
     ssm_conv_tap_stash_mid(d_tap, xg.data, n_tokens, channels, d_one, L, n_seq, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> pre(pool_elems), post(pool_elems), out_b(rows * channels);

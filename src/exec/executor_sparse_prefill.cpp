@@ -72,12 +72,26 @@ GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half*
         !cache->key_minmax_enabled() || nkv <= 0 || nh / nkv > 16 ||
         (q_offset + kv_bs - 1) / kv_bs <= s.sp_prefill_budget_blocks)
         return dense;
-    const int past = sparse_prefill_select_past(q, n, s.sp_prefill_rows, cache->key_minmax_ptr(kv_layer, 0),
-                                                table, q_offset, nh, nkv, hd, kv_bs, s.sp_prefill_cap_blocks,
-                                                s.sp_prefill_budget_blocks, s.sp_prefill_sink_blocks,
-                                                s.sp_prefill_recent_blocks, cfg::kSparseScoreStdCoef,
-                                                s.sp_prefill_scores.data(), s.sp_prefill_agg.data(),
-                                                s.sp_prefill_table.data(), s.sp_prefill_ctx.data(), stream);
+    const int past = sparse_prefill_select_past({.q = q,
+                                                 .n_rows = n,
+                                                 .sample_rows = s.sp_prefill_rows,
+                                                 .minmax_layer = cache->key_minmax_ptr(kv_layer, 0),
+                                                 .past_block_table = table,
+                                                 .past_len = q_offset,
+                                                 .n_heads = nh,
+                                                 .n_kv_heads = nkv,
+                                                 .head_dim = hd,
+                                                 .block_size = kv_bs,
+                                                 .capacity_blocks = s.sp_prefill_cap_blocks,
+                                                 .budget_blocks = s.sp_prefill_budget_blocks,
+                                                 .sink_blocks = s.sp_prefill_sink_blocks,
+                                                 .recent_blocks = s.sp_prefill_recent_blocks,
+                                                 .std_coef = cfg::kSparseScoreStdCoef,
+                                                 .scores_scratch = s.sp_prefill_scores.data(),
+                                                 .agg_scratch = s.sp_prefill_agg.data(),
+                                                 .out_block_table = s.sp_prefill_table.data(),
+                                                 .out_ctx_scratch = s.sp_prefill_ctx.data(),
+                                                 .stream = stream});
     if (past <= 0)
         return dense;
     // Activity proof (prefill is not graph-captured, so this fires where the selection runs).
