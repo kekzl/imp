@@ -24,7 +24,7 @@ KvReplanInput qwen38_27b_first_start() {
     ShadowPlanProbe& p = in.probe;
     p.distributable_bytes = 9951 * kMiB;
     p.weight_cache_demand = 2815 * kMiB;
-    p.mandatory_cache_bytes = 1602 * kMiB;  // CUTLASS SF planes, budget log "sf=1601.6"
+    p.mandatory_cache_bytes = 1602 * kMiB;  // SfAtom SF planes, budget log "sf=1601.6"
     p.ssm_state_bytes = 2226 * kMiB;
     p.recurrent_snapshot_bytes = 238 * kMiB;
     p.spec_decode_bytes = 159 * kMiB;

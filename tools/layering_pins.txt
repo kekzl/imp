@@ -11,7 +11,7 @@
 # Format: <includer layer> <included header> <ceiling> <reason>
 
 compute model/model.h                           1   encoder_forward.cu walks the Model weight table (encoder embed/forward)
-compute model/model_config.h                    1   gemm_cutlass_sm120.cu needs the FFNActivation body; the header carries only the opaque enum
+compute model/model_config.h                    1   nvfp4_sfatom_quant.cu needs the FFNActivation body; the header carries only the opaque enum
 compute model/mtp_head.h                        1   mtp_forward.h takes the MtpHead weight struct
 compute model/tokenizer.h                       4   grammar/json/regex/schema constrained decoding builds its masks from the vocab
 exec    runtime/vram_budget.h                   6   the pre-dequant phases read the Engine-planned VRAMBudget; executor.h forward-declares it so a vram_budget.h edit rebuilds 53 TUs, not 82

@@ -5,7 +5,7 @@
 // The 512 MiB dequant-workspace cap guards only gemm_nvfp4's M>1 fallback
 // (dequantizes a whole weight to FP16, illegal under capture). A plane
 // that never reaches that fallback must not veto capture for planes that
-// can: the LM head at M>1 always takes smallm v2/CUTLASS/K-par GEMV, none
+// can: the LM head at M>1 always takes smallm v2/tile GEMM/K-par GEMV, none
 // of which dequantize, so it is excluded from the cap. Weight-plane blocker
 // only: a hybrid's NVFP4 KV-append host sync is a separate, independent capture blocker. Pure function.
 

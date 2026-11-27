@@ -45,7 +45,7 @@ struct Nvfp4DecodeContext {
     size_t nvfp4_moe_total = 0;
     size_t nvfp4_moe_ms_freed = 0;      // duplicated per-expert micro-scales freed (borrow path)
     int nvfp4_moe_partial_skipped = 0;  // GGUF MoE layers left uncached: not all projections eligible
-    // Shared VRAM safety reserve for mode 2 paths (dense incremental, CUTLASS NVFP4, MoE
+    // Shared VRAM safety reserve for mode 2 paths (dense incremental, SfAtom NVFP4, MoE
     // expert caching), computed once from the model's actual attention layout. Replaces the
     // previous total_mem/10 heuristic, which over-reserved and starved the dense NVFP4
     // cache.
@@ -106,7 +106,7 @@ private:
     void apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg) const;
 
     void pre_dequant_phase0_promote_nvfp4_sidecars_(const ModelConfig& cfg, cudaStream_t stream);
-    void pre_dequant_phase0b_register_cutlass_nvfp4_(const ModelConfig& cfg, cudaStream_t stream);
+    void pre_dequant_phase0b_register_prequant_nvfp4_(const ModelConfig& cfg, cudaStream_t stream);
     // Phase 1a (native FP8 prefill): FP8 checkpoint weights become primary FP8 entries on
     // their own bytes, no FP16 copy. Lives in pre_dequant_phase1_fp16_cache.cpp.
     void pre_dequant_phase1a_native_fp8_(const ModelConfig& cfg, cudaStream_t stream);
@@ -137,8 +137,8 @@ private:
                                                  Nvfp4DecodeContext& dctx);
     void nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStream_t stream,
                                    Nvfp4DecodeContext& dctx);
-    void nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget,
-                                       size_t& remaining_budget, cudaStream_t stream);
+    void nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                      size_t& remaining_budget, cudaStream_t stream);
     void alloc_mxfp4_gemm_scratch_(const ModelConfig& cfg);
     void nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget,

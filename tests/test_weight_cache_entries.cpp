@@ -10,7 +10,7 @@
 #include "exec/weight_handle.h"
 #include "memory/device_owned.h"
 #include "memory/vram_allocator.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 
 #include <algorithm>
@@ -86,12 +86,12 @@ static_assert(!std::is_constructible_v<NvFP4CacheEntry, NvFP4Owned&>);
 static_assert(std::is_trivially_copyable_v<NvFP4QuantResult>);
 static_assert(sizeof(NvFP4QuantResult) == (2 * sizeof(void*)) + (3 * sizeof(int64_t)));
 static_assert(kMoveOnly<NvFP4MoECacheEntry>);
-static_assert(kMoveOnly<CutlassNvFP4Owned>);
-static_assert(kMoveOnly<CutlassNvFP4CacheEntry>);
-static_assert(!std::is_constructible_v<CutlassNvFP4CacheEntry, CutlassNvFP4Owned&>);
-static_assert(std::is_trivially_copyable_v<CutlassNvFP4Weight>);
-static_assert(kMoveOnly<CutlassMxFP8CacheEntry>);
-static_assert(kMoveOnly<CutlassMxFP4CacheEntry>);
+static_assert(kMoveOnly<NvFP4SfAtomOwned>);
+static_assert(kMoveOnly<NvFP4SfAtomCacheEntry>);
+static_assert(!std::is_constructible_v<NvFP4SfAtomCacheEntry, NvFP4SfAtomOwned&>);
+static_assert(std::is_trivially_copyable_v<NvFP4SfAtomWeight>);
+static_assert(kMoveOnly<MxFP8SfAtomCacheEntry>);
+static_assert(kMoveOnly<MxFP4SfAtomCacheEntry>);
 static_assert(!std::is_copy_constructible_v<WeightCaches>);
 
 }  // namespace
@@ -247,30 +247,30 @@ TEST_F(WeightCacheEntriesTest, Nvfp4MoeOwnersReleaseThroughTheirFamilyAndABorrow
     EXPECT_EQ(log()[0].family, DeviceFamily::Plain);
 }
 
-TEST_F(WeightCacheEntriesTest, CutlassEntriesSliceASlabThatIsReleasedOnceAfterThem) {
+TEST_F(WeightCacheEntriesTest, SfAtomEntriesSliceASlabThatIsReleasedOnceAfterThem) {
     WeightCaches wc;
-    wc.cutlass_sf_slab = plain(8, 4);
+    wc.nvfp4_sfatom_slab = plain(8, 4);
     wc.owned_sf_slabs.push_back(vram(12, 4));
-    CutlassNvFP4Weight slab_slice;
+    NvFP4SfAtomWeight slab_slice;
     slab_slice.data = at(0);
     slab_slice.scale_factors = at(9);
-    CutlassNvFP4Weight moe_slice = slab_slice;
+    NvFP4SfAtomWeight moe_slice = slab_slice;
     moe_slice.scale_factors = at(13);
-    CutlassNvFP4Owned own;  // what convert_nvfp4_to_cutlass hands out
+    NvFP4SfAtomOwned own;  // what convert_nvfp4_to_sfatom hands out
     own.sf_owned.adopt(at(5), 4, nullptr);
     own.data = at(0);
     own.scale_factors = at(5);
     own.sf_bytes = 4;
-    wc.cutlass_nvfp4[at(1)] = CutlassNvFP4CacheEntry(std::move(slab_slice));
-    wc.cutlass_nvfp4[at(2)] = CutlassNvFP4CacheEntry(std::move(moe_slice));
-    wc.cutlass_nvfp4[at(3)] = CutlassNvFP4CacheEntry(std::move(own));
+    wc.nvfp4_sfatom[at(1)] = NvFP4SfAtomCacheEntry(std::move(slab_slice));
+    wc.nvfp4_sfatom[at(2)] = NvFP4SfAtomCacheEntry(std::move(moe_slice));
+    wc.nvfp4_sfatom[at(3)] = NvFP4SfAtomCacheEntry(std::move(own));
     EXPECT_EQ(own.scale_factors, nullptr);  // NOLINT(bugprone-use-after-move): emptied by the hand-off
-    EXPECT_FALSE(wc.cutlass_nvfp4.at(at(1)).sf_owned);  // a slab slice is a view
-    wc.cutlass_nvfp4.clear();
+    EXPECT_FALSE(wc.nvfp4_sfatom.at(at(1)).sf_owned);  // a slab slice is a view
+    wc.nvfp4_sfatom.clear();
     ASSERT_EQ(log().size(), 1u);
     EXPECT_EQ(released(at(5)), 1);
     EXPECT_EQ(released(at(0)), 0);  // data is always a view
-    wc.cutlass_sf_slab.reset();
+    wc.nvfp4_sfatom_slab.reset();
     wc.owned_sf_slabs.clear();
     ASSERT_EQ(log().size(), 3u);
     EXPECT_EQ(released(at(8)), 1);
@@ -278,7 +278,7 @@ TEST_F(WeightCacheEntriesTest, CutlassEntriesSliceASlabThatIsReleasedOnceAfterTh
     EXPECT_EQ(log()[2].family, DeviceFamily::Vram);
 }
 
-// B-135: the native MoE copy releases each expert block; no nvfp4 / cutlass_nvfp4 key survives it.
+// B-135: the native MoE copy releases each expert block; no nvfp4 / nvfp4_sfatom key survives it.
 TEST_F(WeightCacheEntriesTest, NativeMoeCopyErasesEveryKeyOfAReleasedExpertBlock) {
     constexpr int kExperts = 4;
     WeightCaches wc;
@@ -287,13 +287,13 @@ TEST_F(WeightCacheEntriesTest, NativeMoeCopyErasesEveryKeyOfAReleasedExpertBlock
         view.packed_data = at(e);
         view.micro_scales = at(4 + e);
         wc.nvfp4[at(e)] = NvFP4CacheEntry(std::move(view));
-        CutlassNvFP4Owned cw;
+        NvFP4SfAtomOwned cw;
         cw.data = at(e);
         cw.scale_factors = at(8 + e);
         if (e == kExperts - 1)  // the last one owns its SfAtom buffer
             cw.sf_owned.adopt(at(8 + e), 4, nullptr);
         cw.sf_bytes = 4;
-        wc.cutlass_nvfp4[at(e)] = CutlassNvFP4CacheEntry(std::move(cw));
+        wc.nvfp4_sfatom[at(e)] = NvFP4SfAtomCacheEntry(std::move(cw));
     }
     NvFP4QuantResult other;  // a weight outside the layer keeps its entry
     other.packed_data = at(15);
@@ -302,7 +302,7 @@ TEST_F(WeightCacheEntriesTest, NativeMoeCopyErasesEveryKeyOfAReleasedExpertBlock
         EXPECT_EQ(erase_released_expert_keys(wc, at(e)), 2);
     for (int e = 0; e < kExperts; ++e) {
         EXPECT_FALSE(wc.nvfp4.contains(at(e))) << "expert " << e;
-        EXPECT_FALSE(wc.cutlass_nvfp4.contains(at(e))) << "expert " << e;
+        EXPECT_FALSE(wc.nvfp4_sfatom.contains(at(e))) << "expert " << e;
     }
     EXPECT_TRUE(wc.nvfp4.contains(at(15)));
     EXPECT_EQ(erase_released_expert_keys(wc, at(0)), 0);  // a block without entries
@@ -312,17 +312,17 @@ TEST_F(WeightCacheEntriesTest, NativeMoeCopyErasesEveryKeyOfAReleasedExpertBlock
 }
 
 TEST_F(WeightCacheEntriesTest, Mxfp8RowViewReleasesItsScaleBlockAndNotTheBorrowedRows) {
-    CutlassMxFP8Weight rows;
+    MxFP8SfAtomWeight rows;
     rows.data = at(0);  // rows of the FP8 sidecar
     rows.scale_factors = at(1);
     rows.borrowed_data = true;
-    CutlassMxFP8Weight copy;
+    MxFP8SfAtomWeight copy;
     copy.data = at(2);
     copy.scale_factors = at(3);
     {
-        CutlassMxFP8CacheEntry view(rows, DeviceOwned<void>{}, vram(1));
-        CutlassMxFP8CacheEntry own(copy, vram(2), vram(3));
-        CutlassMxFP8CacheEntry moved(std::move(view));
+        MxFP8SfAtomCacheEntry view(rows, DeviceOwned<void>{}, vram(1));
+        MxFP8SfAtomCacheEntry own(copy, vram(2), vram(3));
+        MxFP8SfAtomCacheEntry moved(std::move(view));
         EXPECT_EQ(view.data, nullptr);  // NOLINT(bugprone-use-after-move)
         EXPECT_TRUE(moved.borrowed_data);
     }
@@ -334,7 +334,7 @@ TEST_F(WeightCacheEntriesTest, Mxfp8RowViewReleasesItsScaleBlockAndNotTheBorrowe
 }
 
 TEST_F(WeightCacheEntriesTest, Mxfp4InPlaceDataIsAViewBothScaleLayoutsAreOwned) {
-    CutlassMxFP4Weight w;
+    MxFP4SfAtomWeight w;
     w.data = at(0);  // compacted in place in the model's buffer
     w.scale_factors = at(1);
     w.linear_scales = at(2);
@@ -342,7 +342,7 @@ TEST_F(WeightCacheEntriesTest, Mxfp4InPlaceDataIsAViewBothScaleLayoutsAreOwned) 
     w.K = 32;
     w.hadamard_bs = 7;
     {
-        CutlassMxFP4CacheEntry e(std::move(w));
+        MxFP4SfAtomCacheEntry e(std::move(w));
         EXPECT_EQ(w.scale_factors, nullptr);  // NOLINT(bugprone-use-after-move): emptied by the hand-off
         EXPECT_EQ(e.hadamard_bs, 7);
         EXPECT_EQ(e.data, at(0));

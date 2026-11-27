@@ -32,7 +32,7 @@ enum class LmHeadRoute : uint8_t {
 
 // Not FP8-cached and NVFP4 by tier or by the secondary cache.
 constexpr bool lm_head_is_nvfp4(const LmHeadFacts& f) {
-    return !f.fp8_cache && (f.tier == StorageTier::NVFP4 || f.nvfp4_cache);
+    return !f.fp8_cache && (f.tier == StorageTier::NVFP4_LINEAR || f.nvfp4_cache);
 }
 
 constexpr LmHeadRoute lm_head_route(const LmHeadFacts& f, LmHeadUse use) {

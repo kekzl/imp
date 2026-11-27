@@ -57,7 +57,7 @@ struct StoragePlan {
 // Pure function, no GPU allocations or side effects. Determines per-tensor storage tier
 // from capabilities + budget + hints.
 // SCOPE (Phase 4 Option C): the plan describes the overlay layer (tensors whose storage
-// tier is a runtime decision: NVFP4 decode cache, FP8 prefill cache, CUTLASS layouts).
+// tier is a runtime decision: NVFP4 decode cache, FP8 prefill cache, SfAtom layouts).
 // Native GGUF block formats stay mmap'd in Model::gpu_allocations_ and bypass the
 // plan/registry entirely.
 // The plan enumerates the IDEAL overlay; the runtime caching policy is VRAM-budget-aware

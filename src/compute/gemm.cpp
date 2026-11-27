@@ -2,7 +2,7 @@
 #include "memory/device_alloc_all.h"
 #include "memory/device_owned.h"
 #include "compute/cublas_handle.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include <algorithm>
 #include <atomic>
 #include "compute/gemm_algo_capture.h"
@@ -954,7 +954,7 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, 
     // Defensive guard: a packed NVFP4 weight (or INT8-typed packed payload) must never reach
     // the generic FP16 cuBLAS path. cuBLAS rejects FP16xINT8/NVFP4 with
     // CUBLAS_STATUS_NOT_SUPPORTED and leaves the output uninitialised (silent garbage + IMA).
-    // Correct dispatch is the NVFP4 decode/CUTLASS cache (pre_dequant_phase3_*); if one slips
+    // Correct dispatch is the NVFP4 linear/SfAtom cache (pre_dequant_phase3_*); if one slips
     // through, fail loud and skip the multiply (output is pre-zeroed by the caller) rather
     // than corrupt.
     if ((B.qtype == QType::INT8 || B.qtype == QType::NVFP4) && A.qtype == QType::F16) {
@@ -964,9 +964,8 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, 
             IMP_LOG_ERROR(
                 "gemm(): packed NVFP4 weight reached the generic cuBLAS path — "
                 "kind=%s B.qtype=%d scales=%s M=%ld K=%ld N=%ld — skipping "
-                "(routing/tier bug; expected NVFP4 decode/CUTLASS dispatch)",
-                tensor_kind_name(B.kind), std::to_underlying(B.qtype),
-                B.scales ? "SET" : "NULL",
+                "(routing/tier bug; expected NVFP4 linear/SfAtom dispatch)",
+                tensor_kind_name(B.kind), std::to_underlying(B.qtype), B.scales ? "SET" : "NULL",
                 (long)A.shape[0], (long)A.shape[1], (long)B.shape[0]);
         }
         return;

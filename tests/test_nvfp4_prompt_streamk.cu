@@ -1,13 +1,13 @@
-// gemm.nvfp4_prompt_streamk off (auto = off): prompt rows (chunks >= 33) of the CUTLASS_NVFP4 registry
+// gemm.nvfp4_prompt_streamk off (auto = off): prompt rows (chunks >= 33) of the NVFP4_SFATOM registry
 // kernel never take stream-K, whose K split follows M (Gemma-4-26B global q_proj N 8192 K 2816: 218 rows
 // data-parallel, 42 rows split in 2; prefix resend 0.179 nats).
 
-#include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass
+#include "compute/nvfp4_sfatom_quant.h"  // NvFP4SfAtomWeight, convert_nvfp4_to_sfatom
 #include "core/process_diag.h"
 #include "core/tensor.h"
 #include "exec/gemm_kernel_registry.h"
 #include "quant/nvfp4_gemm_tile.h"  // gemm_nvfp4_tile, gemm_tile_streamk_workspace_bytes
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
@@ -34,7 +34,7 @@ struct PromptRowsRig {
     void *d_act = nullptr, *d_act_sf = nullptr, *d_ws = nullptr;
     size_t sf_bytes = 0, ws_bytes = gemm_tile_streamk_workspace_bytes();
     NvFP4Owned nv4{};
-    CutlassNvFP4Owned cw{};
+    NvFP4SfAtomOwned cw{};
 
     PromptRowsRig(int n, int k, int m_big, int m_small, uint32_t seed)
         : N(n), K(k), big(m_big), small(m_small) {
@@ -59,8 +59,8 @@ struct PromptRowsRig {
         int64_t w_shape[2] = {N, K};
         Tensor weight_fp16(d_w, QType::F16, 2, w_shape, /*on_device=*/true);
         quantize_fp16_to_nvfp4(weight_fp16, nv4, stream);
-        convert_nvfp4_to_cutlass(nv4, cw, stream);
-        sf_bytes = cutlass_nvfp4_sf_size(big, K);
+        convert_nvfp4_to_sfatom(nv4, cw, stream);
+        sf_bytes = nvfp4_sfatom_size(big, K);
         cudaMalloc(&d_act, size_t(big) * K / 2);
         cudaMalloc(&d_act_sf, sf_bytes);
         cudaMalloc(&d_ws, ws_bytes);
@@ -94,11 +94,11 @@ struct PromptRowsRig {
         args.stream = stream;
         args.beta = 0.0f;
         args.weight_payload = &cw;
-        args.cutlass_act_data = d_act;
-        args.cutlass_act_sf = d_act_sf;
-        args.cutlass_workspace = d_ws;
-        args.cutlass_workspace_size = ws_bytes;
-        GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+        args.tile_act_data = d_act;
+        args.tile_act_sf = d_act_sf;
+        args.tile_workspace = d_ws;
+        args.tile_workspace_size = ws_bytes;
+        GemmStrategy strat{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false};
         EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok) << "M=" << m;
         return to_host(d_y, m);
     }
@@ -107,7 +107,7 @@ struct PromptRowsRig {
         __half* d_y = nullptr;
         cudaMalloc(&d_y, size_t(small) * N * sizeof(__half));
         cudaMemsetAsync(d_act_sf, 0, sf_bytes, stream);
-        quantize_fp16_to_nvfp4_cutlass(tail(), d_act, d_act_sf, small, K, stream);
+        quantize_fp16_to_nvfp4_sfatom(tail(), d_act, d_act_sf, small, K, stream);
         EXPECT_TRUE(gemm_nvfp4_tile(d_act, d_act_sf, cw.data, cw.scale_factors, cw.tensor_scale, d_y, small,
                                     N, K, stream, variant, d_ws, ws_bytes))
             << "variant " << variant;

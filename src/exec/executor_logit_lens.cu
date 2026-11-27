@@ -106,10 +106,10 @@ bool GraphExecutor::logit_lens_readout(const std::vector<int32_t>& targets, int 
 
     const int64_t shape[2] = {n, d};
     const Tensor rows(lens_scratch_.get(), QType::F16, 2, shape, true);
-    // allow_cutlass=false: the FP16-activation head of batch-1 decode, so the last layer's row
+    // allow_w4a4_head=false: the FP16-activation head of batch-1 decode, so the last layer's row
     // reproduces the logprob the sampler saw.
     lm_rows_ = &rows;
-    for_each_lm_head_batch_(n, stream, /*allow_cutlass=*/false, [&](const Tensor& lg, int row0, int csz) {
+    for_each_lm_head_batch_(n, stream, /*allow_w4a4_head=*/false, [&](const Tensor& lg, int row0, int csz) {
         prompt_logprobs_rows(static_cast<const float*>(lg.data), csz, cfg.vocab_size, cfg.vocab_size,
                              d_tgt + row0, top_n, d_lp + row0, d_rank + row0,
                              top_n > 0 ? d_top_ids + (static_cast<int64_t>(row0) * top_n) : nullptr,

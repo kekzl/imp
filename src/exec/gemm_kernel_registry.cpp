@@ -13,7 +13,7 @@ GemmKernelRegistry& GemmKernelRegistry::instance() {
     static const bool registered = [] {
         register_generic_dequant_gemm_kernels(registry);
         register_gguf_gemm_kernels(registry);
-        register_cutlass_nvfp4_gemm_kernels(registry);
+        register_nvfp4_sfatom_gemm_kernels(registry);
         return true;
     }();
     (void)registered;

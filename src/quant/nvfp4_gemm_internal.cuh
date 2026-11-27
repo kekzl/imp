@@ -61,7 +61,7 @@ __device__ __forceinline__ float norm_fold_scale(const NvFP4NormFoldIn& f) {
 }
 
 // fp8_e4m3_to_float_fast moved to quant/fp8_utils.cuh (shared with MXFP4 +
-// CUTLASS block-scale kernels). Single correct implementation, denorm-safe.
+// SfAtom block-scale kernels). Single correct implementation, denorm-safe.
 
 // Processes one micro-block (8 packed bytes = 16 FP4 values), returns the unscaled dot
 // product sum(dequant(nibble)*activation). HW FP4 decode via cvt.rn.f16x2.e2m1x2 (one PTX

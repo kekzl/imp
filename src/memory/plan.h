@@ -34,7 +34,7 @@ struct ModelShape {
     // Σ device bytes of the uploaded weights, as the loader will place them.
     size_t weight_bytes = 0;
     // Σ device bytes of the pre-dequant weight caches this checkpoint wants
-    // (FP16 / FP8 / NVFP4 / CUTLASS-SF). Computed by the caller from the same
+    // (FP16 / FP8 / NVFP4 / SfAtom). Computed by the caller from the same
     // predicate the phases use, so the estimate and the build cannot drift.
     size_t weight_cache_bytes = 0;
     // Mandatory subset of weight_cache_bytes: without it, decode falls off the

@@ -3,7 +3,7 @@
 #include "compute/dispatch_paths.h"  // MoePrefillPath
 
 // Pure host-side model of the MoE-prefill GEMM path selection in
-// executor_forward_moe_cutlass.cpp (grouped-GEMM-vs-fallback routing, PR #574/#547), so
+// executor_forward_moe_grouped.cpp (grouped-GEMM-vs-fallback routing, PR #574/#547), so
 // it's covered by a cheap CPU unit test instead of E2E-only. Only the gates pick which
 // path runs; the caller supplies, per tier, whether that tier's device workspace is populated.
 
@@ -17,17 +17,17 @@ namespace imp {
 // conjunctions in the .cpp. When false, that tier's preconditions are not met
 // and selection falls through to the next tier.
 struct MoePrefillWorkspace {
-    // try_run_moe_cutlass3x_nvfp4_prefill_ returns false (whole-function LEGACY) unless the
+    // try_run_moe_grouped_nvfp4_prefill_ returns false (whole-function LEGACY) unless the
     // grouped NVFP4 GEMM serves the layer shapes AND packed/scale workspace + per-expert NVFP4
     // tier coverage are all present. Collapses gemm_grouped_nvfp4_moe_supports() +
-    // cutlass3x_packed/sf + covers_ids(), checked before device-args, gating it too.
+    // grouped_packed/sf + covers_ids(), checked before device-args, gating it too.
     bool grouped_available = false;
-    bool device_args_ready = false;  // cutlass3x device-args buffers all populated
+    bool device_args_ready = false;  // grouped NVFP4 device-args buffers all populated
     bool grouped_ready = false;      // host-args grouped path can run this layer
     bool staged_blocks = false;      // host-expert staged prefill (ctx.staged_blocks)
 };
 
-// Reproduces the path selection in try_run_moe_cutlass3x_nvfp4_prefill_. expert_bias_glu
+// Reproduces the path selection in try_run_moe_grouped_nvfp4_prefill_. expert_bias_glu
 // (ModelProfile::moe_expert_bias_glu, gpt-oss) runs device-args unstaged (bias + GPT_OSS_GLU + plain
 // quantize, #2116); staged it stays off device-args.
 inline MoePrefillPath select_moe_prefill_path(bool expert_bias_glu, const MoePrefillWorkspace& ws) {

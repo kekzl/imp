@@ -134,7 +134,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // 1. Save residual + RMSNorm
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     // Producer fusion: quantizes into the small-M scratch inside the norm
-    // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
+    // kernel when ssm_in will take that route (batched decode, NVFP4_SFATOM
     // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, ctx.mode, stream, norm_w_off_);
 
@@ -382,7 +382,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     if (!skip_residual_save)
         device_copy_async(r.data, h.data, h.nbytes(), stream);
     // Producer fusion: quantizes into the small-M scratch inside the norm
-    // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
+    // kernel when ssm_in will take that route (batched decode, NVFP4_SFATOM
     // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
     // M=1 decode 4-way input fusion: when the load-time pack succeeded, runs a
     // single GEMV against [conv_channels+inner+2*n_heads, d_model] and slices
@@ -606,8 +606,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // scratch with no GEMM dispatches in between, so mark it shared (the
             // dispatch verifies against its scratch tag before skipping).
             GemmContext gate_ctx = q8_reuse_ctx;
-            if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n, ctx.mode) &&
-                prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n, ctx.mode))
+            if (n > 1 && prefill_routes_nvfp4_sfatom_(ly.ssm_in_id, n, ctx.mode) &&
+                prefill_routes_nvfp4_sfatom_(ly.gdn_gate_id, n, ctx.mode))
                 gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
             gemm_via_handle_(ly.gdn_gate_id, no, gate_out, gate_ctx);
         }

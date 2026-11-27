@@ -36,9 +36,9 @@ const AttnDecodePath kAllDecode[] = {
     AttnDecodePath::INT4,  AttnDecodePath::NVFP4, AttnDecodePath::MXFP4_KV,
 };
 const MoePrefillOuter kAllMoeOuter[] = {
-    MoePrefillOuter::UNSET,       MoePrefillOuter::NONE,      MoePrefillOuter::FP16_BATCH,
-    MoePrefillOuter::FP8_BATCH,   MoePrefillOuter::CUTLASS3X, MoePrefillOuter::NVFP4_DEQUANT,
-    MoePrefillOuter::LEGACY,      MoePrefillOuter::FUSED_Q6K, MoePrefillOuter::FUSED_Q4K_DP4A,
+    MoePrefillOuter::UNSET,     MoePrefillOuter::NONE,          MoePrefillOuter::FP16_BATCH,
+    MoePrefillOuter::FP8_BATCH, MoePrefillOuter::GROUPED_NVFP4, MoePrefillOuter::NVFP4_DEQUANT,
+    MoePrefillOuter::LEGACY,    MoePrefillOuter::FUSED_Q6K,     MoePrefillOuter::FUSED_Q4K_DP4A,
 };
 const MoePrefillPath kAllMoeTiers[] = {
     MoePrefillPath::DEVICE_ARGS,
@@ -189,8 +189,8 @@ TEST(DispatchRecord, DenseKeepsLastAndEverySeenExitPerKind) {
 }
 
 // The two-level paths (outer → tier) must report the tier only once it was
-// really recorded, otherwise the summary would claim a CUTLASS tier for a
-// model that never reached the CUTLASS branch.
+// really recorded, otherwise the summary would claim a grouped NVFP4 tier for a
+// model that never reached the grouped NVFP4 branch.
 TEST(DispatchRecord, TierFlagsTrackTheirSetters) {
     dispatch_record::reset();
     const auto& r = dispatch_record::current();
@@ -201,7 +201,7 @@ TEST(DispatchRecord, TierFlagsTrackTheirSetters) {
     EXPECT_TRUE(r.attn_prefill_tier_set);
     EXPECT_EQ(r.attn_prefill_tier, AttnPrefillPath::FA2);
 
-    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::CUTLASS3X);
+    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::GROUPED_NVFP4);
     EXPECT_FALSE(r.moe_prefill_tier_set);
     dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
     EXPECT_TRUE(r.moe_prefill_tier_set);
