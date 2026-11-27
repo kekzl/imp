@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <utility>
 
 namespace imp {
 
@@ -26,32 +27,32 @@ void QuantPipeline::pre_dequant_phase4c_q8_planes_only_(const ModelConfig& cfg, 
     const size_t pool_before = release_on_free_pool_reserved(ReleasePool::Q8Sources);
     // A group (q/k/v, gate/up) goes only when every member has an overlay: with one missing, the
     // fused n == 1 dp4a path reads the source of every member (dp4a_qkv_route_, fused_ffn_norm).
-    auto release_group = [&](std::initializer_list<Tensor*> group) {
-        for (const Tensor* t : group)
-            if (t->data && !wcache_->nvfp4.contains(t->data))
+    auto release_group = [&](std::initializer_list<std::pair<Tensor*, TensorID>> group) {
+        for (const auto& member : group)
+            if (member.first->data && !wcache_->nvfp4.contains(member.first->data))
                 return;
-        for (Tensor* t : group) {
-            if (!t->data || t->dropped_source || t->qtype != QType::Q8_0 || t->ndim != 2 ||
-                !m->is_base_gpu_allocation(t->data))
+        for (const auto& [t, id] : group) {
+            if (!t->data || id == kInvalidTensorID || t->dropped_source || t->qtype != QType::Q8_0 ||
+                t->ndim != 2 || !m->is_base_gpu_allocation(t->data))
                 continue;
             if (!mmq_q8_imma_build_planes(t->data, static_cast<int>(t->shape[0]),
                                           static_cast<int>(t->shape[1]), stream))
                 continue;  // shape or plane budget: the source stays the prefill route
             wcache_->q8_source_freed_bytes += qtype_row_bytes(QType::Q8_0, t->shape[1]) *
                                               static_cast<size_t>(t->shape[0]);
-            wcache_->q8_planes_only.insert(t->data);
+            wcache_->q8_planes_only.insert(id);
             free_source_(*t, stream);
             ++freed;
         }
     };
     for (int i = 0; i < cfg.n_layers; ++i) {
         auto& L = m->layer(i);
-        release_group({&L.wq, &L.wk, &L.wv});
-        release_group({&L.wo});
-        release_group({&L.w_gate, &L.w_up});
-        release_group({&L.w_down});
-        release_group({&L.w_gate_shared, &L.w_up_shared});
-        release_group({&L.w_down_shared});
+        release_group({{&L.wq, L.wq_id}, {&L.wk, L.wk_id}, {&L.wv, L.wv_id}});
+        release_group({{&L.wo, L.wo_id}});
+        release_group({{&L.w_gate, L.w_gate_id}, {&L.w_up, L.w_up_id}});
+        release_group({{&L.w_down, L.w_down_id}});
+        release_group({{&L.w_gate_shared, L.w_gate_shared_id}, {&L.w_up_shared, L.w_up_shared_id}});
+        release_group({{&L.w_down_shared, L.w_down_shared_id}});
     }
     if (freed == 0)
         return;

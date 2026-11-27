@@ -298,7 +298,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     // diagnostics.no_nvfp4_decode_cache skips steps that BUILD decode-cache entries. It must
     // NOT skip the SfAtom/MXFP4 conversions further down: those only re-lay-out weights
     // phase 0 already registered, populating wcache_->nvfp4_sfatom, which
-    // infer_tier_from_wcache reads to set prefill_tier. Returning early here took the whole
+    // plan_handle_tiers reads to set prefill_tier. Returning early here took the whole
     // SfAtom prefill cache with it, silently moving dense FFN prefill from W4A4 to the
     // gemm_nvfp4 W4A16 safety net.
     const bool skip_decode_cache = dispatch_policy().diagnostics.no_nvfp4_decode_cache;
