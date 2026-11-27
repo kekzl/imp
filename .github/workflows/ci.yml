@@ -73,7 +73,7 @@ jobs:
       # Ubuntu 26.04, GCC 15.2: same libstdc++ 15 as the release image (#903).
       # Empty image = the runner itself (ubuntu-26.04, same python3): only for code=false, where
       # every toolchain step below is skipped and only the static gates run.
-      image: ${{ needs.changes.outputs.code != 'false' && 'ghcr.io/kekzl/imp-ci:cuda13.5@sha256:db036c56c3dc6ce82caea0f3afb54e82373f98a19c457676fd239047f005f81e' || '' }}
+      image: ${{ needs.changes.outputs.code != 'false' && 'ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d' || '' }}
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -188,36 +188,14 @@ jobs:
           ccache -p | head -20 || true
           ccache -z
 
-      # Build cache: FetchContent _deps clones + CMake config state. ccache
-      # handles object files separately. Restore-keys fall back to older
-      # caches when src changes; ninja then incrementally rebuilds and
-      # ccache provides per-TU hits even when the build cache misses.
-      # Saved on push to main only; PRs restore (main's entry via restore-keys).
-      # The post-step save cost ~27 s of the required Build check on every PR run.
-      - name: Cache build directory
-        if: steps.changes.outputs.code == 'true' && github.event_name == 'push'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build
-          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
-          restore-keys: |
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
-      - name: Restore build directory (no save)
-        if: steps.changes.outputs.code == 'true' && github.event_name != 'push'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build
-          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
-          restore-keys: |
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
-
+      # No build-directory cache: the restored build/ saved no compile call (the fresh checkout's
+      # mtimes are newer than its objects, ccache served all 1097 TUs either way) and cost a 10 s
+      # restore per PR, a 38 s save and 452 MB per push. FetchContent reads the image's /deps
+      # (scripts/ci_dep_dirs.sh) instead of cloning.
       - name: Configure
         if: steps.changes.outputs.code == 'true'
         run: |
+          # shellcheck disable=SC2046 # one -D per word
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DIMP_BUILD_TESTS=ON \
@@ -226,7 +204,8 @@ jobs:
             -DIMP_DISABLE_120F_FALLBACK=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache"
+            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache" \
+            $(sh scripts/ci_dep_dirs.sh)
           # CMakeLists.txt pins arch=compute_120a,code=sm_120a directly via
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. IMP_DISABLE_120F_FALLBACK=ON
           # builds the sm_120a SASS only (no compute_120f PTX fallback) — CI just
@@ -655,7 +634,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     container:
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:db036c56c3dc6ce82caea0f3afb54e82373f98a19c457676fd239047f005f81e
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d
     defaults:
       run:
         shell: bash
@@ -714,6 +693,7 @@ jobs:
       - name: Configure with the fallback on
         if: steps.scope.outputs.run == 'true'
         run: |
+          # shellcheck disable=SC2046 # one -D per word
           cmake -B build-ptx \
             -DIMP_DISABLE_120F_FALLBACK=OFF \
             -DCMAKE_BUILD_TYPE=Release \
@@ -723,7 +703,8 @@ jobs:
             -DIMP_BUILD_BENCH=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            $(sh scripts/ci_dep_dirs.sh)
 
       - name: Build the device library
         if: steps.scope.outputs.run == 'true'
@@ -765,7 +746,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     container:
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:db036c56c3dc6ce82caea0f3afb54e82373f98a19c457676fd239047f005f81e
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
     # flags, so nothing here is shareable with the `Build` (Release) or
     # `PTX fallback` stores and a shared dir would only evict theirs.
@@ -837,25 +818,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cuda13.5-ccache-asan-
 
-      - name: Fetch pinned deps
-        if: steps.scope.outputs.run == 'true'
-        run: |
-          # Two separate traps, both hit on the way here. The pin line is
-          #   set(IMP_DEP_GOOGLETEST_SHA    063de7e9...  CACHE STRING "...")
-          # with RUN-LENGTH whitespace, so a pattern with one space matches
-          # nothing, grep exits 1 and `-e` kills the step with no message at
-          # all. And `grep | head -1` under `-o pipefail` is #1499: head closes
-          # the pipe, grep dies of EPIPE, the pipeline is non-zero even on a
-          # hit. `\s+` fixes the first, `-m1` instead of a pipe the second.
-          # By commit, not by tag: same pin as the Dockerfile (H-8).
-          GT="$(grep -m1 -oP 'IMP_DEP_GOOGLETEST_SHA\s+\K[^ )]+' cmake/imp-deps.cmake)"
-          test -n "$GT" || { echo "googletest pin not found in cmake/imp-deps.cmake"; exit 1; }
-          echo "googletest pin: $GT"
-          mkdir -p /deps/googletest
-          git -C /deps/googletest init -q
-          git -C /deps/googletest fetch -q --depth=1 https://github.com/google/googletest.git "$GT"
-          git -C /deps/googletest checkout -q FETCH_HEAD
-
       # No tools, no bench, no server: the same configuration `make asan` uses,
       # which is also why the five unconditional fuzz targets must not live in
       # the IMP_BUILD_SERVER block - the first version of them did, and the
@@ -863,6 +825,7 @@ jobs:
       - name: Build test-core + test-text with ASan/UBSan
         if: steps.scope.outputs.run == 'true'
         run: |
+          # shellcheck disable=SC2046 # one -D per word
           cmake -B build-asan -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DIMP_SANITIZERS=ON \
@@ -871,7 +834,7 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
-            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest
+            $(sh scripts/ci_dep_dirs.sh)
           # IMP_DISABLE_120F_FALLBACK=ON: the option defaults OFF, so this lane
           # was emitting the compute_120f PTX entry as well as the sm_120a SASS.
           # The `Build` job measured the second gencode at +53.1% device-compile

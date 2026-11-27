@@ -27,3 +27,18 @@ ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
 COPY --from=scripts install_llvm.sh /tmp/install_llvm.sh
 RUN bash /tmp/install_llvm.sh clang-tidy \
     && rm -rf /var/lib/apt/lists/* /tmp/install_llvm.sh
+
+# FetchContent sources at the commits of cmake/imp-deps.cmake (named context `pins`), /deps/PINS =
+# "<dir> <sha>" lines. scripts/ci_dep_dirs.sh points CMake here only where a pin matches, so a
+# stale image fetches instead of building an old dependency.
+COPY --from=pins imp-deps.cmake /tmp/imp-deps.cmake
+RUN set -eu; mkdir -p /deps; \
+    pin() { sha="$(sed -nE "s/^set\(IMP_DEP_$1_SHA[[:space:]]+([0-9a-f]{40}).*/\1/p" /tmp/imp-deps.cmake)"; \
+            test -n "$sha"; mkdir -p "/deps/$2"; git -C "/deps/$2" init -q; \
+            git -C "/deps/$2" fetch -q --depth=1 "$3" "$sha"; git -C "/deps/$2" checkout -q FETCH_HEAD; \
+            echo "$2 $sha" >> /deps/PINS; }; \
+    pin GOOGLETEST    googletest https://github.com/google/googletest.git; \
+    pin HTTPLIB       httplib    https://github.com/yhirose/cpp-httplib.git; \
+    pin NLOHMANN_JSON json       https://github.com/nlohmann/json.git; \
+    pin PCRE2         pcre2      https://github.com/PCRE2Project/pcre2.git; \
+    rm /tmp/imp-deps.cmake; cat /deps/PINS
