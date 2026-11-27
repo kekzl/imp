@@ -1503,6 +1503,11 @@ private:
     [[nodiscard]] bool decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs);
     [[nodiscard]] bool decode_kv_exhausted_(std::shared_ptr<Request>& req, int blocks_needed, int blocks_have,
                                             int ctx_len);
+    // The >90 % valve (arm StreamingLLM, or lift it) and the middle-block eviction (blocks freed).
+    // rescues: on an append that found the pool dry, arm and evict before the cancel; true = freed.
+    void kv_valve_check_();
+    int streaming_evict_(Request& req, int kv_bs);
+    [[nodiscard]] bool kv_valve_rescues_(Request& req, int kv_bs);
     // KV swap (#2486, engine_kv_swap.cpp): out = KV to pinned host + SWAPPED, in = blocks back;
     // false = nothing changed. wire: scheduler hook + admission mode. valve: never while swap answers.
     [[nodiscard]] bool kv_swap_supported_() const;
