@@ -2386,11 +2386,15 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         // strands everything already uploaded for the life of the process.
         size_t mtp_free = 0;
         const size_t mtp_need = mtp_upload_peak_bytes(*mtp_);
-        const size_t mtp_headroom = vram_allocator_headroom(vram_budget_total_bytes());
+        // The margin covers the reserve every head allocation is checked against (checked_cuda_malloc):
+        // a dense model whose batch fit trimmed the KV reserve to the free VRAM failed all 15 tensors of
+        // the Qwen3.8-27B-Q8_0 head after passing a headroom-only check (B-140).
+        const size_t mtp_headroom = std::max(vram_allocator_headroom(vram_budget_total_bytes()),
+                                             g_vram_reserve);
         // A failed query skips the head as well (vram_fits is false then).
         if (!vram_fits(mtp_need, mtp_headroom, 0, &mtp_free)) {
             IMP_LOG_WARN(
-                "MTP head: needs %zu MiB plus %zu MiB allocator headroom, %zu MiB free. "
+                "MTP head: needs %zu MiB plus %zu MiB upload reserve / allocator headroom, %zu MiB free. "
                 "Skipping the head, spec-decode disabled.",
                 mtp_need / (size_t{1024} * 1024), mtp_headroom / (size_t{1024} * 1024),
                 mtp_free / (size_t{1024} * 1024));
