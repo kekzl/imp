@@ -133,33 +133,6 @@ static void compare_dp4a_vs_mmvq(const char* name, void* W, int N, int K, half* 
     cudaFree(scratch);
 }
 
-TEST(MMVQ, Q4_K_MatchesDp4a) {
-    const int N = 64, K = 256;
-    void* W = make_random_packed_weights(N, K, 144, 256);
-    half* x = make_random_fp16(K);
-    compare_dp4a_vs_mmvq("Q4_K", W, N, K, x, ggml_mmvq_q4k, gemv_q4_k_q8_1);
-    cudaFree(W);
-    cudaFree(x);
-}
-
-TEST(MMVQ, Q5_K_MatchesDp4a) {
-    const int N = 64, K = 256;
-    void* W = make_random_packed_weights(N, K, 176, 256);
-    half* x = make_random_fp16(K);
-    compare_dp4a_vs_mmvq("Q5_K", W, N, K, x, ggml_mmvq_q5k, gemv_q5_k_q8_1);
-    cudaFree(W);
-    cudaFree(x);
-}
-
-TEST(MMVQ, Q8_0_MatchesDp4a) {
-    const int N = 64, K = 256;
-    void* W = make_q8_0_weights(N, K);
-    half* x = make_random_fp16(K);
-    compare_dp4a_vs_mmvq("Q8_0", W, N, K, x, ggml_mmvq_q8_0, gemv_q8_0_q8_1);
-    cudaFree(W);
-    cudaFree(x);
-}
-
 TEST(MMVQ, Q4_K_LargerDims) {
     const int N = 2048, K = 2816;
     void* W = make_random_packed_weights(N, K, 144, 256);

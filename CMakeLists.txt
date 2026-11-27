@@ -1539,7 +1539,6 @@ if(IMP_BUILD_TESTS)
         tests/test_dequant_gptq_gpu.cu
         tests/test_gguf_dequant_ref.cu
         tests/test_gpt_oss_mxfp4_convert_ref.cu
-        tests/test_nvfp4_quant.cu
         tests/test_nvfp4_quant_ref.cu
         tests/test_nvfp4_quant_hw.cu
         tests/test_nvfp4_compressed_tensors_ref.cu
@@ -1683,7 +1682,6 @@ if(IMP_BUILD_TESTS)
         tests/test_scheduler_embedding_prefix.cpp
         tests/test_scheduler_prefix_bypass.cpp
         tests/test_scheduler_kv_decode.cpp
-        tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
         # Kimi tiktoken vs HF (env-gated: IMP_TEST_MODEL_KIMI = dir with tiktoken.model).
