@@ -25,7 +25,7 @@
             // 1. Attention RMSNorm: norm_out = rmsnorm(hidden, attn_norm).
             // Helper (with no small-M consumer named) keeps the producer-
             // quantize tag honest when this arm rewrites a tagged buffer.
-            rmsnorm_for_smallm_(h, ly.attn_norm, no, kInvalidTensorID, n, eps, stream, norm_w_off_);
+            rmsnorm_for_smallm_(h, ly.attn_norm, no, kInvalidTensorID, n, eps, ctx.mode, stream, norm_w_off_);
 
             const int kv_lora_rank   = cfg.kv_lora_rank;
             const int rope_dim       = cfg.qk_rope_head_dim;
@@ -118,13 +118,13 @@
         // NVFP4 decode path uses FP16 input (no Q8_1 quantization). Two sources:
         // primary NVFP4 storage tier (native models), and the secondary NVFP4
         // decode cache for Q8_0/Q6_K/Q5_K models (c8763ad regressed this fallback; restored by also probing
-        // wcache_.nvfp4).
-        auto nv_q_it = wcache_.nvfp4.find(ly.wq.data);
-        auto nv_k_it = wcache_.nvfp4.find(ly.wk.data);
-        auto nv_v_it = wcache_.nvfp4.find(ly.wv.data);
-        const bool nv_q_secondary = (nv_q_it != wcache_.nvfp4.end());
-        const bool nv_k_secondary = (nv_k_it != wcache_.nvfp4.end());
-        const bool nv_v_secondary = (nv_v_it != wcache_.nvfp4.end());
+        // wcache_.nvfp4, now the handle's entry).
+        const NvFP4CacheEntry* nv_q_e = nvfp4_entry_of(mxfp4_hwq);
+        const NvFP4CacheEntry* nv_k_e = nvfp4_entry_of(mxfp4_hwk);
+        const NvFP4CacheEntry* nv_v_e = nvfp4_entry_of(mxfp4_hwv);
+        const bool nv_q_secondary = (nv_q_e != nullptr);
+        const bool nv_k_secondary = (nv_k_e != nullptr);
+        const bool nv_v_secondary = (nv_v_e != nullptr);
         const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4) ||
                                  nv_q_secondary;
         const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4) ||
@@ -170,8 +170,8 @@
         } else if (nvfp4_qkv) {
             // NVFP4 fused QKV: RMSNorm to FP16 (or folded into the producer), then NVFP4 GEMV
             // QSA decode reads the normalised `no` after this GEMV: no fold on its layers.
-            const NvFP4NormFoldIn qkv_fold =
-                norm_fold_or_norm_(!qsa_layer_(layer), h, ly.attn_norm, no, kInvalidTensorID, n, eps, stream);
+            const NvFP4NormFoldIn qkv_fold = norm_fold_or_norm_(!qsa_layer_(layer), h, ly.attn_norm, no,
+                                                                kInvalidTensorID, n, eps, ctx.mode, stream);
             // Pick the NvFP4QuantResult: secondary cache (Q8_0+NVFP4-decode) is
             // already a populated struct; primary-tier handle needs reconstruction.
             auto from_handle = [](const WeightHandle* hw) {
@@ -185,9 +185,9 @@
                 tmp.K = static_cast<int>(hw->shape[1]) * 2;
                 return tmp;
             };
-            NvFP4QuantResult nv_q = nv_q_secondary ? nv_q_it->second : from_handle(mxfp4_hwq);
-            NvFP4QuantResult nv_k = nv_k_secondary ? nv_k_it->second : from_handle(mxfp4_hwk);
-            NvFP4QuantResult nv_v = nv_v_secondary ? nv_v_it->second : from_handle(mxfp4_hwv);
+            NvFP4QuantResult nv_q = nv_q_secondary ? NvFP4QuantResult(*nv_q_e) : from_handle(mxfp4_hwq);
+            NvFP4QuantResult nv_k = nv_k_secondary ? NvFP4QuantResult(*nv_k_e) : from_handle(mxfp4_hwk);
+            NvFP4QuantResult nv_v = nv_v_secondary ? NvFP4QuantResult(*nv_v_e) : from_handle(mxfp4_hwv);
             int q_rows = nv_q.N;
             int k_rows = nv_k.N;
             int v_rows = nv_v.N;
@@ -220,14 +220,14 @@
             // Norm fold: only try_attn_qkv_fused_m1_ below reads a folded `no` (n == 1).
             NvFP4NormFoldIn m1_fold{};
             if (using_fp32_accum && prof.fp32_residual_norms) {
-                fp32_attn_norm_(layer, no, n, eps, stream);
+                fp32_attn_norm_(layer, no, n, eps, ctx.mode, stream);
             } else {
                 // Producer fusion: quantize into the small-M scratch inside
                 // the norm kernel when Q will take that route (batched
                 // decode, CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
                 m1_fold = norm_fold_or_norm_(attn_norm_fold_rows(n, fp8_qkv_rows) && !qsa_layer_(layer) &&
                                                  ly.wv.data != nullptr,
-                                             h, ly.attn_norm, no, ly.wq_id, n, eps, stream);
+                                             h, ly.attn_norm, no, ly.wq_id, n, eps, ctx.mode, stream);
             }
 
             // q/k/v share the quantized input: all three GEMMs take the scale it was quantized with.
@@ -248,7 +248,7 @@
                 const float* const s3[3] = {fp8_hwq->payload.fp8.d_scale, fp8_hwk->payload.fp8.d_scale,
                                             fp8_hwv->payload.fp8.d_scale};
                 const TensorID i3[3] = {ly.wq_id, ly.wk_id, ly.wv_id};
-                gemm_fp8x8_multi_(i3, fp8_no, w3, o3, s3, 3, fp8_a_scale, stream);
+                gemm_fp8x8_multi_(i3, fp8_no, w3, o3, s3, 3, fp8_a_scale, ctx.mode, stream);
             } else {
                 // Fused K+V path: one strided batched GEMM for both projections, looked
                 // up via WeightRegistry handle (wcache_ is the storage owner only, not the
@@ -304,7 +304,8 @@
                     // nvfp4_qkv path above already fuses): q|k|v in one
                     // NVFP4 GEMV launch instead of three.
                     if (!qkv_multi && n == 1 && ly.wv.data != nullptr)
-                        qkv_multi = try_attn_qkv_fused_m1_(ly, no, q_target, kk, vv, stream, m1_fold);
+                        qkv_multi = try_attn_qkv_fused_m1_(ly, no, q_target, kk, vv, ctx.mode, stream,
+                                                           m1_fold);
                     if (!qkv_multi && m1_fold.ssq)
                         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
                     // GGUF twin: q|k|v of mixed qtypes in one dp4a launch, one quantize.

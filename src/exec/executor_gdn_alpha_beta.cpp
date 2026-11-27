@@ -153,9 +153,9 @@ static bool gdn_ab_rows(const TransformerLayer& ly, const Registry& reg, int64_t
 }
 
 bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
-                                            Tensor& gate_out, int n_heads, cudaStream_t stream,
-                                            const NvFP4NormFoldIn& fold) {
-    if (cur_mode_.spec_verify || calib_ || n_heads <= 0)
+                                            Tensor& gate_out, int n_heads, const GemmMode& mode,
+                                            cudaStream_t stream, const NvFP4NormFoldIn& fold) {
+    if (!m1_fusion_mode_ok(mode) || calib_ || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -199,10 +199,11 @@ int GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor&
     Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
     // M=1: in_proj, gate, alpha and beta in one GEMV
     // launch; alpha/beta land in the 4-call layout of step 4 of run_gdn.
-    if (try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
+    if (try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, ctx.mode, stream, in_fold))
         return kGdnM1Fused | kGdnGateDone;
     // FP8 in/gate (mixed NVFP4 + FP8 checkpoints): the same four projections on the folded row.
-    if (in_fold.ssq && try_gdn_input_fp8_fold_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
+    if (in_fold.ssq &&
+        try_gdn_input_fp8_fold_m1_(ly, no, proj, gate_early, n_heads, ctx.mode, stream, in_fold))
         return kGdnM1Fused | kGdnGateDone;
     if (in_fold.ssq)
         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
@@ -319,10 +320,11 @@ bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int
     return record_dense_if_(true, ids, n, DensePath::DP4A_MULTI_M1);
 }
 
-bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const {
+bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h,
+                                            const GemmMode& mode) const {
     if (n != 1 || h.qtype != QType::F16)
         return false;
-    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr)
+    if (!m1_fusion_mode_ok(mode) || calib_ || lora_ != nullptr)
         return false;
     NvFP4QuantResult w;
     if (nvfp4_decode_weight_(ly.ssm_out_id, w))
@@ -351,9 +353,9 @@ bool GraphExecutor::fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const {
 }
 
 bool GraphExecutor::try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
-                                               Tensor& gate_out, int n_heads, cudaStream_t stream,
-                                               const NvFP4NormFoldIn& fold) {
-    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr || n_heads <= 0)
+                                               Tensor& gate_out, int n_heads, const GemmMode& mode,
+                                               cudaStream_t stream, const NvFP4NormFoldIn& fold) {
+    if (!m1_fusion_mode_ok(mode) || calib_ || lora_ != nullptr || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -437,9 +439,9 @@ void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, 
 }
 
 bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out,
-                                           Tensor& k_out, Tensor& v_out, cudaStream_t stream,
-                                           const NvFP4NormFoldIn& fold) {
-    if (cur_mode_.spec_verify || calib_)
+                                           Tensor& k_out, Tensor& v_out, const GemmMode& mode,
+                                           cudaStream_t stream, const NvFP4NormFoldIn& fold) {
+    if (!m1_fusion_mode_ok(mode) || calib_)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || q_out.qtype != QType::F16 ||
         k_out.qtype != QType::F16 || v_out.qtype != QType::F16)

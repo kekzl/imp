@@ -172,7 +172,8 @@ void GraphExecutor::run_kda(int layer, const InferenceState& state, cudaStream_t
     Tensor r = view_tokens(residual_, n);
     Tensor no = block_norm_view_(n);
     device_copy_async(r.data, h.data, h.nbytes(), stream);
-    rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, cfg.rms_norm_eps, stream, norm_w_off_);
+    rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, cfg.rms_norm_eps, ctx.mode, stream,
+                        norm_w_off_);
 
     // Kimi-Linear: NVFP4 q / k / v (three global scales) as three GEMMs, f and the gate as LoRA pairs.
     const bool split_qkv = ly.kda_k_proj_id != kInvalidTensorID;

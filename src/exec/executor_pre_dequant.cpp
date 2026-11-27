@@ -15,6 +15,7 @@
 #include "core/fallback_site.h"
 #include "core/logging.h"
 #include "exec/storage_planner.h"
+#include "exec/weight_tier_entries.h"
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -265,6 +266,10 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // --- Phase 4c: dense Q8_0 keeps its IMMA planes and NVFP4 overlay, not the source ---
     pre_dequant_phase4c_q8_planes_only_(cfg, stream);
 
+    // 4b / 4c keyed released_fp8_view and q8_planes_only after registration: rebind (audit D-3).
+    for (TensorID id = 0; id < static_cast<TensorID>(registry_->size()); ++id)
+        bind_cache_entries(registry_->handle(id), *wcache_);
+
     // MemAccount per-pool attribution (vram_audit diagnostic): the caches
     // above allocate via raw cudaMallocAsync, invisible to VRAMAllocator, so
     // note the build totals here — one note per cache family; ~QuantPipeline takes them back
@@ -307,19 +312,16 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
         out = wcache_.mtp_lm_head_nvfp4;
         return true;
     }
-    const Tensor& lm = model_->output_proj();
-    if (!lm.data)
-        return false;
-    if (wcache_.fp8.contains(lm.data))
-        return false;
-    auto it = wcache_.nvfp4.find(lm.data);
-    if (it != wcache_.nvfp4.end()) {
-        out = it->second;
-        return true;
-    }
-    if (model_->out_proj_id == kInvalidTensorID)
+    // A head with data has a handle (Phase 4 registers every non-null tensor).
+    if (!model_->output_proj().data || model_->out_proj_id == kInvalidTensorID)
         return false;
     const WeightHandle& h = registry_.handle(model_->out_proj_id);
+    if (h.entries.fp8 != nullptr)
+        return false;
+    if (h.entries.nvfp4 != nullptr) {
+        out = *h.entries.nvfp4;
+        return true;
+    }
     if (h.primary_tier != StorageTier::NVFP4 || h.payload.nvfp4.data == nullptr)
         return false;
     out.packed_data  = h.payload.nvfp4.data;

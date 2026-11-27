@@ -9,6 +9,7 @@
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_debug.h"
 #include "exec/gemm_context.h"
+#include "exec/weight_tier_entries.h"
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -206,7 +207,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                : StorageTier::Undefined;
     // NVFP4 wo: primary tier OR Phase-3 secondary NVFP4 decode cache
     // (Q8_0/Q6_K/Q5_K models). c8763ad refactor dropped the secondary check.
-    const bool wo_nvfp4_secondary = (wcache_.nvfp4.contains(ly.wo.data));
+    const NvFP4CacheEntry* wo_nv_e = (ly.wo_id != kInvalidTensorID) ? registry_.handle(ly.wo_id).entries.nvfp4
+                                                                    : nullptr;
+    const bool wo_nvfp4_secondary = (wo_nv_e != nullptr);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
                               (wo_tier == StorageTier::NVFP4 || wo_nvfp4_secondary));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
@@ -655,7 +658,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // primary-tier handle needs reconstruction.
         NvFP4QuantResult wo_nvfp4;
         if (wo_nvfp4_secondary) {
-            wo_nvfp4 = wcache_.nvfp4.at(ly.wo.data);
+            wo_nvfp4 = *wo_nv_e;
         } else {
             const WeightHandle& wo_h = registry_.handle(ly.wo_id);
             wo_nvfp4.packed_data = wo_h.payload.nvfp4.data;
@@ -690,8 +693,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int64_t wshape[2] = {wo_h.shape[0], wo_h.shape[1]};
             Tensor fp8_wo(wo_h.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
             Tensor fp8_ao(qscratch_.fp8_act.get(), QType::FP8_E4M3, ao.ndim, ao.shape, true);
-            record_dense_({ly.wo_id},
-                          gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, a, wo_h.payload.fp8.d_scale, stream));
+            record_dense_({ly.wo_id}, gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, a, wo_h.payload.fp8.d_scale,
+                                                  ctx.mode, stream));
         } else {
             gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
         }
@@ -762,7 +765,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 }
             }
             // Fused with the residual save and the MoE pre-norm where it can be (executor_fp32_residual.cpp).
-            fp32_post_attn_(layer, po, h, fp32_h, n, post_eps, stream);
+            fp32_post_attn_(layer, po, h, fp32_h, n, post_eps, ctx.mode, stream);
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }
@@ -782,7 +785,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             const bool fuse_ffn_norm = layer_has_dense_ffn(layer) && !layer_has_moe(layer) &&
                                        ly.o_bias.data == nullptr && !debug_attn_steps;
             if (!(fuse_ffn_norm && add_norm_for_smallm_(po, r, h, ffn_norm_weight_(ly), no, ly.w_gate_id, n,
-                                                        model_->config().rms_norm_eps, stream)))
+                                                        model_->config().rms_norm_eps, ctx.mode, stream)))
                 elementwise_add_store(po, r, h, stream);
         }
     }

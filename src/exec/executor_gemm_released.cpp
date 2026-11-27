@@ -18,12 +18,7 @@ void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& i
                                           const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
     if (M <= 32 && ctx.beta == 0.0f && output.qtype == QType::F16 && input.qtype == QType::F16) {
-        const FP8CacheEntry* e = h.entries.fp8;
-        if (e == nullptr) {
-            if (const auto v = wcache_.released_fp8_view.find(h.source_data);
-                v != wcache_.released_fp8_view.end())
-                e = &v->second;
-        }
+        const FP8CacheEntry* e = h.entries.fp8 != nullptr ? h.entries.fp8 : h.entries.released_fp8;
         const int64_t K = input.shape[1], N = output.shape[1];
         // Decode and spec verify (M <= 8): the M=1 GEMV per row, same bits as decode. Batch decode and
         // short prefill: one weight pass for all M rows.
@@ -48,13 +43,13 @@ void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& i
               "released_source_gemm_: no rebuild scratch for a %lld x %lld weight",
               static_cast<long long>(h.shape[0]), static_cast<long long>(h.shape[1]));
     void* w16 = wcache_.released_f16_scratch.get();
-    if (const auto mx = wcache_.cutlass_mxfp8_prefill.find(h.source_data); mx != wcache_.cutlass_mxfp8_prefill.end()) {
-        dequantize_mxfp8_cutlass_to_fp16(mx->second, w16, ctx.stream);
+    if (const CutlassMxFP8CacheEntry* mx = h.entries.mxfp8_prefill; mx != nullptr) {
+        dequantize_mxfp8_cutlass_to_fp16(*mx, w16, ctx.stream);
     } else {
-        const auto v = wcache_.released_fp8_view.find(h.source_data);
-        IMP_CHECK(v != wcache_.released_fp8_view.end(), "released_source_gemm_: no copy for a released %lld x %lld weight",
+        const FP8CacheEntry* v = h.entries.released_fp8;
+        IMP_CHECK(v != nullptr, "released_source_gemm_: no copy for a released %lld x %lld weight",
                   static_cast<long long>(h.shape[0]), static_cast<long long>(h.shape[1]));
-        dequantize_fp8_rows_async(v->second.weight.data, v->second.d_row_scales, w16, static_cast<int>(h.shape[0]),
+        dequantize_fp8_rows_async(v->weight.data, v->d_row_scales, w16, static_cast<int>(h.shape[0]),
                                   static_cast<int>(h.shape[1]), ctx.stream);
     }
     Tensor weight(w16, QType::F16, 2, h.shape, true);

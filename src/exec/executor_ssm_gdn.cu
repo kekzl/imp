@@ -124,19 +124,19 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     Tensor r = view_tokens(residual_, n);
     Tensor no = block_norm_view_(n);
 
-    // 1. Save residual + RMSNorm
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
-    // Producer fusion: quantizes into the small-M scratch inside the norm
-    // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
-    // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
-    rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
-
     // The verify mode in gemm_ctx_ is load-bearing here (missing until 2026-08-18): without
     // it ctx.spec_verify_small_m stays false, the M<=4 batched-GEMV branch
     // (#998/#1055) is unreachable, and every GDN projection in a speculative
     // verify chunk took the CUTLASS prefill path instead. FFN and attention
     // already threaded it; on a GDN hybrid this is 48 of 64 layers.
     auto ctx = gemm_ctx_(stream);
+
+    // 1. Save residual + RMSNorm
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+    // Producer fusion: quantizes into the small-M scratch inside the norm
+    // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
+    // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
+    rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, ctx.mode, stream, norm_w_off_);
 
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
@@ -378,7 +378,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // Save residual + RMSNorm; the M=1 out-projection with the residual in its epilogue
     // (gdn_out_residual_m1_ok_) never reads r, so skip the save there. Kernel copy, not
     // cudaMemcpyAsync: a memcpy node has no programmatic edge, cutting the PDL chain once per layer.
-    const bool skip_residual_save = !dump_hidden_dir() && gdn_out_residual_m1_ok_(ly, n, h);
+    const bool skip_residual_save = !dump_hidden_dir() && gdn_out_residual_m1_ok_(ly, n, h, ctx.mode);
     if (!skip_residual_save)
         device_copy_async(r.data, h.data, h.nbytes(), stream);
     // Producer fusion: quantizes into the small-M scratch inside the norm
@@ -393,7 +393,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                              (!ly.gdn_input_packed.dropped_source || compute_dtype_ == QType::F16);
     // Norm fold: only the M=1 fused NVFP4 input GEMV reads a folded `no`; if it declines, the
     // norm runs right before the fallback projections.
-    const NvFP4NormFoldIn in_fold = norm_fold_or_norm_(!fused_input, h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream);
+    const NvFP4NormFoldIn in_fold = norm_fold_or_norm_(!fused_input, h, ly.attn_norm, no, ly.ssm_in_id, n,
+                                                       eps, ctx.mode, stream);
     int packed_conv_channels = fused_input ? ly.gdn_packed_conv_channels : 0;
     int packed_inner = fused_input ? ly.gdn_packed_inner : 0;
     int packed_n_heads = fused_input ? ly.gdn_packed_n_heads : 0;
@@ -868,7 +869,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     // ssm_out projection [n,inner]->[n,d_model] + residual.
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    if (gdn_out_residual_m1_ok_(ly, n, h) && !dump_hidden_dir()) {
+    if (gdn_out_residual_m1_ok_(ly, n, h, ctx.mode) && !dump_hidden_dir()) {
         // M=1: h = out_proj(y) + h in the GEMV epilogue; the residual save above was skipped
         // under the same gate.
         gdn_out_residual_m1_(layer, ly, y_buf, h, stream);

@@ -442,10 +442,10 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
     // MXFP8 prefill copy of an F16 GDN projection (gemm.mxfp8_gdn_proj_prefill): the same
     // gate as the NVFP4 copy below, checked first. Quantizes the activation into the MXFP8
     // scratch on every call (ssm_in and gdn_gate share one input; the dedupe is a later lever).
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_mxfp8_prefill.contains(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && h.entries.mxfp8_prefill != nullptr) {
         const int Mp = static_cast<int>(input.shape[0]);
         const int Kp = static_cast<int>(input.shape[1]);
-        const auto& cw = wcache_.cutlass_mxfp8_prefill.find(h.source_data)->second;
+        const auto& cw = *h.entries.mxfp8_prefill;
         const auto& qs = qscratch_;
         bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                       !ctx.mode.spec_verify && h.source_qtype == QType::F16 &&
@@ -467,12 +467,11 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
     // tier split: on Qwen3.6-35B ssm_in and gdn_gate sit in no cache (tier Undefined) and
     // ssm_out carries the FP8 sidecar (tier FP16). Declines (beta=1, M<=32, spec verify, no
     // scratch) fall through to the route the handle had before.
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_nvfp4_prefill.contains(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && h.entries.nvfp4_prefill != nullptr) {
         const int Mp = static_cast<int>(input.shape[0]);
-        auto it = wcache_.cutlass_nvfp4_prefill.find(h.source_data);
         const bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                             nvfp4_prefill_copy_routes(h, Mp, ctx.mode.spec_verify, wcache_, qscratch_) &&
-                            dispatch_cutlass_nvfp4_prefill(it->second, input, output, ctx, Mp);
+                            dispatch_cutlass_nvfp4_prefill(*h.entries.nvfp4_prefill, input, output, ctx, Mp);
         log_nvfp4_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
             return DensePath::NVFP4_PREFILL_COPY;
@@ -708,7 +707,7 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
         // cuBLAS call). Other qtypes decline there; M = 1 keeps its route.
         const bool k_quant = h.source_qtype == QType::Q4_K || h.source_qtype == QType::Q5_K;
         if (prefill == StorageTier::FP16 && M <= 32 && (M >= 2 || k_quant) && h.source_data != nullptr &&
-            !wcache_.q8_planes_only.contains(h.source_data)) {  // dropped Q8_0 source
+            !h.entries.q8_planes_only) {  // dropped Q8_0 source
             Tensor w(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
             if (gemm_uncached_in_place(input, w, output, ctx, ctx.mode.decode_rows))
                 return DensePath::GGUF_IN_PLACE;
@@ -902,7 +901,7 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     if (input.qtype == QType::F16 && e.d_scale) {
         if (const Fp8ActScale a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
             Tensor fp8_in(qscratch_.fp8_act.get(), QType::FP8_E4M3, input.ndim, input.shape, true);
-            gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.stream);
+            gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.mode, ctx.stream);
             return;
         }
     }
@@ -924,14 +923,15 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
 }
 
 DensePath GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta,
-                                     Fp8ActScale a, const float* w_scale, cudaStream_t stream) {
+                                     Fp8ActScale a, const float* w_scale, const GemmMode& mode,
+                                     cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const int N = static_cast<int>(w8.shape[0]);
     const bool own_ok = out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() && a && w_scale;
     // gemm.fp8_smallm_max_m: decode rows only (prompt rows stay on the M-invariant Lt pin, #2152).
     const int smallm_max = dispatch_policy().gemm.fp8_smallm_max_m;
-    if ((cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= smallm_max && own_ok &&
+    if (fp8_smallm_mode_rows(mode, fp8x8_min_rows_) && M <= smallm_max && own_ok &&
         gemm_fp8_smallm(a8.data, w8.data, a.d, w_scale, beta, static_cast<half*>(out.data), M, N, K, stream,
                         a.per_row)) {
         static LogOnce logged;  // activity proof, once
@@ -965,12 +965,12 @@ DensePath GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor&
 
 void GraphExecutor::gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, const Tensor* w8,
                                       Tensor* const* out, const float* const* w_scale, int count,
-                                      Fp8ActScale a, cudaStream_t stream) {
+                                      Fp8ActScale a, const GemmMode& mode, cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const auto& g = dispatch_policy().gemm;
-    bool ok = (cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= g.fp8_smallm_max_m &&
-              a8.is_contiguous() && count >= 2 && count <= kFp8SmallMMaxSiblings;
+    bool ok = fp8_smallm_mode_rows(mode, fp8x8_min_rows_) && M <= g.fp8_smallm_max_m && a8.is_contiguous() &&
+              count >= 2 && count <= kFp8SmallMMaxSiblings;
     Fp8SmallMSibling t[kFp8SmallMMaxSiblings] = {};
     for (int i = 0; ok && i < count; ++i) {
         ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();
@@ -986,7 +986,7 @@ void GraphExecutor::gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, con
         return;
     }
     for (int i = 0; i < count; ++i)
-        record_dense_({ids[i]}, gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], stream));
+        record_dense_({ids[i]}, gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], mode, stream));
 }
 
 Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,

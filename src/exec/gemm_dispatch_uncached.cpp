@@ -349,7 +349,7 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
 
 void gguf_source_fallback(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx,
                           bool decode_rows) {
-    if (ctx.wcache == nullptr || !ctx.wcache->q8_planes_only.contains(h.source_data)) {
+    if (ctx.wcache == nullptr || !h.entries.q8_planes_only) {
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         gemm_dispatch_uncached_fallback(input, weight, output, ctx, decode_rows);
         return;
