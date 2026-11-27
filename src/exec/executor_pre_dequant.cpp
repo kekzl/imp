@@ -11,6 +11,7 @@
 #include "memory/vram_allocator.h"
 #include "core/kv_dtype.h"
 #include "exec/pre_dequant_internal.h"
+#include "core/dispatch_policy.h"
 #include "exec/quant_pipeline.h"
 #include "core/fallback_site.h"
 #include "core/logging.h"
@@ -266,9 +267,10 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // --- Phase 4c: dense Q8_0 keeps its IMMA planes and NVFP4 overlay, not the source ---
     pre_dequant_phase4c_q8_planes_only_(cfg, stream);
 
-    // 4b / 4c keyed released_fp8_view and q8_planes_only after registration: rebind (audit D-3).
+    // 4b / 4c keyed released_fp8_view and q8_planes_only by handle id after registration: bind
+    // those; the source-keyed entries stay as Phase 4 bound them, no lookup by a freed pointer (D-3).
     for (TensorID id = 0; id < static_cast<TensorID>(registry_->size()); ++id)
-        bind_cache_entries(registry_->handle(id), *wcache_);
+        bind_release_entries(registry_->handle(id), *wcache_);
 
     // MemAccount per-pool attribution (vram_audit diagnostic): the caches
     // above allocate via raw cudaMallocAsync, invisible to VRAMAllocator, so
@@ -359,9 +361,11 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // heads; quantized GGUF heads route through the phase-3 collector's
     // size/arch-gated auto rule. GDN/SSM hybrids keep FP16 unless nvfp4_lm_head_gdn.
     if (pre_dequant_internal::nvfp4_lm_head_enabled(
-            dispatch_policy(), /*quantized_source=*/false, model_->output_proj().qtype,
-            model_->profile().is_dense, cfg.d_model,
-            /*is_gdn_hybrid=*/false, pre_dequant_internal::fp8_lm_head_wanted(dispatch_policy(), *model_))) {
+            lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head), /*quantized_source=*/false,
+            model_->output_proj().qtype, model_->profile().is_dense, cfg.d_model,
+            /*is_gdn_hybrid=*/false,
+            pre_dequant_internal::fp8_lm_head_wanted(lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head),
+                                                     *model_))) {
         bool is_gdn = false;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);

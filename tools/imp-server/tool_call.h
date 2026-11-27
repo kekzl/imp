@@ -48,11 +48,16 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
 
 // tool_choice_is_enforceable (#1002): whether the loaded template family can enforce this
 // tool_choice through the decode FSM rather than degrade to a prompt sentence (#1592).
-// "required" -> CHATML only; {"function":{..}} -> CHATML, LLAMA3, HARMONY, GEMMA with the native
-// <|tool_call> token (Gemma-4; gemma-3 has none); "auto"/"none"/absent -> always true.
-// ToolChoiceEnforcement.HelperAgreesWithTheCollectors asserts this matches the collectors below.
+// "required" -> CHATML only; {"function":{..}} -> CHATML, LLAMA3, HARMONY; "auto"/"none"/absent ->
+// always true. ToolChoiceEnforcement.HelperAgreesWithTheCollectors asserts this matches the collectors.
 bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice,
                                 bool gemma_native_tool_call = false);
+
+// "required" and a named function on Gemma-4 (native <|tool_call> token) are served unconstrained and
+// parsed as "auto", as vLLM's gemma4 parser does (supports_required_and_named = False): a call to
+// another function comes back as that call, no call as content (B-143). gemma-3 keeps the #1592 400.
+bool tool_choice_runs_as_auto(imp::ChatTemplateFamily family, const json& tool_choice,
+                              bool gemma_native_tool_call);
 
 std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
                                                                          const json& tools,

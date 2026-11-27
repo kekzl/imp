@@ -1,5 +1,5 @@
 // diagnostics.no_nvfp4_decode_cache is a decode-only bisection knob but used to return early
-// before nvfp4_decode_convert_sfatom_ populated the PREFILL cache infer_tier_from_wcache
+// before nvfp4_decode_convert_sfatom_ populated the PREFILL cache plan_handle_tiers
 // reads, silently moving native-NVFP4 prefill W4A4->W4A16 (PPL on
 // Nemotron-3.5-Lightning-30B-A3B-NVFP4: 9.165 -> 9.051). Runs on the smallest
 // SfAtom-converting checkpoint on the box; GTEST_SKIPs if absent.
@@ -78,7 +78,7 @@ TEST(Nvfp4PrefillCacheKnobTest, DecodeKnobKeepsTheSfAtomPrefillCache) {
 
     EXPECT_NE(log.find("CUTLASS sm_120 NVFP4 weight cache:"), std::string::npos)
         << "diagnostics.no_nvfp4_decode_cache skipped the SfAtom *prefill* conversion. "
-           "It is declared decode-only, and infer_tier_from_wcache reads nvfp4_sfatom to "
+           "It is declared decode-only, and plan_handle_tiers reads the nvfp4_sfatom entry to "
            "set prefill_tier, so this silently changes prefill numerics. Captured log:\n"
         << log;
 

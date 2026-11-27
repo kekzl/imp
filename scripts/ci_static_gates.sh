@@ -117,6 +117,12 @@ if want deps; then
     run "that gate still names its violations"        bash scripts/check_dep_pins.sh --selftest
 fi
 
+# The path rule of verify-fast's Inkling leg (B-142): Inkling and KV/BlockPool/scheduler/memory on, docs off.
+if want inkling-leg; then
+    echo "== Inkling leg rule =="
+    run "verify-fast Inkling leg path rule" bash scripts/inkling_leg.sh --selftest
+fi
+
 # The Sanitizers PR path filter reads tools/untrusted_input_sources.txt. As a regex in ci.yml it
 # missed 4 parser files on 2026-11-24 (AUDIT_ARCH_2026_11_24 X-5).
 if want untrusted; then
@@ -217,6 +223,12 @@ if want layering; then
     run "backward layer includes pinned"        python3 tools/check_layering.py
     run "that gate still classifies its cases"  python3 tools/check_layering.py --selftest
     run "make refs still rewrites nvcc for clangd" python3 tools/clangd_refs.py --selftest
+    # C-9 / B-129: init resolves into rt_, config_ keeps the operator's (27 writes on 2026-11-27).
+    run "Engine::config_ written by no one"     python3 tools/check_engine_config_writes.py
+    run "that gate still catches its cases"     python3 tools/check_engine_config_writes.py --selftest
+    # X-4 / B-123: no header hands every config section to its includers (gemm.h fan-in 139 -> 95 TUs).
+    run "config headers behind a narrow fan-in" python3 tools/check_config_fanin.py
+    run "that gate still catches its cases"     python3 tools/check_config_fanin.py --selftest
 fi
 
 if want citations; then

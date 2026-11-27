@@ -3,6 +3,8 @@
 // per-layer NVFP4 device-args caches for the MoE prefill fast path.
 
 #include "exec/executor.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/speculative.h"
 #include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -21,8 +23,7 @@
 #include <vector>
 #include <utility>
 
-using imp::pre_dequant_internal::borrow_payload_from_wcache;
-using imp::pre_dequant_internal::infer_tier_from_wcache;
+using imp::pre_dequant_internal::borrow_payload_from_entries;
 
 namespace imp {
 
@@ -76,61 +77,29 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     auto register_tensor = [&](const Tensor& t, TensorKind kind) -> TensorID {
         if (!t.data)
             return kInvalidTensorID;
-        StorageTier tier = infer_tier_from_wcache(*wcache_, t.data);
-        // FP8 decode SIDECAR: the wcache fp8 entry must not become the
-        // primary tier; prefill and M>1 verify chunks stay on the full-precision source, only
-        // the M=1 decode GEMV takes the FP8 copy. Demote BEFORE the payload borrow below, or the
-        // union would carry an fp8 payload into FP16 paths.
-        // Sidecar detection: a native F16 resident with an fp8 entry is always the sidecar (the
-        // phase-2 prefill cache never keys F16 sources). A quantized (GGUF) source is the
-        // sidecar only when the entry carries per-row scales (the phase-2 FP8 prefill cache
-        // keys quantized sources with a per-tensor scale and must stay primary). A native-FP8
-        // source (Modelopt) is a sidecar only beside an FP16 companion (native FP8 prefill
-        // off); without one it is primary and prefill runs FP8 x FP8.
-        bool fp8_decode_sidecar = false;
-        if (tier == StorageTier::FP8) {
-            auto it = wcache_->fp8.find(t.data);
-            const bool native = it != wcache_->fp8.end() && it->second.native_source;
-            if (native) {
-                fp8_decode_sidecar = wcache_->fp16.contains(t.data);
-            } else if (t.qtype == QType::F16) {
-                fp8_decode_sidecar = true;
-            } else if (dequant_gpu_supported(t.qtype)) {
-                fp8_decode_sidecar = it != wcache_->fp8.end() && it->second.d_row_scales != nullptr;
-            }
-        }
-        if (fp8_decode_sidecar)
-            tier = StorageTier::FP16;
         TensorID id = registry_->reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_->handle(id);
-        h.primary_tier = tier;
         h.source_data = t.data;
         h.source_qtype = t.qtype;
         h.source_scales = t.scales;
         h.source_tensor_scale = t.tensor_scale;
         h.act_scale = static_act_scale(t);
-        borrow_payload_from_wcache(h, *wcache_, t.data);
         bind_cache_entries(h, *wcache_);
-
-        // Dual-tier dispatch: pick the best tier per operation type.
-        //   Prefill (M>1): FP16 > FP8 > NVFP4_SFATOM tier (own tile GEMM) > source dequant
-        //   Decode (M=1):  NVFP4 GEMV > FP8 GEMV > source dp4a GEMV
-        // Native NVFP4: all dense weights get FP16 prefill (dequanted at load) to avoid FP8
-        // precision loss compounding across layers; decode uses source NVFP4 (single-token, no
-        // compounding).
-        h.prefill_tier = tier;
-        h.decode_tier = tier;
-        if (tier == StorageTier::NVFP4_SFATOM && wcache_->fp16.contains(t.data)) {
-            h.prefill_tier = StorageTier::FP16;
-            // Decode: use source NVFP4 data for GEMV (not the FP16 cache)
-        } else if (tier == StorageTier::NVFP4_SFATOM && wcache_->fp8.contains(t.data)) {
-            h.prefill_tier = StorageTier::FP8;
-            h.decode_tier = StorageTier::FP8;
-        } else if (tier == StorageTier::NVFP4_SFATOM && wcache_->nvfp4.contains(t.data)) {
-            h.decode_tier = StorageTier::NVFP4_LINEAR;
-        } else if (fp8_decode_sidecar) {
-            h.decode_tier = StorageTier::FP8;
-        }
+        // Tiers from the bound entries (plan_handle_tiers, audit D-3), not from map membership.
+        // FP8 decode SIDECAR: the fp8 entry must not become the primary tier; prefill and M>1 verify
+        // chunks stay on the full-precision source, only the M=1 decode GEMV takes the FP8 copy.
+        // Demoted BEFORE the payload borrow, or the union would carry an fp8 payload into FP16 paths.
+        // A native F16 resident with an fp8 entry is always the sidecar (the phase-2 prefill cache
+        // never keys F16 sources); a quantized (GGUF) source only with per-row scales (the phase-2 FP8
+        // prefill cache keys them with a per-tensor scale, primary); a native-FP8 source (Modelopt)
+        // only beside an FP16 companion (native FP8 prefill off), else prefill runs FP8 x FP8.
+        // Dual-tier dispatch: prefill (M>1) FP16 > FP8 > NVFP4_SFATOM tile > source dequant; decode
+        // (M=1) NVFP4 GEMV > FP8 GEMV > source dp4a GEMV. Native NVFP4 keeps decode on the source.
+        const HandleTiers tiers = plan_handle_tiers(h.entries, t.qtype, dequant_gpu_supported(t.qtype));
+        h.primary_tier = tiers.primary;
+        h.prefill_tier = tiers.prefill;
+        h.decode_tier = tiers.decode;
+        borrow_payload_from_entries(h);
         return id;
     };
 
@@ -375,7 +344,10 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                     ++matched;
                 } else if (any_overlay(e.source_data)) {
                     ++mismatch;
-                    StorageTier actual = infer_tier_from_wcache(*wcache_, e.source_data);
+                    WeightHandle probe;  // the plan entry has no handle: bind a probe on its source
+                    probe.source_data = e.source_data;
+                    bind_cache_entries(probe, *wcache_);
+                    const StorageTier actual = cached_tier(probe.entries);
                     IMP_LOG_INFO("Phase-4 plan/actual MISMATCH: %s plan-tier=%d actual-tier=%d",
                                  tensor_kind_name(e.kind), std::to_underlying(e.tier),
                                  std::to_underlying(actual));
@@ -627,7 +599,7 @@ int QuantPipeline::release_f16_attn_sources_(const ModelConfig& cfg, cudaStream_
             if (e == wcache_->fp8.end() || e->second.d_row_scales == nullptr || e->second.native_source ||
                 !ensure_released_scratch_(bytes))
                 continue;
-            wcache_->released_fp8_view[t->data] = e->second;
+            wcache_->released_fp8_view[id] = e->second;
             wcache_->dropped_attn_bytes += bytes;
             registry_->handle(id).source_released = true;
             free_source_(*t, stream);
@@ -744,18 +716,18 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
                 std::max({bytes_of(L.ssm_in), bytes_of(L.gdn_gate), bytes_of(L.ssm_out)})))
             break;
         // Pack rows: [0, conv_channels) ssm_in, then inner rows of gdn_gate.
-        auto pack_rows = [&](const Tensor& t, int64_t row0) {
+        auto pack_rows = [&](const Tensor& t, TensorID id, int64_t row0) {
             FP8CacheEntry view = pk->second;
             const int64_t shape[2] = {t.shape[0], t.shape[1]};
             view.weight = Tensor(static_cast<char*>(pk->second.weight.data) + (row0 * t.shape[1]),
                                  QType::FP8_E4M3, 2, shape, true);
             view.d_row_scales = pk->second.d_row_scales + row0;
-            wcache_->released_fp8_view[t.data] = view;
+            wcache_->released_fp8_view[id] = view;
         };
-        pack_rows(L.ssm_in, 0);
-        pack_rows(L.gdn_gate, L.ssm_in.shape[0]);
+        pack_rows(L.ssm_in, L.ssm_in_id, 0);
+        pack_rows(L.gdn_gate, L.gdn_gate_id, L.ssm_in.shape[0]);
         if (out_view)
-            wcache_->released_fp8_view[L.ssm_out.data] = out_fp8->second;
+            wcache_->released_fp8_view[L.ssm_out_id] = out_fp8->second;
         for (auto [t, id] : {std::pair{&L.ssm_in, L.ssm_in_id}, std::pair{&L.gdn_gate, L.gdn_gate_id},
                              std::pair{&L.ssm_out, L.ssm_out_id}}) {
             wcache_->dropped_gdn_bytes += bytes_of(*t);
@@ -831,7 +803,8 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
     }
     const auto ct = wcache_->nvfp4_sfatom.find(head.data);
     // speculative.mtp_nvfp4_head=false: the MTP draft reads the source head.
-    const bool mtp_reads_source = nvfp4_head && model_->mtp_ && !dispatch_policy().speculative.mtp_nvfp4_head;
+    const bool mtp_reads_source = nvfp4_head && model_->mtp_ &&
+                                  !speculative_section(dispatch_policy()).mtp_nvfp4_head;
     if (head.data == model_->tok_emb_.data || !mut_model->is_base_gpu_allocation(head.data) ||
         (fp8_head && wcache_->nvfp4.contains(head.data)) || mtp_reads_source ||
         (ct != wcache_->nvfp4_sfatom.end() && ct->second.scale_factors != nullptr) ||

@@ -8,6 +8,7 @@
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
+#include "core/dispatch_policy.h"
 #include "exec/fp8_decode_sidecar.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_quant.h"

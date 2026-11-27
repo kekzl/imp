@@ -11,6 +11,8 @@
 # [baseline] are generated.
 #
 # Pin changes (newest first):
+#   Engine::build_banned_token_list 36 -> 5, unpinned: the scan moved to
+#   runtime/banned_tokens.cpp (B-143).
 #   step_spec_verify_ phases (33 file-static helpers, largest stage_chunk 11 and
 #   restore_hybrid_after_accept 12): Engine::step_spec_verify_ 238 -> 60
 #   init_kv_cache phases (split from init_kv_cache into 26 file-static helpers, largest
@@ -175,7 +177,6 @@ skip_dirs = ["apa"]
 "src/runtime/engine_spec_ngram.cpp::bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft)" = 60
 "src/runtime/engine_weight_upload.cpp::bool Engine::init_weights()" = 30
 "src/runtime/engine_workspace_warmup.cpp::bool Engine::init_features()" = 27
-"src/runtime/engine_workspace_warmup.cpp::void Engine::build_banned_token_list()" = 36
 "src/runtime/engine_workspace_warmup.cpp::void Engine::warmup()" = 42
 "src/runtime/scheduler.cpp::void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch, std::vector<std::shared_ptr<Request>>& decode_batch)" = 52
 "src/runtime/vram_budget.cpp::VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim, size_t free_vram, int swa_live_tokens, int n_swa_layers, const NativeCacheDemand* native_demand, int ssm_reserved_slots, bool q8_imma_prefill, bool moe_imma_prefill)" = 79

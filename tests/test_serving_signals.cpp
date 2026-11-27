@@ -198,6 +198,38 @@ TEST(ServingSignalsTest, QuantizedKvPressureArmsTheValveAndTheRequestFinishes) {
     be.stop();
 }
 
+// A prompt of exactly 24 x 16 = 384 tokens fills the 24-block pool to its last row, so the first
+// decode step needs block 25 before the >90 % valve ever ran (a speculative verify can land there
+// too: int17 cancelled at ctx 385). The valve must arm on the dry append and evict, not cancel.
+TEST(ServingSignalsTest, APromptFillingThePoolToItsLastRowArmsTheValveNotACancel) {
+    if (!model_exists())
+        GTEST_SKIP() << "Model not found: " << model_path();
+    Loaded m;
+    ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/24, /*streaming_kv_auto=*/true, "fp8",
+                       /*streaming_window=*/128));
+    auto* engine = m.ctx->engine.get();
+    ASSERT_EQ(engine->kv_cache()->ceiling_blocks() * engine->kv_cache()->block_size(), 384)
+        << "the pool must be the 24 x 16 this test fills";
+    std::vector<int32_t> prompt;
+    const std::vector<int32_t> piece = engine->model()->tokenizer()->encode(long_prompt());
+    ASSERT_FALSE(piece.empty());
+    while (prompt.size() < 384)
+        prompt.insert(prompt.end(), piece.begin(), piece.end());
+    prompt.resize(384);
+    BatchingEngine be;
+    be.start(m.ctx);
+    Served r{make_request(m.ctx, "", 100, 1.0f)};
+    r.sr->request->input_tokens = prompt;
+    be.submit(r.sr);
+    ASSERT_TRUE(drain(r, 120000)) << "the request never finished";
+    EXPECT_EQ(r.finish, "length") << "the dry append cancelled instead of arming the valve";
+    EXPECT_EQ(r.tokens, 100);
+    EXPECT_EQ(engine->streaming_kv_auto_enables(), 1u);
+    EXPECT_GT(engine->streaming_kv_evicted_blocks(), 0u);
+    EXPECT_GT(r.sr->request->evicted_kv_tokens, 0);
+    be.stop();
+}
+
 TEST(ServingSignalsTest, QueueTimeIsTheSchedulerWaitAndTheSplitIsVisible) {
     if (!model_exists())
         GTEST_SKIP() << "Model not found: " << model_path();

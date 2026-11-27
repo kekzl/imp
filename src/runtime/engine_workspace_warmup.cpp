@@ -5,7 +5,7 @@
 // event, DRY penalty buffers. See executor_workspace_*.cu for the per-subsystem builders.
 //
 // build_banned_token_list: runtime ban-list from RuntimeConfig + model tokenizer, keeping
-// stop/EOS/think/Gemma-4 channel markers out of the ban set.
+// stop/EOS and trained markers out of the ban set (runtime/banned_tokens.h).
 //
 // warmup: optional first forward pass to prime cuBLASLt + CUDA graph capture. Skipped for
 // MXFP4 weights (FP16-cache bypass) and Gemma-4 (algo jitter); resets FP8 KV calibration
@@ -16,6 +16,7 @@
 
 #include "runtime/engine.h"
 #include "runtime/config.h"
+#include "runtime/banned_tokens.h"
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/attention_apa.h"
@@ -247,75 +248,11 @@ bool Engine::init_features() {
 }
 
 void Engine::build_banned_token_list() {
-    banned_token_ids_.clear();
-    auto add_if_valid = [this](int32_t id) {
-        if (id >= 0) banned_token_ids_.push_back(id);
-    };
-
-    // Collect IDs that must NOT be banned: stop tokens, EOS, think tokens,
-    // and Gemma-4 channel markers (the model is trained to emit them).
-    std::vector<int32_t> keep_ids;
     Tokenizer* tok = model_->tokenizer();
-    if (tok) {
-        for (int32_t eid : tok->eos_ids()) keep_ids.push_back(eid);
-    }
-    for (int32_t sid : chat_template_.stop_token_ids()) keep_ids.push_back(sid);
-    if (tok) {
-        // Harmony (gpt-oss, #547): the model is TRAINED to emit its own structure tokens
-        // (<|channel|>analysis<|message|>...<|end|><|start|>assistant<|channel|>final<|message|>...).
-        // Banning them traps generation in an endless analysis channel.
-        for (const char* name :
-             {"<think>", "</think>", "<|think|>", "<|/think|>", "<|channel>", "<channel|>", "<|channel|>",
-              "<|message|>", "<|start|>", "<|end|>", "<|constrain|>",
-              // Inkling2: every reply is <|message_model|> + a content marker + <|end_message|>.
-              "<|message_model|>", "<|content_thinking|>", "<|content_text|>", "<|end_message|>",
-              "<|content_invoke_tool_json|>", "<|content_model_end_sampling|>"}) {
-            int32_t tid = tok->find_token(name);
-            if (tid >= 0) keep_ids.push_back(tid);
-        }
-    }
-    auto is_kept = [&](int32_t id) {
-        return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
-    };
-
-    // Chat template start-of-turn delimiters (never valid in output)
-    if (!is_kept(chat_template_.im_start_id()))
-        add_if_valid(chat_template_.im_start_id());
-    if (!is_kept(chat_template_.start_header_id()))
-        add_if_valid(chat_template_.start_header_id());
-    if (!is_kept(chat_template_.end_header_id()))
-        add_if_valid(chat_template_.end_header_id());
-
-    // Scan vocab for control tokens. Authoritative path uses GGUF token_type
-    // metadata; fallback uses heuristic pattern matching on legacy GGUFs.
-    if (tok) {
-        int vocab_size = tok->vocab_size();
-        if (tok->has_token_types()) {
-            for (int i = 0; i < vocab_size; i++) {
-                if (is_kept(static_cast<int32_t>(i))) continue;
-                if (tok->is_control_token(i)) add_if_valid(static_cast<int32_t>(i));
-            }
-        } else {
-            for (int i = 0; i < vocab_size; i++) {
-                if (is_kept(static_cast<int32_t>(i))) continue;
-                const std::string& t = tok->token_text(i);
-                if (t.size() < 3 || t[0] != '<' || t.back() != '>') continue;
-                if (t.size() >= 4 && t[1] == '|' && t[t.size() - 2] == '|') {
-                    add_if_valid(static_cast<int32_t>(i));
-                    continue;
-                }
-                if (t == "<pad>" || t == "<unk>" || t == "<mask>" || t == "<unused0>" ||
-                    t == "<start_of_turn>" || t == "<end_of_turn>" ||
-                    t == "<start_of_image>" || t == "<end_of_image>") {
-                    add_if_valid(static_cast<int32_t>(i));
-                }
-            }
-        }
-    }
-
-    std::sort(banned_token_ids_.begin(), banned_token_ids_.end());
-    banned_token_ids_.erase(std::unique(banned_token_ids_.begin(), banned_token_ids_.end()),
-                            banned_token_ids_.end());
+    banned_token_ids_ = build_banned_token_ids(tok, chat_template_.stop_token_ids(),
+                                               {chat_template_.im_start_id(),
+                                                chat_template_.start_header_id(),
+                                                chat_template_.end_header_id()});
 
     if (!banned_token_ids_.empty()) {
         IMP_LOG_INFO("Banned %zu special tokens from generation", banned_token_ids_.size());
@@ -490,12 +427,10 @@ void Engine::warmup() {
     const size_t whole_init = residual > 0 ? static_cast<size_t>(residual) : 0;
     measured_library_reserve_ =
         engine_internal::library_reserve_measurement(forward_window, residual).value_or(SIZE_MAX);
-    log_library_measurement(forward_window, residual, measured_library_reserve_,
-                            config_.library_reserve_mb.value_or(-1));
+    log_library_measurement(forward_window, residual, measured_library_reserve_, rt_.library_reserve_mb);
     // Only now is there a number to recommend: everything above decides it, and
     // the warning that names it has to come after, not before (#1746).
-    report_library_reserve(measured_library_reserve_, forward_window, whole_init,
-                           config_.library_reserve_mb.value_or(-1));
+    report_library_reserve(measured_library_reserve_, forward_window, whole_init, rt_.library_reserve_mb);
     // Remember it, so the NEXT start on this model charges the measured value instead of the
     // constant (AUDIT B49). A write failure is a warning, never a load failure: refusing to
     // serve a model over a cache file would be absurd.

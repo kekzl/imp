@@ -496,6 +496,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_sampling_stop.cpp
     src/runtime/engine_kv_swap.cpp
     src/runtime/stop_mask.cpp
+    src/runtime/banned_tokens.cpp
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
     src/runtime/suffix_shadow.cpp
@@ -1448,6 +1449,7 @@ if(IMP_BUILD_TESTS)
         tests/test_chat_template.cpp
         tests/test_chat_template_continue.cpp
         tests/test_transcript_ids.cpp
+        tests/test_banned_tokens.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp
         tests/test_ling3_chat_template.cpp

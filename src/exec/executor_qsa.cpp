@@ -14,7 +14,8 @@
 #include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/attention.h"
 #include "exec/executor_helpers.h"
 #include "memory/kv_cache.h"
 
@@ -28,7 +29,7 @@ FallbackSite s_fb_qsa_debug{"qsa_debug_scratch"};
 }
 
 bool GraphExecutor::qsa_layer_(int layer) const {
-    return dispatch_policy().attention.qsa && model_->layer(layer).qsa_index_qk.data != nullptr;
+    return attention_section(dispatch_policy()).qsa && model_->layer(layer).qsa_index_qk.data != nullptr;
 }
 
 QsaGeom GraphExecutor::qsa_geom_(int layer) const {
@@ -279,9 +280,9 @@ void GraphExecutor::qsa_prefill_(int layer, const InferenceState& state, int n, 
     qsa_valid_ = pos0 + n;
 
     const int cap = g.budget + g.ratio - 1;
-    const int r0 = dispatch_policy().attention.qsa_force ? 0 : std::max(0, cap - pos0);
+    const int r0 = attention_section(dispatch_policy()).qsa_force ? 0 : std::max(0, cap - pos0);
     const size_t q_row = static_cast<size_t>(cfg.n_heads) * cfg.head_dim * 2;
-    const bool dbg = dispatch_policy().attention.qsa_debug && layer == 3;
+    const bool dbg = attention_section(dispatch_policy()).qsa_debug && layer == 3;
     for (int r = r0; r < n; r += qsa_rows_) {
         const int rows = std::min(qsa_rows_, n - r);
         qsa_select(static_cast<const half*>(qsa_q_.data) + (static_cast<size_t>(r) * g.n_heads * kQsaDim),
