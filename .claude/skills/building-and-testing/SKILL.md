@@ -115,7 +115,7 @@ clang-tidy blocks inside `Build` since 2026-11-25 (step `clang-tidy (blocking, c
 ## Determinism and quality
 
 - `--set runtime.deterministic=true`: temp=0 reproducibility incl. MoE routing atomics and top-k races; implies `runtime.deterministic_gemm`; promoted process-wide since #542; default OFF. Qwen3.6-35B stays non-deterministic at temp=0 (routing flips); never assert exact output there.
-- 7 `DISABLED_` tests with reasons: 2 determinism boundaries (cross-context GDN, FMHA smem), the rest benches without assertions. Do not re-enable.
+- `DISABLED_` tests with reasons: 4 in the default modules (DetEval cross-context, a determinism boundary), 13 in `test-bench` (timing cases without assertions). Do not re-enable.
 - `imp-cli --perplexity <file>` is teacher-forced prefill (chunk-aware since #553); use `tools/analysis/ppl_corpus_45k.txt` (untracked, rebuild with `tools/analysis/make_ppl_corpus.sh`), not the 199-token `ppl_corpus.txt`.
 - `imp-cli --json`: one JSON document on stdout, logs on stderr (#1715).
 

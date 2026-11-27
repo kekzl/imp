@@ -2,7 +2,7 @@
 layer: L2
 audience: kernel-devs
 verified: 2026-11-27
-commit: 86e5cf30
+commit: 66f34b7d
 -->
 
 # imp - test-suite audit
@@ -2135,7 +2135,7 @@ Owner decisions needed before Phase 4: MmqQ4kImmaBench with the deleted Phase 2C
 
 ## Phase 4: execution
 
-Owner Go 2026-11-27 (goal: finish the audit findings). Part A (CPU lane) below; part B (GPU lanes, P1-P6, P10, P11, P14, part B of P7-P9) follows in its own section.
+Owner Go 2026-11-27 (goal: finish the audit findings). Part A (CPU lane) below; part B (GPU lanes, P1-P6, P10, P11, P14, part B of P7-P9) and the Phase 5 result follow.
 
 ### Part A: CPU lane
 
@@ -2148,3 +2148,86 @@ Owner Go 2026-11-27 (goal: finish the audit findings). Part A (CPU lane) below; 
 | compile | P13 | `tools/imp-server/utils.h` forward-declares the 3 httplib types | TUs parsing `httplib.h`: test-core 13 -> 9, imp_server_core 26 -> 17; clean test-core 931.4 -> 882.1 CPU-s, 73.4 -> 70.6 s wall (ccache off, -j16, median of 3 pairs); PCH measured and dropped: 977.5 -> 956.3 CPU-s, inside the run spread |
 
 Phase 5, part A: `make dev-test` 3 of 3 green, no flake; `ctest -L unit -j4` wall 12.02 -> 2.37 s (median of 3); 16 of 16 part A mutants red on the final tree; cases 2829 -> 2816 (13 removed, each listed above). The 7 field-order cases that D-11 slice 6 added after the audit tree stay until their swaps are proven build-red. Raw data: `/mnt/data/scratch/tsa/phase4_A.md`, `p4a/`.
+
+### Part B: GPU lanes
+
+Branch `test/gpu-lane-audit` (base `test/cpu-lane-audit` 636cbef4, origin/main merged twice: #3351, #3352/#3353). GPU lock `tsa4b` 05:00:56Z-07:32:08Z. Raw data: `/mnt/data/scratch/tsa/p4b/` (`logs/`, `gpu/`, `scripts/`).
+
+| cut | row | change | result |
+|---|---|---|---|
+| DELETE | P7 (B) | INT4QuantTest, NVFP4QuantTest (2), TensorKindCoverage (+ its locks-group filter entry) | M-INT4, M-NV2, M-TK red on the remaining catchers |
+| SHRINK | P8 (B) | MMVQ `*_MatchesDp4a` (3), GemmDP4ATest 2 basics, EndToEndModelTest LoadModel / Tokenize / CreateContextAndGenerate; 16 field-order cases of D-11 slices 6 (7) and 7 (9), defaults kept as `static_assert` | M-MV1..3, M-DP1b, M-DP2, M-E2E1 red; LA-9..25 build-red at the call sites (17 swaps, one per struct) |
+| DELETE | owner | Phase 2C Q4_K IMMA path `src/compute/mmq_q4k_imma_{layout,tile}.{cu,h}` with MmqQ4kImma{Layout,Tile,Gemm} (10 cases) and MmqQ4kImmaBench + `tests/bench/mmq_q4k_imma_bench.{cu,h}` | owner decision 2026-11-27: dead code deleted with its bench (exception to R5 for this bench only). Dead: the two headers are included by the two TUs and tests only; production Q4_K IMMA is the 9-argument `mmq_q4k_imma_gemm` of `mmq_q8_imma.h` (`executor_gemm_dispatch.cpp:80`, `gemm_dispatch_uncached.cpp:121`); M-Q4K3 (Phase 2) red by MmqQ4kImmaGemm only |
+| MOVE | P1, P2 | new module `test-bench` (`make test-bench`, `make test-perf`, ctest `perf_bench`; not in `imp-tests` / `make test-gpu`): 9 bench-only files whole, the timing cases of 28 mixed files into `tests/bench/test_<file>_bench.cu` with shared helpers in `tests/test_<file>_util.cuh`; P2 floors (NvFP4SmallMTest x2, NvFP4SmallMV2Test.BandwidthAboveStarvationFloor) move with it, assertions unchanged | 54 cases (13 `DISABLED_`), 143.53 s median of 3; the default modules keep 4 `DISABLED_` (DetEval cross-context) |
+| lanes | P3 | `make test-gpu` drops the 9 model suites that the `make test-e2e` groups run with their own checkpoints (negative filter); the `IMP_HOOK_GPU` full stage runs `make test-e2e` after `make test-gpu` | test-e2e row 505.09 -> 136.29 s |
+| SHRINK | P4 | ServingSignals TTFT case drains only when the first event is not the last | case 153.85 s (Phase 1, test-gpu) -> 2.54 s in the model battery (median of the kept test-e2e runs); P4-a (prewarm 0) red by the capture/replay counters; P4-b (prewarm 0, counters removed) green on the final tree AND on the base binary with the 10 s drain (156.55 s): the TTFT bound does not separate prewarm from none on Qwen3-8B-NVFP4 before or after, the counters are the catcher |
+| host refs | P5 | FA2, FmhaSm120 and gpt-oss sink host references: `tests/host_parallel.h` runs one (batch, head) per thread, serial loop order per output | 18 of 18 shapes memcmp-identical old vs new (nvcc flags of the test-attention TU, `logs/p5_ref_identity.log`); test-attention 241.97 -> 39.02 s |
+| MOVE | P6 | 69 host-only cases to test-core (JsonConstrainFsmTest #1067, PreambleGateTest, RegexNfaTest #497, 3 NVFP4 scale validators, GemmStrategy, SparsePrefillGeometry, 5 VramBudgetReserve #874, MtpUploadBudgetTest #1494); fake models in `tests/vram_budget_fixture.h` | CI lane gains 69 cases, 0 skips (`guard_unit_skips` green) |
+| MERGE | P9 (B) | 5 FA2 suites -> `FmhaFA2Prefill.MatchesReference/<old Suite_Case>` (54 rows, every shape and tolerance kept; each row sets the flag state its suite ran under in a full run, TearDown restores the production defaults); Grammar + Regex mask -> `ConstrainMaskTest/{Regex,Grammar}`; KVCacheManagerGrowTest -> KVCacheManagerTest | M-GR red on the Grammar row only, M-GR2 on the Regex row only; M-PA1..3b red |
+| P10 | P10 | LlmCompressorE2E coder default -> `Qwen3-Coder-30B-A3B-Instruct-FP4` (was absent); one Gemma-4 llmc load for its 2 cases | Coder case skip -> green |
+| wire | P11 | wired: DecodeGraphCtxGrowthTest (#948), PromptLogprobsE2ETest (model battery), HybridSharedScoreTest (hybrid group), CandidateTokenGuardTest, FimRealTokenizer (locks group, tokenizer env); re-pointed: ChunkedPrefillTest (#130, 7) and LoraHotSwap (3) to Qwen3-8B-NVFP4, QuantPipelineTest and Q8DropSourceE2E (#2712) to `Qwen3-Reranker-0.6B-Q8_0.gguf`, GgufDeadWeightForms dense case (#2711) to `Qwen3-8B-Q4_K_M.gguf` | 26 cases run that ran nowhere; M-QP now red (QuantPipelineTest); M-Q8 still survives (below) |
+| restore | Phase 5 | EndToEndModelTest.PrefillDecodeStep back: M-E2E2 survived without it (its 1-token prompt is the only one that prefills 0 tokens; PrimaryModelTest and GreedyLockTest 14 of 14 green under the mutant) | M-E2E2 red again |
+
+Not done, with the reason:
+
+| item | why |
+|---|---|
+| P9 PagedAttentionTest -> PagedOracle | no overlap to merge: the candidate FP16 cases run HD64 (MHA 1x1, 4x4, GQA 4x2, 8x2) and HD256 16x8, PagedOracle instantiates HD128 32x8 / 8x8 and HD256 24x4 / 4x4 only; a merge means new HD64 oracle rows over 6 KV dtypes with new envelopes |
+| P9 rename-only GemmMxfp4RepeatTest, GemmQ45kRepeat, GemmQ6kRepeatTest, MoERoutingEdgeTest | the target suites are TEST_P over a different parameter type or a TEST_F fixture; gtest refuses two fixtures in one suite |
+| P14 (5 candidates) | read, none shrunk: NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable (200 launches, a race detector), Fp8GemmSmallMTest.MatchesDoubleReferenceEveryM (every M is the property), TopkRadixSampler.SingleRowMatchesLegacyBytesAndTokens (vocab x generator x k x temperature x seed), FP8GemmTest.RowscaleFp32StreamedHeadMatchesSplitKAndReference (2 tail shapes), MtpFeedBatchTest.AttnScanMatchesSoftmaxReference (base 0..20000); no mutant written that a smaller form would still catch |
+| P11 VramLedgerE2E, EncoderEmbedTest, VisionGolden | owner default re-point: no MXFP4 GDN checkpoint, no NomicBert GGUF, no mmproj GGUF in the store; left as is |
+| P11 GgufDeadWeightForms.Nvfp4ServedHeadFreesItsSource | `Qwen3.8-27B-Q8_0.gguf` prints no NVFP4-served-head line (red on probe); Q4_K_M checkpoint absent |
+| P11 SentencePieceLoader, Gemma4AudioEncoderTest, Gemma4E4BRef, Ling3Ref, 22 Inkling oracle cases | no spiece.model / transformers reference dumps in the store |
+| M-Q8 | survives on the re-pointed Q8DropSourceE2E: the 0.6B checkpoint never hits the shape/plane-budget skip the mutant removes |
+
+### Phase 5: result
+
+Lanes, median of 3 (Phase 1 baseline -> after); every timing at 1-min load <= 4 except two test-attention attempts whose own reference threads raised the load (5.60-8.05, kept the lower of 2):
+
+| lane | before | after |
+|---|---:|---:|
+| `make test-gpu` (8 binaries with the test-gpu-suite filter + 3 extra lines, sum of medians) | 1022.51 s | 322.19 s |
+| test-attention / test-quant / test-compute / test-e2e row | 241.97 / 168.06 / 38.81 / 505.09 s | 39.02 / 48.19 / 23.22 / 136.29 s |
+| `make test-bench` (new) | - | 143.53 s |
+| `make test-e2e`, 7 groups (runs 2-4; run 1 at load 7.57 repeated) | n/m (not timed in Phase 1) | 938.75 s |
+| CI lane `ctest -L unit -j4` (part A after -> part B after) | 2.37 s | 2.64 s (+69 host cases) |
+| clean build of the test targets, ccache off, -j16 | 227.4 s | 175.9 s (201.3 / 173.7 / 175.9; 569 steps, run 1 609) |
+
+Flakes: 0 (40 of 40 GPU attempts rc 0, test-e2e 4 of 4 PASS, CI lane 3 of 3).
+
+Cases (`--gtest_list_tests`), base 636cbef4 -> final 66f34b7d; test-core before includes the 11 cases #3352 added:
+
+| binary | before | after | delta |
+|---|---:|---:|---|
+| test-core | 2528 | 2581 | +69 P6, -16 field order |
+| test-text | 313 | 313 | 0 |
+| test-compute | 377 | 352 | -16 bench, -1 P6, -3 MMVQ, -2 DP4A, -3 Phase 2C |
+| test-attention | 214 | 205 | -7 bench, -1 P6, -1 INT4; FA2 56 -> 54 rows + 2 bench |
+| test-quant | 367 | 304 | -31 bench, -21 P6, -2 NVFP4Quant, -9 Phase 2C |
+| test-kv | 145 | 142 | -3 P6 |
+| test-moe-gdn | 224 | 186 | -38 P6 |
+| test-e2e | 320 | 311 | -5 P6, -3 EndToEndModelTest, -1 TensorKindCoverage |
+| test-bench | - | 54 | +56 moved, -2 Phase 2C |
+| all | 4488 | 4448 | -40 deleted, 0 lost by a merge |
+
+Mutants on the final tree (`logs/mutants.log`): Phase 2 had 34, 30 red. Re-run: part A 11 of 11 red (+ LA-1b, LA-5..8 of part A); part B 18 of 18 that were red are red (M-Q4K3: code deleted), M-QP flipped to red, M-NV1, M-DP1, M-Q8 survive as before; new: LA-9..25 17 of 17 build-red, P4-a red, P4-b green (control: green on the base binary too).
+
+| id | result on the final tree |
+|---|---|
+| HF-1..3, TD-1..2, FP-1 | RED (HfFetchMock, tool-call golden / registry suites, FpBitsLegacyParity) |
+| FP-2, LA-1, LA-1b, LA-2..8 | BUILD_RED |
+| LA-9..25 | BUILD_RED at the designated-initializer call sites (src and tests) |
+| M-NV2 | RED: Nvfp4QuantRefTest.RepresentableValuesAreBitExact |
+| M-INT4 | RED: PagedAttentionINT4Test, PagedOracle/3 x3 |
+| M-Q4K1, M-Q4K2 | RED: 5 / 4 MmqQ8Imma Q4_K cases |
+| M-MV1..3 | RED: GgufRef.<type>_GemvMmvq, MMVQ.<type>_LargerDims |
+| M-DP1b, M-DP2 | RED: GgufRef.Q8_0_GemvDp4a; GgufRef.Q6_K_GemvDp4a, .DenseRowsDp4aAllTypes |
+| M-E2E1 | RED: PrimaryModelTest.TokenizeRoundtrip |
+| M-E2E2 | RED after the restore (EndToEndModelTest.PrefillDecodeStep and followers) |
+| M-PA1, M-PA3a | RED: PagedOracle/0.SinksAndWindowAcrossEvictedBlocks |
+| M-PA2, M-PA3b | RED: PagedOracle/0 sweeps, PagedAttentionTest |
+| M-GR / M-GR2 | RED: ConstrainMaskTest .../Grammar / .../Regex only |
+| M-TK | RED: TensorKindMatcher.AttentionProjections |
+| M-QP | RED: QuantPipelineTest (re-pointed); QuantIntegrationTest still green |
+| M-NV1, M-DP1, M-Q8 | SURVIVED (as in Phase 2) |
+| P4-a / P4-b | RED / SURVIVED (base control SURVIVED) |
