@@ -125,7 +125,7 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
     && ([ -f build/imp-quantize ] && cp build/imp-quantize /tmp/ || true) \
     && if [ -f build/imp-tests ]; then \
            cp build/imp-tests build/imp-tests-unit /tmp/ \
-           && for b in test-core test-text test-compute test-attention \
+           && for b in test-core test-text test-compute test-attention test-bench \
                        test-quant test-kv test-moe-gdn test-e2e; do \
                   [ -f "build/$b" ] && cp "build/$b" /tmp/; \
               done; \
@@ -200,6 +200,7 @@ COPY --from=builder /tmp/test-quan[t] /usr/local/bin/
 COPY --from=builder /tmp/test-k[v] /usr/local/bin/
 COPY --from=builder /tmp/test-moe-gd[n] /usr/local/bin/
 COPY --from=builder /tmp/test-e2[e] /usr/local/bin/
+COPY --from=builder /tmp/test-benc[h] /usr/local/bin/
 COPY --from=builder /tmp/imp-benc[h] /usr/local/bin/
 COPY --from=builder /tmp/test-gd[n] /usr/local/bin/
 # Fixture files the test binaries read by absolute path (IMP_TEST_FIXTURES_DIR,

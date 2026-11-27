@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose interpose-build bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-inkling vram-touch-audit verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose interpose-build bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-bench test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-inkling vram-touch-audit verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -173,7 +173,10 @@ test-gpu: build
 .PHONY: test-gpu-suite
 # The suite body; test-gpu holds the GPU lock across all three runs.
 test-gpu-suite:
-	$(DOCKER_RUN) imp-tests
+	@# The 9 model suites below read /models defaults here and run again, with their own
+	@# checkpoints, in the make test-e2e groups (448.75 s per run, TEST_SUITE_AUDIT P3): test-e2e
+	@# runs them, test-gpu does not.
+	$(DOCKER_RUN) imp-tests --gtest_filter="-ServingSignalsTest.*:MtpGreedyIdentityTest.*:SpecCaptureFidelityTest.*:BatchInvarianceTest.*:MtpQwen4ExpReference.*:DegenerationTest.*:DSparkDrafterTest.*:DFlashDrafterTest.*:DeviceFaultSignalTest.*"
 	@# #1575: DetEvalE2ETest is the only end-to-end determinism gate in the
 	@# tree, and it takes its GTEST_SKIP branch unless a model env var is set.
 	@# DOCKER_RUN carries none, so the pre-commit hook's "full suite" stage ran
@@ -246,7 +249,7 @@ MOE_MODEL ?= /models/Gemma-4-26B-A4B-it-NVFP4
 HYBRID_RESTORE_RUN = $(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3.8-27B-NVFP4-vllm \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.8-27B-NVFP4-vllm \
-		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*:CancelLifecycleHybridTest.*"
+		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*:CancelLifecycleHybridTest.*:HybridSharedScoreTest.*"
 # The hybrid group of test-e2e alone: scripts/check-release.sh runs it (red 2026-10-04 to #2820 unblocked).
 test-hybrid-restore: build
 	$(HYBRID_RESTORE_RUN)
@@ -264,7 +267,7 @@ test-e2e: build
 		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
 		-e IMP_TEST_MODEL_SSM=/models/Nemotron-3-Nano-30B-A3B-NVFP4 \
 		-e IMP_TEST_MODEL_NVFP4_MOE=/models/Qwen3-30B-A3B-NVFP4-Modelopt \
-		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:Gemma4SafeTensorsTest.*:SpecCaptureFidelityTest.*:DeviceFaultSignalTest.*:ServingSignalsTest.*:SamplerRowBansTest.*:*DetEvalE2ETest*:*MoePrefixHitE2ETest*:Mamba2BatchedDecodeTest.*" \
+		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:Gemma4SafeTensorsTest.*:SpecCaptureFidelityTest.*:DeviceFaultSignalTest.*:ServingSignalsTest.*:SamplerRowBansTest.*:*DetEvalE2ETest*:*MoePrefixHitE2ETest*:Mamba2BatchedDecodeTest.*:DecodeGraphCtxGrowthTest.*:PromptLogprobsE2ETest.*" \
 		|| echo model-battery >> $(E2E_FAILED)
 	@# The greedy regression locks, the degeneration battery, the prefix-cache
 	@# equivalence and the tokenizer/tensor-kind parity suites ran from NO
@@ -274,7 +277,10 @@ test-e2e: build
 	@# one, the loader + RoPE path the #503 class shipped prompt-blind on).
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
-		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*:CancelLifecycleTest.*" \
+		-e IMP_TEST_TOKENIZER_QWEN3=/models/Qwen3-8B-NVFP4-cortecs \
+		-e IMP_TEST_FIM_TOKENIZER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
+		-e IMP_TEST_NOFIM_TOKENIZER=/models/Gemma-4-26B-A4B-it-NVFP4 \
+		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:CancelLifecycleTest.*:CandidateTokenGuardTest.*:FimRealTokenizer.*" \
 		|| echo locks-degeneration-prefix >> $(E2E_FAILED)
 	@# The hybrid recurrent paths: the snapshot restore and the decode-graph
 	@# buckets. Both skip on a dense checkpoint, and every line above loads a
@@ -409,9 +415,15 @@ bench: build check-gpu
 	@# Both were dead paths, and each recipe line aborts the target, so `make
 	@# bench` died at the first of them and never reached the MXFP4 line at all.
 
-# Single model benchmark (quick check)
+# Single model benchmark (quick check), then the kernel timing module.
 test-perf: build check-gpu
 	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-NVFP4-cortecs --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) test-bench
+
+# Kernel timing, probe and bandwidth-floor cases (test-bench, TEST_SUITE_AUDIT P1/P2): the floors
+# assert wall-clock bounds, so they run only here, on a quiet card, not in make test-gpu.
+test-bench: build check-gpu
+	$(BENCH_DOCKER_RUN) test-bench
 
 # Agentic benchmarks: boot a real imp-server and drive the two agent-shaped
 # harnesses — concurrency TTFT/ITL (agent_bench.py) and growing-transcript

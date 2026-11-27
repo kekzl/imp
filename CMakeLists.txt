@@ -432,8 +432,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/kda_recurrent.cu
     src/compute/kda_scan_chunk.cu
     src/compute/hadamard.cu
-    src/compute/mmq_q4k_imma_layout.cu
-    src/compute/mmq_q4k_imma_tile.cu
     src/compute/mmq_q8_imma.cu
     src/compute/mmq_q8_imma_scratch.cu
 )
@@ -1340,6 +1338,15 @@ if(IMP_BUILD_TESTS)
         # upload_weight's one traits-templated staging path vs the per-format uploaders it
         # replaced (#2212): host bytes, alloc/copy/free order, result tensor, on a fake device.
         tests/test_weight_upload_staging.cpp
+        # Host-only suites that lived in GPU modules (TEST_SUITE_AUDIT P6): JSON FSM (#1067),
+        # preamble gate, NVFP4 scale validation, sparse prefill geometry, VRAM budget arithmetic
+        # (#874), MTP upload budget (#1494). RegexNfaTest (#497) and GemmStrategy joined
+        # test_regex_constrain.cpp and test_gemm_kernel_registry_link.cpp.
+        tests/test_json_constrain_host.cpp
+        tests/test_nvfp4_scale_validate.cpp
+        tests/test_sparse_prefill_geometry.cpp
+        tests/test_vram_budget_reserve_host.cpp
+        tests/test_mtp_upload_budget.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse anthropic.cpp (json-only deps).
@@ -1466,7 +1473,6 @@ if(IMP_BUILD_TESTS)
         tests/test_inkling_attn_paged.cu
         # D-14: the drafters' norm + RoPE and fp32-in RMSNorm are one kernel each (equal bits per arm).
         tests/test_drafter_norm_primitives.cu
-        tests/test_gemv_hot_cold_bench.cu
         tests/test_inkling_quality.cu
         tests/test_swiglu_quantize_cutlass.cu
         tests/test_nvfp4_tile_swiglu_quant.cu
@@ -1512,7 +1518,6 @@ if(IMP_BUILD_TESTS)
         tests/test_prompt_logprobs_rows.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
-        tests/test_mmq_q4k_imma_layout.cu
     )
 
     imp_add_test_module(test-attention GPU SOURCES
@@ -1539,7 +1544,6 @@ if(IMP_BUILD_TESTS)
         tests/test_dequant_gptq_gpu.cu
         tests/test_gguf_dequant_ref.cu
         tests/test_gpt_oss_mxfp4_convert_ref.cu
-        tests/test_nvfp4_quant.cu
         tests/test_nvfp4_quant_ref.cu
         tests/test_nvfp4_quant_hw.cu
         tests/test_nvfp4_compressed_tensors_ref.cu
@@ -1579,17 +1583,7 @@ if(IMP_BUILD_TESTS)
         tests/test_quantize_nvfp4_roundtrip.cu
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/quant_report.cpp
-        tests/test_mxf4nvf4_probe.cu
-        tests/test_mxf4nvf4_mma_bench.cu
-        tests/test_mma_peak_saturated.cu
-        tests/test_mxf4nvf4_mma_variants_bench.cu
-        tests/test_fp4_pv_bench.cu
         tests/test_mxf4nvf4_qkt_validate.cu
-        tests/test_tma_block_scale_bench.cu
-        tests/test_fmha_v_load_bench.cu
-        tests/test_mmq_q4k_imma_bench.cu
-        tests/test_mmq_q4k_imma_tile_bench.cu
-        tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
         tests/test_q8_planes_only.cu
         tests/test_mmq_q8_imma_q5k.cu
@@ -1612,7 +1606,6 @@ if(IMP_BUILD_TESTS)
         src/compute/mxf4nvf4_qkt_validate.cu
         tests/bench/tma_block_scale_bench.cu
         tests/bench/fmha_v_load_bench.cu
-        tests/bench/mmq_q4k_imma_bench.cu
     )
     target_include_directories(imp_test_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(imp_test_kernels PUBLIC imp PRIVATE imp_warnings)
@@ -1638,7 +1631,6 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_grow_admission_gpu.cpp
         tests/test_recurrent_snapshot_store.cpp
         tests/test_vram_query.cpp
-        tests/test_mtp_upload_budget.cpp
     )
 
     imp_add_test_module(test-moe-gdn GPU SOURCES
@@ -1683,7 +1675,6 @@ if(IMP_BUILD_TESTS)
         tests/test_scheduler_embedding_prefix.cpp
         tests/test_scheduler_prefix_bypass.cpp
         tests/test_scheduler_kv_decode.cpp
-        tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
         # Kimi tiktoken vs HF (env-gated: IMP_TEST_MODEL_KIMI = dir with tiktoken.model).
@@ -1754,6 +1745,47 @@ if(IMP_BUILD_TESTS)
         target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
         target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
     endif()
+
+    # Timing, probe and bandwidth-floor cases (TEST_SUITE_AUDIT P1, P2): built with every other
+    # module, run by make test-bench (and make test-perf), not by imp-tests or make test-gpu.
+    imp_add_test_module(test-bench GPU SOURCES
+        tests/test_mxf4nvf4_probe.cu
+        tests/test_mxf4nvf4_mma_bench.cu
+        tests/test_mma_peak_saturated.cu
+        tests/test_mxf4nvf4_mma_variants_bench.cu
+        tests/test_fp4_pv_bench.cu
+        tests/test_tma_block_scale_bench.cu
+        tests/test_fmha_v_load_bench.cu
+        tests/test_gemv_hot_cold_bench.cu
+        tests/bench/test_attention_fmha_hd512_bench.cu
+        tests/bench/test_attention_paged_oracle_bench.cu
+        tests/bench/test_fmha_fp8_bench.cu
+        tests/bench/test_fp8_gemm_bench.cu
+        tests/bench/test_fp8_gemm_smallm_bench.cu
+        tests/bench/test_fp8_proj_stream_bench.cu
+        tests/bench/test_gemm_capture_fp16_sm120_bench.cu
+        tests/bench/test_gemm_f16_narrow_prefill_bench.cu
+        tests/bench/test_gemm_f16_narrow_smallm_bench.cu
+        tests/bench/test_gemm_f16_tile_bench.cu
+        tests/bench/test_gemm_fp8_tile_bench.cu
+        tests/bench/test_gemm_grouped_nvfp4_decode_bench.cu
+        tests/bench/test_gemm_grouped_nvfp4_tile_bench.cu
+        tests/bench/test_gemm_mxfp4_f16_tile_bench.cu
+        tests/bench/test_gemm_mxfp8_tile_bench.cu
+        tests/bench/test_gemm_nvfp4_f16_tile_bench.cu
+        tests/bench/test_gemm_q45k_f16_tile_bench.cu
+        tests/bench/test_gemm_q6k_f16_tile_bench.cu
+        tests/bench/test_inkling_attn_paged_bench.cu
+        tests/bench/test_inkling_kernels_bench.cu
+        tests/bench/test_mmq_q8_imma_tail_bench.cu
+        tests/bench/test_moe_router_fused_bench.cu
+        tests/bench/test_nvfp4_batched_smallm_equiv_bench.cu
+        tests/bench/test_nvfp4_gemm_tile_bench.cu
+        tests/bench/test_nvfp4_smallm_bench.cu
+        tests/bench/test_nvfp4_smallm_v2_bench.cu
+        tests/bench/test_nvfp4_smallm_ws_bench.cu
+    )
+    target_link_libraries(test-bench PRIVATE imp_test_kernels)
 
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention
@@ -1855,13 +1887,10 @@ if(IMP_BUILD_TESTS)
     set_tests_properties(gpu_compute gpu_attention gpu_quant gpu_kv gpu_moe_gdn gpu_e2e
         PROPERTIES LABELS "gpu")
 
-    set(_perf_filter "*Perf*:*Bench*:*Throughput*")
-    add_test(NAME perf_compute   COMMAND test-compute   "--gtest_filter=${_perf_filter}")
-    add_test(NAME perf_attention COMMAND test-attention "--gtest_filter=${_perf_filter}")
-    add_test(NAME perf_quant     COMMAND test-quant     "--gtest_filter=${_perf_filter}")
-    add_test(NAME perf_e2e       COMMAND test-e2e       "--gtest_filter=${_perf_filter}")
-    set_tests_properties(perf_compute perf_attention perf_quant perf_e2e
-        PROPERTIES LABELS "perf")
+    # The timing cases live in their own module; the old *Perf*:*Bench*:*Throughput* filter over
+    # four modules matched 0 cases in test-e2e and 12 DISABLED_ ones elsewhere.
+    add_test(NAME perf_bench COMMAND test-bench)
+    set_tests_properties(perf_bench PROPERTIES LABELS "perf")
 
     # Shell wrappers for the Docker runtime image (no CTestTestfile.cmake there), running the
     # same partitions ctest -L would. On a host build prefer ctest -L unit|gpu|perf.

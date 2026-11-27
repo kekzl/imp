@@ -929,18 +929,6 @@ TEST_F(GemmKernelRegistryTest, GenericDequantNativeFp8AppliesTensorScale) {
     cudaFree(d_out);
 }
 
-// Pin the GemmStrategy operator== contract — used by the linear-scan
-// lookup in dispatch().
-TEST(GemmStrategy, EqualityIsByValue) {
-    GemmStrategy a{StorageTier::FP16, QType::F16, /*m_is_one=*/true};
-    GemmStrategy b{StorageTier::FP16, QType::F16, /*m_is_one=*/true};
-    GemmStrategy c{StorageTier::FP16, QType::F16, /*m_is_one=*/false};
-    GemmStrategy d{StorageTier::FP8, QType::F16, /*m_is_one=*/true};
-    EXPECT_TRUE(a == b);
-    EXPECT_FALSE(a == c);
-    EXPECT_FALSE(a == d);
-}
-
 // The generic dequant catch-all must decline a weight larger than the dequant scratch instead
 // of writing past it: Gemma-4's Q6_K LM head (262144 x 2816, 1408 MiB FP16) against the
 // 44 MiB per-layer-sized scratch crashed `--perplexity` without the dp4a LM head (#2046). The

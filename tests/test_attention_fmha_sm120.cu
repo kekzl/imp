@@ -11,6 +11,7 @@
 #include <vector>
 #include <cmath>
 #include <float.h>
+#include "host_parallel.h"
 
 namespace imp {
 namespace {
@@ -28,13 +29,15 @@ protected:
     }
     void TearDown() override { cudaStreamDestroy(stream_); }
 
-    // CPU reference: standard attention with optional causal, sliding_window, softcap, q_offset
+    // CPU reference: standard attention with optional causal, sliding_window, softcap, q_offset.
+    // One (batch, head) per thread; each output's loop order is the serial one.
     static void ref_attention(const std::vector<float>& Q_f, const std::vector<float>& K_f,
                               const std::vector<float>& V_f, std::vector<float>& O_f, int B, int Sq, int Skv,
                               int NH, int NKV, int HD, float scale, bool causal, int sliding_window,
                               float softcap, int q_offset = 0) {
-        for (int b = 0; b < B; b++) {
-            for (int h = 0; h < NH; h++) {
+        imp_test::parallel_for(B * NH, [&](int bh) {
+            {
+                const int b = bh / NH, h = bh % NH;
                 int kvh = h / (NH / NKV);
                 for (int qi = 0; qi < Sq; qi++) {
                     float m = -FLT_MAX;
@@ -75,7 +78,7 @@ protected:
                     }
                 }
             }
-        }
+        });
     }
 
     void run_test(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sliding_window = 0,

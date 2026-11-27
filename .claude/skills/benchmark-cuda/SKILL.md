@@ -42,7 +42,8 @@ Pair with `kernel-tuning` (which lever, first-version checklist), `sm120-cuda-ex
 | Goal | Tool |
 |---|---|
 | End-to-end engine perf | `make bench` (`imp-cli --bench --bench-pp 512 --bench-reps 5`) |
-| Single model quick check | `make test-perf` (Qwen3-8B Q8_0) |
+| Single model quick check | `make test-perf` (Qwen3-8B NVFP4, then the `test-bench` module) |
+| Kernel timing cases, bandwidth floors | `make test-bench` (module `test-bench`: every timing case of the GPU modules, not in `make test-gpu`) |
 | Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/...]`: 5 trials x 5 reps, 15 s cooldown, median; writes `tests/perf_baseline.json` incl. `own_peak_mb` |
 | Guarded re-pin (refuses top-range / volatile days) | `scripts/repin_baselines_if_median.sh` |
 | Regression gate | `make verify-fast` (`scripts/verify.sh`): 8% decode / 8% prefill / 10% peak VRAM |

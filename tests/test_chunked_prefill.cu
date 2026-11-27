@@ -150,17 +150,18 @@ class ChunkedPrefillTest : public ::testing::Test {
 protected:
     // IMP_TEST_MODEL_QWEN4B / IMP_TEST_MODEL_LLAMA override the model paths, deliberately not the
     // generic IMP_TEST_MODEL (suite runs repurpose that for other gates): these chunk-equality
-    // tolerances are calibrated for Qwen3-4B, where other models could cross the attention-kernel
+    // tolerances are calibrated for Qwen3-4B (both defaults since 2026-11-27: Qwen3-8B-NVFP4, the
+    // 4B/3B Q8_0 GGUFs left the store; all 7 cases green on it), other models can cross the attention-kernel
     // threshold into a different kernel path with legitimately flippable greedy ties.
     static const char* qwen3_4b_path() {
         const char* p = std::getenv(imp_test::kEnvModelQwen4b);
         if (p) return p;
-        return "/models/Qwen3-4B-Instruct-2507-Q8_0.gguf";
+        return "/models/Qwen3-8B-NVFP4-cortecs";
     }
     static const char* llama_3b_path() {
         const char* p = std::getenv(imp_test::kEnvModelLlama);
         if (p) return p;
-        return "/models/Llama-3.2-3B-Instruct-Q8_0.gguf";
+        return "/models/Qwen3-8B-NVFP4-cortecs";
     }
 
     // 120 items (~27 tokens/item, ~3240 tokens) sits safely between two failure cliffs: below

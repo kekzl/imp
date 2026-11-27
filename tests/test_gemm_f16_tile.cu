@@ -1,5 +1,5 @@
 // gemm_f16_tile (own FP16 GEMM, ROADMAP row 123) against cuBLASLt gemm() at the same accumulator
-// precision, plus a timing table on Qwen3-14B / Qwen3.8 projection shapes (informational).
+// precision. Timing cases: tests/bench/test_gemm_f16_tile_bench.cu.
 
 #include "compute/gemm.h"
 #include "compute/gemm_f16_tile.h"
@@ -16,48 +16,9 @@
 #include <vector>
 
 using namespace imp;
+#include "test_gemm_f16_tile_util.cuh"
 
 namespace {
-
-__global__ void fill_f16_kernel(half* p, size_t n, uint32_t seed, float amp) {
-    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
-        uint32_t h = static_cast<uint32_t>(i) * 2654435761u ^ seed;
-        h ^= h >> 13;
-        h *= 0x5bd1e995u;
-        h ^= h >> 15;
-        p[i] = __float2half(amp * ((static_cast<float>(h & 0xffff) / 32768.0f) - 1.0f));
-    }
-}
-
-struct Bufs {
-    half *a = nullptr, *w = nullptr, *ref = nullptr, *own = nullptr;
-    int M = 0, N = 0, K = 0;
-    void alloc(int m, int n, int k, cudaStream_t s) {
-        M = m;
-        N = n;
-        K = k;
-        cudaMalloc(&a, size_t(M) * K * 2);
-        cudaMalloc(&w, size_t(N) * K * 2);
-        cudaMalloc(&ref, size_t(M) * N * 2);
-        cudaMalloc(&own, size_t(M) * N * 2);
-        fill_f16_kernel<<<1024, 256, 0, s>>>(a, size_t(M) * K, 0x51u, 1.0f);
-        fill_f16_kernel<<<1024, 256, 0, s>>>(w, size_t(N) * K, 0x77u, 0.05f);
-        fill_f16_kernel<<<1024, 256, 0, s>>>(ref, size_t(M) * N, 0x99u, 1.0f);
-        cudaMemcpyAsync(own, ref, size_t(M) * N * 2, cudaMemcpyDeviceToDevice, s);
-    }
-    void release() {
-        cudaFree(a);
-        cudaFree(w);
-        cudaFree(ref);
-        cudaFree(own);
-    }
-    void lib(float beta, cudaStream_t s) const {
-        int64_t as[2] = {M, K}, ws[2] = {N, K}, ds[2] = {M, N};
-        Tensor ta(a, QType::F16, 2, as, true), tw(w, QType::F16, 2, ws, true),
-            td(ref, QType::F16, 2, ds, true);
-        gemm(ta, tw, td, 1.0f, beta, s);
-    }
-};
 
 class GemmF16TileTest : public ::testing::TestWithParam<std::tuple<int, int, int, bool, float>> {
 protected:
@@ -170,50 +131,5 @@ TEST(GemmF16SplitK, MatchesCublasLt) {
         cudaFree(ws);
         b.release();
     }
-    cudaStreamDestroy(s);
-}
-
-// Timing vs cuBLASLt gemm() at fp16 accumulate (the default prefill route).
-TEST(GemmF16TileBench, VsCublasLt) {
-    cudaStream_t s;
-    cudaStreamCreate(&s);
-    process_diag_set_cublas_fp16_acc(true);
-    // {2688, 4096}: Nemotron-3-Nano Mamba out_proj (176 tiles at M 2048, one wave + 6 CTAs).
-    const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {5120, 5120}, {1024, 5120}, {2688, 4096}};
-    std::fprintf(stderr, "%6s %6s %6s %9s %9s %9s %9s %9s %8s\n", "M", "N", "K", "lt_us", "v0", "v1", "v2",
-                 "v3", "best_TF");
-    for (const auto& nk : shapes)
-        for (int M : {512, 2048, 4096}) {
-            Bufs b;
-            b.alloc(M, nk[0], nk[1], s);
-            auto time_us = [&](auto&& fn) {
-                cudaEvent_t e0, e1;
-                cudaEventCreate(&e0);
-                cudaEventCreate(&e1);
-                for (int i = 0; i < 20; ++i)
-                    fn();
-                cudaEventRecord(e0, s);
-                for (int i = 0; i < 40; ++i)
-                    fn();
-                cudaEventRecord(e1, s);
-                cudaEventSynchronize(e1);
-                float ms = 0.0f;
-                cudaEventElapsedTime(&ms, e0, e1);
-                cudaEventDestroy(e0);
-                cudaEventDestroy(e1);
-                return 1000.0 * ms / 40;
-            };
-            const double t_lt = time_us([&] { b.lib(0.0f, s); });
-            double t_v[2];
-            for (int v = 0; v < 2; ++v)
-                t_v[v] = time_us(
-                    [&] { (void)gemm_f16_tile(b.a, b.w, b.own, b.M, b.N, b.K, 1.0f, 0.0f, true, s, v); });
-            ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
-            const double best = *std::min_element(t_v, t_v + 2);
-            std::fprintf(stderr, "%6d %6d %6d %9.1f %9.1f %9.1f %8.0f\n", b.M, b.N, b.K, t_lt, t_v[0], t_v[1],
-                         2.0 * b.M * b.N * double(b.K) / (best * 1e-6) / 1e12);
-            b.release();
-        }
-    process_diag_set_cublas_fp16_acc(false);
     cudaStreamDestroy(s);
 }

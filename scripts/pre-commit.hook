@@ -110,7 +110,8 @@ fi
 # shellcheck disable=SC2086 # CHANGED is a newline list of repo paths without spaces.
 MODULES="$(select_modules $CHANGED)"
 if [ "${IMP_PRECOMMIT_FULL:-0}" = "1" ] || echo " $MODULES" | grep -q " ALL"; then
-    hook_gpu "make -s test-gpu"
+    # test-gpu leaves the 9 model suites to the test-e2e groups (Makefile test-gpu-suite).
+    hook_gpu "make -s test-gpu && make -s test-e2e"
     exit $?
 fi
 # Absolute path: gtest threadsafe death tests re-exec argv[0] with execv (no PATH search).

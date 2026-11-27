@@ -3,7 +3,7 @@
 // Unified math (alpha/beta form; Q8_0: alpha=d, beta=0): out[m,n] = Σ_kb d_a[m,kb] · ( α[n,kb]·Σ_{k∈kb}
 // a_s8·w_s8 + β[n,kb]·rs[m,kb] )
 // rs = int rowsum of the quantized activation sub-block; couples to Q4_K's collapsed (q-8)+dmin terms
-// (mmq_q4k_imma_layout.h).
+// (mmq_q8_imma_q4k.cu).
 
 #include "compute/mmq_q8_imma.h"
 #include "memory/device_alloc_all.h"

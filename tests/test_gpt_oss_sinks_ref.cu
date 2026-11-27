@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
+#include "host_parallel.h"
 
 namespace imp {
 namespace {
@@ -62,7 +63,8 @@ std::vector<double> ref_attention_sink(const std::vector<half>& Qh, const std::v
     const int gqa = n_heads / n_kv_heads;
     std::vector<double> O(static_cast<size_t>(q_len) * n_heads * head_dim, 0.0);
 
-    for (int h = 0; h < n_heads; h++) {
+    // One head per thread; each output keeps its serial accumulation order.
+    imp_test::parallel_for(n_heads, [&](int h) {
         int kvh = h / gqa;
         for (int i = 0; i < q_len; i++) {
             // scores
@@ -100,7 +102,7 @@ std::vector<double> ref_attention_sink(const std::vector<half>& Qh, const std::v
                 }
             }
         }
-    }
+    });
     return O;
 }
 

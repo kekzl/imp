@@ -14,7 +14,7 @@
 
 namespace {
 
-constexpr const char kModel[] = "/models/Qwen3-4B-Instruct-2507-Q8_0.gguf";
+constexpr const char kModel[] = "/models/Qwen3-Reranker-0.6B-Q8_0.gguf";
 
 struct Arm {
     std::string log;

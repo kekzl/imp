@@ -17,7 +17,7 @@
 namespace {
 
 static std::string model_path() {
-    return imp_test::env_path_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
+    return imp_test::env_path_or(imp_test::kEnvModel, "/models/Qwen3-Reranker-0.6B-Q8_0.gguf");
 }
 
 static bool model_exists(const std::string& p) {
