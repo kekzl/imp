@@ -1340,6 +1340,15 @@ if(IMP_BUILD_TESTS)
         # upload_weight's one traits-templated staging path vs the per-format uploaders it
         # replaced (#2212): host bytes, alloc/copy/free order, result tensor, on a fake device.
         tests/test_weight_upload_staging.cpp
+        # Host-only suites that lived in GPU modules (TEST_SUITE_AUDIT P6): JSON FSM (#1067),
+        # preamble gate, NVFP4 scale validation, sparse prefill geometry, VRAM budget arithmetic
+        # (#874), MTP upload budget (#1494). RegexNfaTest (#497) and GemmStrategy joined
+        # test_regex_constrain.cpp and test_gemm_kernel_registry_link.cpp.
+        tests/test_json_constrain_host.cpp
+        tests/test_nvfp4_scale_validate.cpp
+        tests/test_sparse_prefill_geometry.cpp
+        tests/test_vram_budget_reserve_host.cpp
+        tests/test_mtp_upload_budget.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse anthropic.cpp (json-only deps).
@@ -1628,7 +1637,6 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_grow_admission_gpu.cpp
         tests/test_recurrent_snapshot_store.cpp
         tests/test_vram_query.cpp
-        tests/test_mtp_upload_budget.cpp
     )
 
     imp_add_test_module(test-moe-gdn GPU SOURCES
@@ -1744,14 +1752,6 @@ if(IMP_BUILD_TESTS)
         target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
     endif()
 
-    set(IMP_TEST_BINARIES
-        test-core test-text test-compute test-attention
-        test-quant test-kv test-moe-gdn test-e2e
-    )
-
-    # ctest -L unit/gpu/perf: source of truth for the CPU/GPU test split.
-    # gtest filter (_unit_e2e_filter) applies only to test-e2e (mixed stub+CUDA E2E in one binary);
-    # guard_e2e_lane_split asserts it resolves to the expected CPU-only set. Keep verify.sh's copy in sync.
     # Timing, probe and bandwidth-floor cases (TEST_SUITE_AUDIT P1, P2): built with every other
     # module, run by make test-bench (and make test-perf), not by imp-tests or make test-gpu.
     imp_add_test_module(test-bench GPU SOURCES
@@ -1795,6 +1795,14 @@ if(IMP_BUILD_TESTS)
     )
     target_link_libraries(test-bench PRIVATE imp_test_kernels)
 
+    set(IMP_TEST_BINARIES
+        test-core test-text test-compute test-attention
+        test-quant test-kv test-moe-gdn test-e2e
+    )
+
+    # ctest -L unit/gpu/perf: source of truth for the CPU/GPU test split.
+    # gtest filter (_unit_e2e_filter) applies only to test-e2e (mixed stub+CUDA E2E in one binary);
+    # guard_e2e_lane_split asserts it resolves to the expected CPU-only set. Keep verify.sh's copy in sync.
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
     # Each lane writes a GTest JSON report; guard_unit_skips fails on any skipped test in it.
