@@ -1,3 +1,4 @@
+#include "exec/fp8_decode_sidecar.h"
 #include "model/model.h"
 #include "model/model_arch.h"
 #include "model/model_config.h"
@@ -123,6 +124,16 @@ TEST(ModelProfileTable, ArchKeyedFieldsAndSwaWindows) {
         EXPECT_EQ(p.swa_snapshot_default_mb, arch == ModelArch::FLINT ? 256 : 0);
         // FP16 attention projections decode from the FP8 sidecar: gpt-oss and Flash-Next.
         EXPECT_EQ(p.fp8_attn_proj_full, r->gpt_oss || arch == ModelArch::QWEN4_EXP);
+        // gemm.fp8_ffn_proj=auto: the dense 16-bit FFN decodes from the FP8 sidecar on Gemma-4 NVFP4
+        // checkpoints only (B-141: Qwen3 / Qwen3.8 / Llama off, the all-BF16 E4B off); =off removes it.
+        EXPECT_FALSE(p.fp8_ffn_proj_auto) << "16-bit checkpoint";
+        ModelConfig nvfp4 = cfg;
+        nvfp4.is_nvfp4_prequant = true;
+        const ModelProfile q = profile_for(arch, nvfp4);
+        EXPECT_EQ(q.fp8_ffn_proj_auto, r->gemma4);
+        EXPECT_EQ(imp::fp8_sidecar_scope("auto", q.fp8_attn_proj_full, "auto", q.fp8_ffn_proj_auto).ffn,
+                  r->gemma4);
+        EXPECT_FALSE(imp::fp8_sidecar_scope("auto", q.fp8_attn_proj_full, "off", q.fp8_ffn_proj_auto).ffn);
         EXPECT_EQ(p.deny_cublas_fp16_acc, r->gemma3 || r->gemma4 || r->gpt_oss);
         EXPECT_EQ(p.is_llama4, r->llama4);
         EXPECT_EQ(p.is_encoder, r->encoder);

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <utility>
 
 namespace imp {
 namespace {
@@ -482,6 +483,20 @@ TEST(ConfigBadValue, TriStateKeyKeepsItsThreeSpellings) {
     }
     imp::RuntimeConfig cfg;
     EXPECT_EQ(cfg.apply_overrides({"gemm.cublas_fp16_acc=sometimes"}).size(), 1u);
+}
+
+// B-141: gemm.fp8_ffn_proj defaults to "auto" (Gemma-4 NVFP4 on) and keeps --set =off as the opt-out;
+// the bool spellings of the former bool key map to on / off.
+TEST(ConfigBadValue, Fp8FfnProjIsTriStateWithAutoDefault) {
+    EXPECT_EQ(imp::RuntimeConfig{}.gemm.fp8_ffn_proj, "auto");
+    for (const auto& [in, out] : {std::pair{"auto", "auto"}, std::pair{"on", "on"}, std::pair{"off", "off"},
+                                  std::pair{"true", "on"}, std::pair{"false", "off"}}) {
+        imp::RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides({std::string("gemm.fp8_ffn_proj=") + in}).empty()) << in;
+        EXPECT_EQ(cfg.gemm.fp8_ffn_proj, out) << in;
+    }
+    imp::RuntimeConfig cfg;
+    EXPECT_EQ(cfg.apply_overrides({"gemm.fp8_ffn_proj=sometimes"}).size(), 1u);
 }
 
 // #1645: the knob that sets the prefill TTFT/ITL trade had no imp.conf key,

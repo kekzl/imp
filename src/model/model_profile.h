@@ -39,6 +39,7 @@ struct ModelProfile {
     bool rope_full_head_dim = false;           // rotate full hd; freq factors encode partial rotary
     bool unit_softmax_scale = false;           // attention softmax scale 1.0
     bool outlier_sensitive_logits = false;     // deterministic GEMM, MMVQ, no BOS warmup
+    bool fp8_ffn_proj_auto = false;            // fp8_ffn_proj=auto: FFN on the FP8 sidecar (Gemma-4 NVFP4)
     // gpt-oss today:
     bool learned_attn_sinks = false;             // sink logits: cuBLAS prefill, no FA2 / chunk capture
     bool moe_expert_bias_glu = false;            // per-expert gate/up/down bias + clamped GLU

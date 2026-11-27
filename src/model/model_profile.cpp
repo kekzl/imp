@@ -59,6 +59,9 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     p.rope_full_head_dim = is_gemma4;
     p.unit_softmax_scale = is_gemma4;
     p.outlier_sensitive_logits = is_gemma4;
+    // Gemma-4 NVFP4 checkpoints (26B-A4B leaves the dense MLP BF16): FP8 decode sidecar, decode +7.0 %,
+    // top-1 99.06 %. Not the all-BF16 E4B: top-1 98.25 % over 5096 decode positions (B-141).
+    p.fp8_ffn_proj_auto = is_gemma4 && cfg.is_nvfp4_prequant;
 
     p.learned_attn_sinks = is_gpt_oss || cfg.arch == ModelArch::FLINT;
     p.swa_snapshot_default_mb = cfg.arch == ModelArch::FLINT ? 256 : 0;

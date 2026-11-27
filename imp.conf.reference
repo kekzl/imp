@@ -500,8 +500,11 @@ fp8_attn_proj        = "auto"
 # FFN weights (w_gate / w_up / w_down, and the shared-expert slots that hold the
 # Gemma-4 MoE dense MLP), M=1 decode only; prefill keeps the 16-bit source.
 # Gemma-4-26B-A4B: decode 212.7 -> 225.8 tok/s, +514 MiB after start, decode
-# top-1 agreement 99.06 % (docs/ROADMAP.md B-141). Off by default.
-fp8_ffn_proj         = false
+# top-1 agreement 99.06 % (docs/ROADMAP.md B-141). "auto" (default) = on for
+# Gemma-4 NVFP4 checkpoints (their dense 16-bit FFN weights), off for the
+# all-BF16 gemma-4-E4B-it (decode top-1 98.25 %) and every other arch;
+# "on" forces it for any arch, "off" disables (bool spellings map to on / off).
+fp8_ffn_proj         = "auto"
 # FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F). GeForce sm_120
 # runs FP32-accumulate tensor cores at 1/4 rate, so 32F caps prefill at
 # ~225 TFLOPS; 16F roughly doubles GEMM throughput (Qwen3-8B Q8_0 pp512
