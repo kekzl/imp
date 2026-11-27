@@ -249,7 +249,7 @@ MOE_MODEL ?= /models/Gemma-4-26B-A4B-it-NVFP4
 HYBRID_RESTORE_RUN = $(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3.8-27B-NVFP4-vllm \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.8-27B-NVFP4-vllm \
-		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*:CancelLifecycleHybridTest.*"
+		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*:CancelLifecycleHybridTest.*:HybridSharedScoreTest.*"
 # The hybrid group of test-e2e alone: scripts/check-release.sh runs it (red 2026-10-04 to #2820 unblocked).
 test-hybrid-restore: build
 	$(HYBRID_RESTORE_RUN)
@@ -267,7 +267,7 @@ test-e2e: build
 		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
 		-e IMP_TEST_MODEL_SSM=/models/Nemotron-3-Nano-30B-A3B-NVFP4 \
 		-e IMP_TEST_MODEL_NVFP4_MOE=/models/Qwen3-30B-A3B-NVFP4-Modelopt \
-		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:Gemma4SafeTensorsTest.*:SpecCaptureFidelityTest.*:DeviceFaultSignalTest.*:ServingSignalsTest.*:SamplerRowBansTest.*:*DetEvalE2ETest*:*MoePrefixHitE2ETest*:Mamba2BatchedDecodeTest.*" \
+		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:Gemma4SafeTensorsTest.*:SpecCaptureFidelityTest.*:DeviceFaultSignalTest.*:ServingSignalsTest.*:SamplerRowBansTest.*:*DetEvalE2ETest*:*MoePrefixHitE2ETest*:Mamba2BatchedDecodeTest.*:DecodeGraphCtxGrowthTest.*:PromptLogprobsE2ETest.*" \
 		|| echo model-battery >> $(E2E_FAILED)
 	@# The greedy regression locks, the degeneration battery, the prefix-cache
 	@# equivalence and the tokenizer/tensor-kind parity suites ran from NO
@@ -277,7 +277,10 @@ test-e2e: build
 	@# one, the loader + RoPE path the #503 class shipped prompt-blind on).
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
-		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:CancelLifecycleTest.*" \
+		-e IMP_TEST_TOKENIZER_QWEN3=/models/Qwen3-8B-NVFP4-cortecs \
+		-e IMP_TEST_FIM_TOKENIZER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
+		-e IMP_TEST_NOFIM_TOKENIZER=/models/Gemma-4-26B-A4B-it-NVFP4 \
+		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:CancelLifecycleTest.*:CandidateTokenGuardTest.*:FimRealTokenizer.*" \
 		|| echo locks-degeneration-prefix >> $(E2E_FAILED)
 	@# The hybrid recurrent paths: the snapshot restore and the decode-graph
 	@# buckets. Both skip on a dense checkpoint, and every line above loads a

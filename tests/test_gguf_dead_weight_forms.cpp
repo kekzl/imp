@@ -93,7 +93,7 @@ protected:
 };
 
 TEST_F(GgufDeadWeightForms, DenseGgufWeightsCarryNoSfAtom) {
-    const std::string log = load("/models/Qwen3-14B-Q6_K.gguf", 16000);
+    const std::string log = load("/models/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf", 16000);
     if (!skip_.empty())
         GTEST_SKIP() << skip_;
     std::smatch m;
