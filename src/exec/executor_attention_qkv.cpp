@@ -166,6 +166,7 @@
             gemv_mxfp4_qkv_fused(mw_q, mw_k, mw_v, static_cast<const half*>(no.data),
                                  static_cast<half*>(qv.data), static_cast<half*>(kk.data),
                                  static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream);
+            record_dense_({ly.wq_id, ly.wk_id, ly.wv_id}, DensePath::QKV_GEMV_MXFP4);
         } else if (nvfp4_qkv) {
             // NVFP4 fused QKV: RMSNorm to FP16 (or folded into the producer), then NVFP4 GEMV
             // QSA decode reads the normalised `no` after this GEMV: no fold on its layers.
@@ -194,6 +195,7 @@
             gemv_nvfp4_qkv_fused(nv_q, nv_k, nv_v, static_cast<const half*>(no.data),
                                  static_cast<half*>(qv.data), static_cast<half*>(kk.data),
                                  static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream, qkv_fold);
+            record_dense_({ly.wq_id, ly.wk_id, ly.wv_id}, DensePath::QKV_GEMV_NVFP4);
         } else if (fused_qkv) {
             dp4a_qkv_(ly, layer, h, no, qv, kk, vv, eps, stream);
         } else {
@@ -245,7 +247,8 @@
                 Tensor* const o3[3] = {&q_target, &kk, &vv};
                 const float* const s3[3] = {fp8_hwq->payload.fp8.d_scale, fp8_hwk->payload.fp8.d_scale,
                                             fp8_hwv->payload.fp8.d_scale};
-                gemm_fp8x8_multi_(fp8_no, w3, o3, s3, 3, fp8_a_scale, stream);
+                const TensorID i3[3] = {ly.wq_id, ly.wk_id, ly.wv_id};
+                gemm_fp8x8_multi_(i3, fp8_no, w3, o3, s3, 3, fp8_a_scale, stream);
             } else {
                 // Fused K+V path: one strided batched GEMM for both projections, looked
                 // up via WeightRegistry handle (wcache_ is the storage owner only, not the
@@ -265,6 +268,7 @@
                     gemm_via_handle_(ly.wq_id, no, q_target, ctx);
                     // K+V: one batched cuBLAS call
                     gemm_kv_batched(no, *fused_kv, kk, vv, stream);
+                    record_dense_({ly.wk_id, ly.wv_id}, DensePath::FP16_PAIR_BATCHED);
                 } else {
                     // NVFP4-CUTLASS prefill QKV reads the SAME normed input three times:
                     // quantize once (Q's dispatch) into the activation scratch, K/V skip the

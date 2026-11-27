@@ -13,6 +13,7 @@
 #include "memory/span.h"
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
+#include "compute/dispatch_paths.h"
 #include "compute/moe_routing.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
@@ -48,6 +49,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <vector>
 #include <span>
@@ -1178,6 +1180,9 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
+    // The ladder itself: every exit returns the DensePath it ran (dispatch_record::set_dense).
+    DensePath gemm_via_handle_(const WeightHandle& h, const Tensor& input, Tensor& output,
+                               const GemmContext& ctx);
     // FP16 input -> qscratch_.fp8_act for an FP8-tier weight: the weight's static input scale
     // (gemm.fp8_static_act_scale), else per-token dynamic scales; a row never depends on its neighbours.
     // Null = no scratch.
@@ -1186,13 +1191,17 @@ private:
     void gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry& e, const Tensor& input, Tensor& output,
                            const GemmContext& ctx);
     // out = as * *w_scale * a8 w8^T + beta out, E4M3 operands: own small-M / tile, else cuBLASLt (scalar a
-    // only).
-    void gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, Fp8ActScale a,
-                     const float* w_scale, cudaStream_t stream);
+    // only). Returns the exit it took.
+    DensePath gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, Fp8ActScale a,
+                          const float* w_scale, cudaStream_t stream);
     // 2-3 FP8 weights on one FP8 activation, beta 0 (q|k|v, gate|up): one small-M launch on decode rows,
-    // else gemm_fp8x8_ per weight. w8/out/w_scale arrays of `count`.
-    void gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor* const* out,
+    // else gemm_fp8x8_ per weight. ids/w8/out/w_scale arrays of `count`; records each id's exit.
+    void gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, const Tensor* w8, Tensor* const* out,
                            const float* const* w_scale, int count, Fp8ActScale a, cudaStream_t stream);
+    // dispatch_record::set_dense_each under each weight's own kind; an invalid id records nothing.
+    void record_dense_(std::initializer_list<TensorID> ids, DensePath p) const;
+    // Records `ids` under `p` when ok; returns ok (a sibling launch that may decline).
+    [[nodiscard]] bool record_dense_if_(bool ok, const TensorID* ids, int n, DensePath p) const;
     // --gpu-layers: ensure_layer + prefetch / release_layer around layer i. Streamed layers rebind
     // handle.source_data to the matmul's current data (slot, then host): gemm_via_handle_ reads it.
     void offload_enter_(int layer, int n_layers, cudaStream_t stream);
