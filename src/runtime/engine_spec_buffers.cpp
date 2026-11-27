@@ -6,6 +6,7 @@
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
@@ -157,12 +158,12 @@ bool Engine::spec_state_scratch_wanted_() const {
 // state. Plus the bound verify's factor rows, one per verify group and draft before the last
 // (speculative.mtp_batch_verify_factor_row).
 size_t Engine::spec_state_scratch_plan_bytes_(size_t ssm_footprint_bytes, int reserved_slots) const {
-    const size_t slots = static_cast<size_t>(std::max(0, config_.max_batch_size)) +
+    const size_t slots = static_cast<size_t>(std::max(0, rt_.max_batch_size)) +
                          static_cast<size_t>(std::max(0, reserved_slots));
     if (ssm_footprint_bytes == 0 || slots == 0 || !spec_state_scratch_wanted_())
         return 0;
     return ((1 + static_cast<size_t>(spec_snap_rows_())) * (ssm_footprint_bytes / slots)) +
-           mtp_bound_verify_factor_row_plan_bytes(runtime_config_, model_.get(), config_.max_batch_size);
+           mtp_bound_verify_factor_row_plan_bytes(runtime_config_, model_.get(), rt_.max_batch_size);
 }
 
 // Init-time allocation of the hybrid verify scratch; a no-op once sized or on a non-hybrid model.
