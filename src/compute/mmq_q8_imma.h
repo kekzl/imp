@@ -14,8 +14,8 @@ namespace imp {
 // Weight forms:
 //   Q8_0 — native s8, SoA-split once per tensor (qs [N][K] + (α=d, β=0)
 //          interleaved scale plane [N][K/32][2]).
-//   Q4_K — reordered once via mmq_q4k_imma_reorder (symmetric s8 + per-sub
-//          α/β, see mmq_q4k_imma_layout.h), interleaved the same way.
+//   Q4_K — raw blocks; per-sub α = d·sc6, β = 8α − dmin·m6 from the staged
+//          block headers (mmq_q8_imma_q4k.cu), interleaved the same way.
 //
 // Unified epilogue per 32-wide sub-block kb:
 //   out[m,n] += d_a[m,kb] · ( α[n,kb] · Σ s8·s8 + β[n,kb] · rowsum_a[m,kb] )

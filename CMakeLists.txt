@@ -432,8 +432,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/kda_recurrent.cu
     src/compute/kda_scan_chunk.cu
     src/compute/hadamard.cu
-    src/compute/mmq_q4k_imma_layout.cu
-    src/compute/mmq_q4k_imma_tile.cu
     src/compute/mmq_q8_imma.cu
     src/compute/mmq_q8_imma_scratch.cu
 )
@@ -1520,7 +1518,6 @@ if(IMP_BUILD_TESTS)
         tests/test_prompt_logprobs_rows.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
-        tests/test_mmq_q4k_imma_layout.cu
     )
 
     imp_add_test_module(test-attention GPU SOURCES
@@ -1587,8 +1584,6 @@ if(IMP_BUILD_TESTS)
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/quant_report.cpp
         tests/test_mxf4nvf4_qkt_validate.cu
-        tests/test_mmq_q4k_imma_tile_bench.cu
-        tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
         tests/test_q8_planes_only.cu
         tests/test_mmq_q8_imma_q5k.cu
@@ -1611,7 +1606,6 @@ if(IMP_BUILD_TESTS)
         src/compute/mxf4nvf4_qkt_validate.cu
         tests/bench/tma_block_scale_bench.cu
         tests/bench/fmha_v_load_bench.cu
-        tests/bench/mmq_q4k_imma_bench.cu
     )
     target_include_directories(imp_test_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(imp_test_kernels PUBLIC imp PRIVATE imp_warnings)
@@ -1762,7 +1756,6 @@ if(IMP_BUILD_TESTS)
         tests/test_fp4_pv_bench.cu
         tests/test_tma_block_scale_bench.cu
         tests/test_fmha_v_load_bench.cu
-        tests/test_mmq_q4k_imma_bench.cu
         tests/test_gemv_hot_cold_bench.cu
         tests/bench/test_attention_fmha_hd512_bench.cu
         tests/bench/test_attention_paged_oracle_bench.cu
@@ -1784,7 +1777,6 @@ if(IMP_BUILD_TESTS)
         tests/bench/test_gemm_q6k_f16_tile_bench.cu
         tests/bench/test_inkling_attn_paged_bench.cu
         tests/bench/test_inkling_kernels_bench.cu
-        tests/bench/test_mmq_q4k_imma_tile_sweep_bench.cu
         tests/bench/test_mmq_q8_imma_tail_bench.cu
         tests/bench/test_moe_router_fused_bench.cu
         tests/bench/test_nvfp4_batched_smallm_equiv_bench.cu

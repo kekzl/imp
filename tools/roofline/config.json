@@ -215,12 +215,12 @@
     {
       "name": "gemm_imma_prefill",
       "group": "gemm",
-      "regex": "mmq_imma_kernel|mmq_q4k_imma_tile_kernel|mmq_splitk_finalize_kernel|mmq_imma_q4k_raw_kernel|mmq_imma_q6k_raw_kernel"
+      "regex": "mmq_imma_kernel|mmq_splitk_finalize_kernel|mmq_imma_q4k_raw_kernel|mmq_imma_q6k_raw_kernel"
     },
     {
       "name": "quant_imma_marshal",
       "group": "dequant",
-      "regex": "q8_split_kernel|quantize_act_fast_kernel|quantize_fp16_to_int8_subblock_kernel|mmq_q4k_imma_reorder_kernel|q6k_repack_kernel"
+      "regex": "q8_split_kernel|quantize_act_fast_kernel|quantize_fp16_to_int8_subblock_kernel|q6k_repack_kernel"
     },
     {
       "name": "gemm_cublas",
