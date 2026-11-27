@@ -4305,21 +4305,21 @@ strict|gemma|t0|c4|[]
 prompt|gemma|t0|c5|len=0 h=14650fb0739d0383
 enforceable|gemma|t0|c5|native=0|0
 forced|gemma|t0|c5|native=0|name= params= open= close=
-enforceable|gemma|t0|c5|native=1|1
+enforceable|gemma|t0|c5|native=1|0
 forced|gemma|t0|c5|native=1|name= params= open= close=
 constraint|gemma|t0|c5|[]
 strict|gemma|t0|c5|[]
 prompt|gemma|t0|c6|len=0 h=14650fb0739d0383
 enforceable|gemma|t0|c6|native=0|0
 forced|gemma|t0|c6|native=0|name= params= open= close=
-enforceable|gemma|t0|c6|native=1|1
+enforceable|gemma|t0|c6|native=1|0
 forced|gemma|t0|c6|native=1|name= params= open= close=
 constraint|gemma|t0|c6|[]
 strict|gemma|t0|c6|[]
 prompt|gemma|t0|c7|len=0 h=14650fb0739d0383
 enforceable|gemma|t0|c7|native=0|0
 forced|gemma|t0|c7|native=0|name= params= open= close=
-enforceable|gemma|t0|c7|native=1|1
+enforceable|gemma|t0|c7|native=1|0
 forced|gemma|t0|c7|native=1|name= params= open= close=
 constraint|gemma|t0|c7|[]
 strict|gemma|t0|c7|[]
@@ -4368,21 +4368,21 @@ strict|gemma|t1|c4|[]
 prompt|gemma|t1|c5|len=681 h=c29e24b367c4a222|\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n<tools>\n[{"type":"function","function":{"name":"get_weather","description":"Weather","strict":true,"parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}},{"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}}]\n</tools>\n\nFor each function call, return a JSON object within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": "function_name", "arguments": {"param": "value"}}\n</tool_call>\n\nIf no function call is needed, respond normally without any tool_call tags.\n\nYou MUST call the get_weather tool.
 enforceable|gemma|t1|c5|native=0|0
 forced|gemma|t1|c5|native=0|name= params= open= close=
-enforceable|gemma|t1|c5|native=1|1
-forced|gemma|t1|c5|native=1|name=get_weather params={"type":"object","properties":{"city":{"type":"string"}},"required":["city"]} open=<|tool_call>call:get_weather close=<tool_call|>
+enforceable|gemma|t1|c5|native=1|0
+forced|gemma|t1|c5|native=1|name= params= open= close=
 constraint|gemma|t1|c5|[]
 strict|gemma|t1|c5|[]
 prompt|gemma|t1|c6|len=674 h=1da59c74b946c761
 enforceable|gemma|t1|c6|native=0|0
 forced|gemma|t1|c6|native=0|name= params= open= close=
-enforceable|gemma|t1|c6|native=1|1
-forced|gemma|t1|c6|native=1|name=bash params={"type":"object","properties":{"cmd":{"type":"string"}}} open=<|tool_call>call:bash close=<tool_call|>
+enforceable|gemma|t1|c6|native=1|0
+forced|gemma|t1|c6|native=1|name= params= open= close=
 constraint|gemma|t1|c6|[]
 strict|gemma|t1|c6|[]
 prompt|gemma|t1|c7|len=677 h=d4517213d15e3275
 enforceable|gemma|t1|c7|native=0|0
 forced|gemma|t1|c7|native=0|name= params= open= close=
-enforceable|gemma|t1|c7|native=1|1
+enforceable|gemma|t1|c7|native=1|0
 forced|gemma|t1|c7|native=1|name= params= open= close=
 constraint|gemma|t1|c7|[]
 strict|gemma|t1|c7|[]
@@ -4431,21 +4431,21 @@ strict|gemma|t2|c4|[]
 prompt|gemma|t2|c5|len=583 h=47c4bb4e8b9deaf2
 enforceable|gemma|t2|c5|native=0|0
 forced|gemma|t2|c5|native=0|name= params= open= close=
-enforceable|gemma|t2|c5|native=1|1
-forced|gemma|t2|c5|native=1|name=get_weather params={"type":"object","properties":{"city":{"type":"string"}}} open=<|tool_call>call:get_weather close=<tool_call|>
+enforceable|gemma|t2|c5|native=1|0
+forced|gemma|t2|c5|native=1|name= params= open= close=
 constraint|gemma|t2|c5|[]
 strict|gemma|t2|c5|[]
 prompt|gemma|t2|c6|len=576 h=b944c22e813fa711
 enforceable|gemma|t2|c6|native=0|0
 forced|gemma|t2|c6|native=0|name= params= open= close=
-enforceable|gemma|t2|c6|native=1|1
+enforceable|gemma|t2|c6|native=1|0
 forced|gemma|t2|c6|native=1|name= params= open= close=
 constraint|gemma|t2|c6|[]
 strict|gemma|t2|c6|[]
 prompt|gemma|t2|c7|len=579 h=3ca87429a97c84e5
 enforceable|gemma|t2|c7|native=0|0
 forced|gemma|t2|c7|native=0|name= params= open= close=
-enforceable|gemma|t2|c7|native=1|1
+enforceable|gemma|t2|c7|native=1|0
 forced|gemma|t2|c7|native=1|name= params= open= close=
 constraint|gemma|t2|c7|[]
 strict|gemma|t2|c7|[]
@@ -4494,21 +4494,21 @@ strict|gemma|t3|c4|[]
 prompt|gemma|t3|c5|len=515 h=a3c080794bcc83c9
 enforceable|gemma|t3|c5|native=0|0
 forced|gemma|t3|c5|native=0|name= params= open= close=
-enforceable|gemma|t3|c5|native=1|1
+enforceable|gemma|t3|c5|native=1|0
 forced|gemma|t3|c5|native=1|name= params= open= close=
 constraint|gemma|t3|c5|[]
 strict|gemma|t3|c5|[]
 prompt|gemma|t3|c6|len=508 h=c318379e71fd8690
 enforceable|gemma|t3|c6|native=0|0
 forced|gemma|t3|c6|native=0|name= params= open= close=
-enforceable|gemma|t3|c6|native=1|1
-forced|gemma|t3|c6|native=1|name=bash params={"type":"object","properties":{"cmd":{"type":"string"}}} open=<|tool_call>call:bash close=<tool_call|>
+enforceable|gemma|t3|c6|native=1|0
+forced|gemma|t3|c6|native=1|name= params= open= close=
 constraint|gemma|t3|c6|[]
 strict|gemma|t3|c6|[]
 prompt|gemma|t3|c7|len=511 h=a72dce7ca3d3e732
 enforceable|gemma|t3|c7|native=0|0
 forced|gemma|t3|c7|native=0|name= params= open= close=
-enforceable|gemma|t3|c7|native=1|1
+enforceable|gemma|t3|c7|native=1|0
 forced|gemma|t3|c7|native=1|name= params= open= close=
 constraint|gemma|t3|c7|[]
 strict|gemma|t3|c7|[]
@@ -4557,21 +4557,21 @@ strict|gemma|t4|c4|[]
 prompt|gemma|t4|c5|len=453 h=d69a277545a94dce
 enforceable|gemma|t4|c5|native=0|0
 forced|gemma|t4|c5|native=0|name= params= open= close=
-enforceable|gemma|t4|c5|native=1|1
+enforceable|gemma|t4|c5|native=1|0
 forced|gemma|t4|c5|native=1|name= params= open= close=
 constraint|gemma|t4|c5|[]
 strict|gemma|t4|c5|[]
 prompt|gemma|t4|c6|len=446 h=2b480355348a5ae5
 enforceable|gemma|t4|c6|native=0|0
 forced|gemma|t4|c6|native=0|name= params= open= close=
-enforceable|gemma|t4|c6|native=1|1
+enforceable|gemma|t4|c6|native=1|0
 forced|gemma|t4|c6|native=1|name= params= open= close=
 constraint|gemma|t4|c6|[]
 strict|gemma|t4|c6|[]
 prompt|gemma|t4|c7|len=449 h=b933549f14745329
 enforceable|gemma|t4|c7|native=0|0
 forced|gemma|t4|c7|native=0|name= params= open= close=
-enforceable|gemma|t4|c7|native=1|1
+enforceable|gemma|t4|c7|native=1|0
 forced|gemma|t4|c7|native=1|name= params= open= close=
 constraint|gemma|t4|c7|[]
 strict|gemma|t4|c7|[]

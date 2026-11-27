@@ -187,7 +187,7 @@ bool parse_gemma_tool_call_body(const std::string& body_in, ParsedToolCall& tc) 
     if (name.empty())
         return false;
 
-    // A forced tool_choice constrains a JSON arguments object here (#2279); Gemma's own syntax has
+    // A JSON arguments object (the #2279 forced body, or a model writing JSON); Gemma's own syntax has
     // unquoted keys, so a body that parses as a JSON object is JSON.
     json args = json::parse(body.substr(brace), nullptr, false);
     bool ok = !args.is_discarded() && args.is_object();
@@ -332,16 +332,10 @@ std::string gemma_tool_response(const json& msg, const std::string& content) {
            "}<tool_response|>";
 }
 
-// A forced tool_choice constrains a JSON body here; parse_gemma_tool_call_body accepts it (#2279).
-void gemma_forced_envelope(const std::string& name, std::string& open, std::string& close) {
-    open = "<|tool_call>call:" + name;
-    close = "<tool_call|>";
-}
-
 }  // namespace
 
 // Gemma-4 <|tool_call>call:NAME{...}<tool_call|>; gemma-3 shares the family without the native token,
-// so the forced envelope needs <|tool_call> in the vocab.
+// so tool_choice required / named run as auto only with <|tool_call> in the vocab.
 extern const ToolCallDialect kGemmaToolDialect = {
     .name = "gemma",
     .prompt = chatml_tool_prompt,
@@ -352,7 +346,7 @@ extern const ToolCallDialect kGemmaToolDialect = {
     .json_envelope_open = nullptr,
     .json_envelope_close = nullptr,
     .xml_body = false,
-    .forced_envelope = gemma_forced_envelope,
+    .forced_envelope = nullptr,  // named runs as auto (B-143, vLLM gemma4 parser)
     .native_token = "<|tool_call>",
     .tool_response_joins_assistant = true,
     .gate_open = "<|tool_call>",

@@ -53,9 +53,11 @@ only where the loaded model's chat template has a grammar for it:
 
 | `tool_choice` | enforced on |
 |---|---|
-| `"required"` | `chatml`; Gemma-4 serves it unconstrained and parses it as `"auto"`, as vLLM's `gemma4` parser does (B-143) |
-| a named function | `chatml`, `llama3`, `harmony` (gpt-oss), `gemma` with the `<\|tool_call>` token (Gemma-4) |
+| `"required"` | `chatml` |
+| a named function | `chatml`, `llama3`, `harmony` (gpt-oss) |
 | `"auto"` / `"none"` / absent | nothing to enforce, every family |
+
+Gemma-4 (`gemma` with the `<|tool_call>` token) serves `"required"` and a named function unconstrained and parses the reply as `"auto"`, as vLLM's `gemma4` parser does (`supports_required_and_named = False`, B-143): a call to another declared function comes back as that call, a reply without a call as content. gemma-3 has no `<|tool_call>` token: both stay a 400 there, the body naming the family and the families that enforce.
 
 Named-function envelopes forced on the bare-args families (#2279), body = the function's `parameters` schema as JSON:
 
@@ -63,9 +65,6 @@ Named-function envelopes forced on the bare-args families (#2279), body = the fu
 |---|---|---|
 | `llama3` | `<function=NAME>` | `</function>` |
 | `harmony` | `<\|channel\|>commentary to=functions.NAME <\|constrain\|>json<\|message\|>` | `<\|call\|>` |
-| `gemma` (Gemma-4) | `<\|tool_call>call:NAME` | `<tool_call\|>` |
-
-gemma-3 has no `<|tool_call>` token: a named function stays a 400 there. The 400 body names the family and the families that enforce.
 
 On every other family (measurement: 10 requests @ temperature 0.7 with one `get_weather` function):
 

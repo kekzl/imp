@@ -138,7 +138,7 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
     if (!ctx.params.tool_constraint_tools.empty() && dialect.xml_body && ctx.snap.have_template &&
         ctx.snap.chat_tpl.tool_xml_dialect())
         ctx.params.tool_constraint_xml = true;
-    // Llama3 / Harmony / Gemma-4 forced function: the envelope names the function, the bare
+    // Llama3 / Harmony forced function: the envelope names the function, the bare
     // parameter schema is constrained between its literals (#1002, #2279). Only when the ChatML
     // paths above found nothing (different family).
     if (ctx.params.tool_constraint_tools.empty()) {
@@ -269,11 +269,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // #1592: refuse (400) tool_choice "required"/named-function when the family's template has no
     // tool-call grammar, rather than degrade to a prose hint with 200. Measured 0/40 across
     // gemma-3/gemma-4/gpt-oss (no grammar) vs 10/10 on Qwen3-4B ChatML (has one); "auto" is untouched.
-    // Gemma-4 "required" runs as "auto" (B-143: its native call is sampleable since the ban-list fix).
+    // Gemma-4 "required" / named run as "auto" (B-143: its native call is sampleable since the ban-list fix).
     if (ctx.params.has_tools &&
         !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice, native_tool_token_(ctx)) &&
-        !tool_choice_required_runs_as_auto(ctx.snap.tpl_family, ctx.params.tool_choice,
-                                           native_tool_token_(ctx))) {
+        !tool_choice_runs_as_auto(ctx.snap.tpl_family, ctx.params.tool_choice, native_tool_token_(ctx))) {
         const char* fam = imp::chat_template_family_name(ctx.snap.tpl_family);
         const bool named = ctx.params.tool_choice.is_object();
         res.status = 400;
@@ -282,8 +281,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
              {{"message", std::string("\"tool_choice\": ") + (named ? "a named function" : "\"required\"") +
                               " cannot be enforced on this model's chat template family (" + fam +
                               "). \"required\" is enforced on chatml; a named function on chatml, llama3, "
-                              "harmony (gpt-oss) and gemma with the <|tool_call> token (Gemma-4), which runs "
-                              "\"required\" as \"auto\" (vLLM's behavior). On every "
+                              "harmony (gpt-oss); gemma with the <|tool_call> token (Gemma-4) runs both as "
+                              "\"auto\" (vLLM's behavior). On every "
                               "other family it would degrade to a prompt hint and the model answers with "
                               "prose instead of calling the tool. Send \"tool_choice\": \"auto\", or load a "
                               "model whose template this server can constrain."},
