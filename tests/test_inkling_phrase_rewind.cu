@@ -24,6 +24,10 @@ using namespace imp::inkling_test;
 namespace {
 
 bool have_model() { return std::getenv("IMP_TEST_MODEL_INKLING") && std::getenv("IMP_TEST_INKLING_ORACLE"); }
+std::string oracle_dir() {
+    const char* d = std::getenv("IMP_TEST_INKLING_ORACLE");
+    return d ? d : "";
+}
 
 // Lookahead drafts from a plan: anchor position -> tokens proposed after it (tests/test_inkling_parity.cu).
 InklingSpecHooks plan_hooks(const std::map<int, std::vector<int32_t>>& plan) {
@@ -59,8 +63,7 @@ TEST(InklingPhraseRewind, SeekReplaysTheRowsOfTheFirstRun) {
     Fixture& fx = fixture();
     if (!fx.loaded)
         ASSERT_TRUE(fx.load(std::getenv("IMP_TEST_MODEL_INKLING")));
-    const std::vector<int32_t> p = read_ids(std::string(std::getenv("IMP_TEST_INKLING_ORACLE")) +
-                                            "/paris_prompt.json");
+    const std::vector<int32_t> p = read_ids(oracle_dir() + "/paris_prompt.json");
     ASSERT_FALSE(p.empty());
     const int P = 525, N = 820, kServed = 561, kGridPos = 768;
     std::vector<int32_t> t;
@@ -125,8 +128,7 @@ TEST(InklingPhraseRewind, BannedTokenResamplesAfterTheKeptText) {
     Fixture& fx = fixture();
     if (!fx.loaded)
         ASSERT_TRUE(fx.load(std::getenv("IMP_TEST_MODEL_INKLING")));
-    const std::vector<int32_t> ids = read_ids(std::string(std::getenv("IMP_TEST_INKLING_ORACLE")) +
-                                              "/paris_prompt.json");
+    const std::vector<int32_t> ids = read_ids(oracle_dir() + "/paris_prompt.json");
     ASSERT_FALSE(ids.empty());
     const int T = static_cast<int>(ids.size()), V = fx.w.cfg.vocab, kSnap = 8, kBan = 12, kOut = 16;
     InklingForward fwd;

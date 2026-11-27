@@ -66,6 +66,8 @@ bool parse_cli_double(const char* s, double& out);
 int cli_int(const char* flag, const char* value);
 float cli_float(const char* flag, const char* value);
 double cli_double(const char* flag, const char* value);
+// std::exit for argv parsing: it runs before the tool starts a thread (one concurrency-mt-unsafe NOLINT).
+[[noreturn]] void cli_exit(int code);
 
 // imp_calibration_write() takes the path as an argument; --calibrate <out> passed it straight
 // through and NOTHING ever read [calibration] out_path, despite it being documented and

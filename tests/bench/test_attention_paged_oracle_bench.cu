@@ -166,7 +166,8 @@ TEST(PagedNvfp4Decode, LongContextMicrobench) {
     // R KV copies, launch i reads copy i % R. Default: >= 400 MB so every launch reads DRAM, not the
     // 96 MB L2 (77k 16/2 = 44 MB fits); IMP_NVFP4_BENCH_RING=1 = the L2-resident reading of #2440.
     const size_t copy_bytes = 2 * (kv_bytes + sc_bytes);
-    const int ring = std::max(1, env_int("IMP_NVFP4_BENCH_RING", (int)((400u << 20) / copy_bytes + 1)));
+    const size_t ring_default = ((400u << 20) / std::max<size_t>(copy_bytes, 1)) + 1;
+    const int ring = std::max(1, env_int("IMP_NVFP4_BENCH_RING", (int)ring_default));
     std::vector<int> bt((size_t)ring * batch * blocks_per_seq), ctx(batch, kv_len);
     for (int r = 0; r < ring; r++)
         for (int b = 0; b < batch; b++)
@@ -252,7 +253,8 @@ TEST(PagedNvfp4Decode, LongContextMicrobench) {
     }
     std::sort(batch_ms.begin(), batch_ms.end());
     const double us = 1000.0 * batch_ms[3] / iters;
-    const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * (half_hd + head_dim / 16);
+    const int row_bytes = half_hd + (head_dim / 16);  // FP4 nibbles + one scale byte per 16
+    const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * row_bytes;
     printf(
         "PagedNvfp4Decode: ring=%d multitok=%d mma=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f "
         "us/launch, KV+scales "

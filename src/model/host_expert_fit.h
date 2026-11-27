@@ -12,7 +12,7 @@ struct TransformerLayer;
 // plus per-expert 2-D tensors (NVFP4 llm-compressor). 0 for a dense layer.
 size_t layer_host_expert_bytes(const TransformerLayer& L);
 // SfAtom scale bytes phase 3 builds on the device for this layer's NVFP4-prequant experts
-// (cutlass_nvfp4_sf_size per expert, ~1/8 of the packed bytes; Kimi-Linear: 2.88 GB).
+// (nvfp4_sfatom_size per expert, ~1/8 of the packed bytes; Kimi-Linear: 2.88 GB).
 size_t layer_nvfp4_expert_sf_bytes(const TransformerLayer& L);
 // Sum over the model's layers.
 size_t model_host_expert_bytes(const Model& model);

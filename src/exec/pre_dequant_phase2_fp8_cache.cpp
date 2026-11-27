@@ -291,7 +291,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
             if (w->qtype != QType::F16)
                 continue;
             if (wcache_->fp8.contains(w->data) || wcache_->nvfp4.contains(w->data) ||
-                wcache_->cutlass_nvfp4.contains(w->data))
+                wcache_->nvfp4_sfatom.contains(w->data))
                 continue;
             size_t n = static_cast<size_t>(w->shape[0]) * w->shape[1];
             if (n == 0 || (w->shape[1] % 16) != 0)

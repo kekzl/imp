@@ -3,7 +3,7 @@
 #include "exec/storage_planner.h"
 #include "exec/moe_nvfp4_cache_rule.h"
 #include "quant/dequant_gpu.h"           // dequant_gpu_supported
-#include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (SfAtom padding)
+#include "compute/nvfp4_sfatom_quant.h"  // nvfp4_sfatom_size (SfAtom padding)
 #include "compute/mmq_q8_imma.h"         // imma_q8_plane_bytes
 #include "core/kv_dtype.h"
 #include "core/logging.h"
@@ -54,8 +54,14 @@ size_t planned_post_cache_reserve(const VRAMBudget& budget, size_t total_vram) {
 
 void apply_plan_to_weight_caches(VRAMBudget& budget, const PlanResult& plan, size_t distributable,
                                  bool nvfp4_prequant) {
-    if (!plan.ok || nvfp4_prequant)
+    if (nvfp4_prequant)
         return;
+    // A rejected plan grants the optional caches nothing. B-138: Qwen3.8-27B-Q8_0 (plan over by 13094
+    // MiB) built 1856 MiB of NVFP4 decode cache, 267 MiB stayed free, no SSM slot committed: 0 tokens.
+    if (!plan.ok) {
+        budget.weight_cache_grant_bytes = 0;
+        return;
+    }
     const size_t total_vram = vram_budget_total_bytes();
     // The plan leaves no allocator headroom; KV growth keeps it free (kv_cache.cu).
     const size_t headroom = vram_allocator_headroom(total_vram);
@@ -74,8 +80,8 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
     if (!mcfg.is_nvfp4_prequant)
         return d;
 
-    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_cutlass.cpp): each slab entry is
-    // align_up(cutlass_nvfp4_sf_size(N, K), 256); contiguous MoE expert groups occupy
+    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_sfatom.cpp): each slab entry is
+    // align_up(nvfp4_sfatom_size(N, K), 256); contiguous MoE expert groups occupy
     // align_up(ne × sf_size, 256) as ONE entry. Wire shapes store K/2 (e2m1 pairs): logical K = 2 × shape[1].
     constexpr size_t kSfAlign = 256;
     auto align_up = [](size_t x, size_t a) { return (x + a - 1) / a * a; };
@@ -89,8 +95,7 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
             int ne = static_cast<int>(w.shape[0]);
             int N = static_cast<int>(w.shape[1]);
             int64_t K = static_cast<int64_t>(w.shape[2]) * 2;
-            d.sf_bytes += align_up(static_cast<size_t>(ne) *
-                                       cutlass_nvfp4_sf_size(N, static_cast<int>(K)),
+            d.sf_bytes += align_up(static_cast<size_t>(ne) * nvfp4_sfatom_size(N, static_cast<int>(K)),
                                    kSfAlign);
             size_t slab = (static_cast<size_t>(ne) * N * (K / 2)) + (static_cast<size_t>(ne) * N * (K / 16)) +
                           (static_cast<size_t>(ne) * sizeof(float));
@@ -99,7 +104,7 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
         }
         int N = static_cast<int>(w.shape[0]);
         int64_t K = static_cast<int64_t>(w.shape[1]) * 2;
-        d.sf_bytes += align_up(cutlass_nvfp4_sf_size(N, static_cast<int>(K)), kSfAlign);
+        d.sf_bytes += align_up(nvfp4_sfatom_size(N, static_cast<int>(K)), kSfAlign);
     };
     auto add_experts = [&](const std::vector<Tensor>& ws) {
         if (ws.empty() || !ws[0].data || ws[0].ndim < 2)
@@ -108,9 +113,7 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
         int N = static_cast<int>(ws[0].shape[0]);
         int64_t Kp = ws[0].shape[1];
         int64_t K = Kp * 2;
-        d.sf_bytes += align_up(static_cast<size_t>(ne) *
-                                   cutlass_nvfp4_sf_size(N, static_cast<int>(K)),
-                               kSfAlign);
+        d.sf_bytes += align_up(static_cast<size_t>(ne) * nvfp4_sfatom_size(N, static_cast<int>(K)), kSfAlign);
         // Transient contiguous-copy slab (phase 3-moe copy branch: packed + micro-scales + tensor-scales,
         // matching add_bytes there). The zero-copy borrow branch needs ~none of this: it is an upper bound.
         size_t slab = (static_cast<size_t>(ne) * N * Kp) + (static_cast<size_t>(ne) * N * (K / 16)) +
@@ -397,7 +400,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     }
 
     size_t nvfp4_estimate = (nvfp4_elems / 2) + (nvfp4_elems / 16) + fp8_head_bytes;
-    size_t cutlass_sf_estimate = nvfp4_elems / 16;
+    size_t nvfp4_sfatom_estimate = nvfp4_elems / 16;
 
     // Cross-check heuristic estimate against StoragePlanner's projected total (source-qtype-aware):
     // divergence means the heuristic missed a tier (e.g. Q4_K routed to FP16 cache but treated as 0
@@ -412,12 +415,12 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         StoragePlan plan = plan_storage(model, mcfg, hints);
         IMP_LOG_INFO(
             "VRAM budget: planner projects %.1f MiB (%zu entries), heuristic "
-            "nvfp4=%.1f MiB cutlass_sf=%.1f MiB.",
+            "nvfp4=%.1f MiB sfatom=%.1f MiB.",
             plan.projected_vram_bytes / (1024.0 * 1024.0), plan.entries.size(),
-            nvfp4_estimate / (1024.0 * 1024.0), cutlass_sf_estimate / (1024.0 * 1024.0));
+            nvfp4_estimate / (1024.0 * 1024.0), nvfp4_sfatom_estimate / (1024.0 * 1024.0));
 
         // Native NVFP4 checkpoints: the GGUF-oriented count above yields 0, but phase 3 still needs
-        // post-KV headroom for (a) the persistent CUTLASS SfAtom SF cache (~elems/16 across ALL
+        // post-KV headroom for (a) the persistent SfAtom SF cache (~elems/16 across ALL
         // NVFP4 weights incl. experts, summed from the source-aware PLAN), (b) the transient
         // per-(layer,proj) MoE contiguous-copy slab, and (c) free-VRAM reserves phases 0-3
         // re-derive (vram_reserve_floor: the 4 % allocator headroom) plus executor workspaces between KV init
@@ -437,14 +440,14 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // KV is charged the full measured demand: nothing is hidden from free_vram, the plan
             // states the cost instead of enforcing it via a hidden hold.
             size_t native_need = demand.total() + phase3_reserve;
-            if (native_need > cutlass_sf_estimate) {
+            if (native_need > nvfp4_sfatom_estimate) {
                 IMP_LOG_INFO("VRAM budget: native-NVFP4 weight-cache reserve %.1f MiB "
                              "(sf=%.1f, moe_slab=%.1f, phase3+workspaces=%.1f; floored, "
                              "not pre-held)",
                              native_need / (1024.0 * 1024.0), demand.sf_bytes / (1024.0 * 1024.0),
                              demand.moe_slab_bytes / (1024.0 * 1024.0),
                              phase3_reserve / (1024.0 * 1024.0));
-                cutlass_sf_estimate = native_need;
+                nvfp4_sfatom_estimate = native_need;
                 // The reserve part is init-transient; demand.total() is the
                 // persistent slice. See weight_cache_transient_bytes.
                 budget.weight_cache_transient_bytes = phase3_reserve;
@@ -453,7 +456,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // GGUF sources the heuristic can't see: Q4_K/Q3_K weights are not nvfp4_beneficial
             // (estimate 0) but the planner routes them to the FP16 cache. Without reserving
             // that demand the KV backstop eats ALL post-weight VRAM and phases 1/3 build 0
-            // tensors (#874 follow-up); fold the real demand into cutlass_sf_estimate.
+            // tensors (#874 follow-up); fold the real demand into nvfp4_sfatom_estimate.
             //
             // Gated on ANY divergence, not a 2x threshold (#1631): a 2x gate missed
             // Qwen3-8B-Q8_0's 1.35x divergence and let its KV pool take the difference,
@@ -461,7 +464,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             //
             // Reserve = projection + floor margin, not the projection alone: projection-alone
             // still OOMs in practice, so the margin is load-bearing, not slack.
-            size_t heuristic = nvfp4_estimate + cutlass_sf_estimate;
+            size_t heuristic = nvfp4_estimate + nvfp4_sfatom_estimate;
             if (plan.projected_vram_bytes > heuristic) {
                 size_t want =
                     plan.projected_vram_bytes + vram_reserve_floor(total_vram, reserve_floor_pct);
@@ -482,7 +485,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                         reserve / (1024.0 * 1024.0),
                         plan.projected_vram_bytes / (1024.0 * 1024.0),
                         heuristic / (1024.0 * 1024.0), guarantee_blocks);
-                    cutlass_sf_estimate = reserve - nvfp4_estimate;
+                    nvfp4_sfatom_estimate = reserve - nvfp4_estimate;
                     // Anything the reserve holds beyond the planner's
                     // projected persistent demand is the init-time margin.
                     // See weight_cache_transient_bytes.
@@ -506,7 +509,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         case VRAMBudget::NVFP4_DECODE_ONLY: {
             budget.fp8_cache_bytes = 0;
             budget.nvfp4_cache_bytes = nvfp4_estimate;
-            size_t weight_total = nvfp4_estimate + cutlass_sf_estimate;
+            size_t weight_total = nvfp4_estimate + nvfp4_sfatom_estimate;
             size_t kv_available = (available > weight_total) ? (available - weight_total) : 0;
             budget.kv_cache_bytes = static_cast<size_t>(kv_available * kv_fraction);
             budget.kv_max_blocks = (per_block_total > 0)
@@ -560,9 +563,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // The VRAM-aware auto max_batch_size (#736) can size needed_blocks (= max_batch_size ×
     // max_seq_len) past real headroom on small-weight/large-card configs, overflowing cudaMalloc.
     // Clamping bounds concurrency via scheduler admission (Scheduler::can_allocate); no single
-    // sequence is under-served. Subtract NVFP4 decode + CUTLASS-SF caches sharing this headroom.
+    // sequence is under-served. Subtract NVFP4 decode + SfAtom caches sharing this headroom.
     if (per_block_total > 0) {
-        size_t weight_caches = nvfp4_estimate + cutlass_sf_estimate;
+        size_t weight_caches = nvfp4_estimate + nvfp4_sfatom_estimate;
         size_t kv_room = (available > weight_caches) ? (available - weight_caches) : available;
         int max_fit_blocks = std::max(static_cast<int>(kv_room / per_block_total), 16);
         if (budget.kv_max_blocks > max_fit_blocks) {
@@ -627,7 +630,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // actual KV allocation back down.
     if (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE && config.use_fp8_prefill) {
         size_t kv_actual = static_cast<size_t>(budget.kv_max_blocks) * per_block_total;
-        size_t nvfp4_actual = nvfp4_estimate + cutlass_sf_estimate;
+        size_t nvfp4_actual = nvfp4_estimate + nvfp4_sfatom_estimate;
         size_t remaining_for_fp8 = (available > kv_actual + nvfp4_actual)
                                        ? (available - kv_actual - nvfp4_actual)
                                        : 0;
@@ -647,7 +650,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // comparison feeds plan_memory() the same number instead of re-deriving it.
     // GGUF MoE experts join the plan demand only: phase 3-moe builds after the FP16 cache is freed,
     // so charging them to nvfp4_estimate starved the phase-1 FP16 cache (Qwen3-30B decode_all).
-    budget.weight_cache_estimate_bytes = nvfp4_estimate + cutlass_sf_estimate +
+    budget.weight_cache_estimate_bytes = nvfp4_estimate + nvfp4_sfatom_estimate +
                                          gguf_moe_nvfp4_cache_bytes(model, decode_all,
                                                                     config.use_nvfp4_decode);
     budget.ssm_footprint_bytes = ssm_footprint;

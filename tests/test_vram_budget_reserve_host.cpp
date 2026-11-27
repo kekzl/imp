@@ -1,8 +1,9 @@
 // Host-only cases of tests/test_vram_budget_reserve.cpp, in test-core (CPU lane): no CUDA call.
 #include <gtest/gtest.h>
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "exec/moe_nvfp4_cache_rule.h"
+#include "memory/plan.h"
 #include "memory/vram_query.h"
 #include "model/model.h"
 #include "runtime/vram_budget.h"
@@ -16,7 +17,7 @@ using namespace imp;
 using namespace imp::vram_fixture;
 
 // compute_native_cache_demand must mirror phase 3b's SfAtom slab sizing exactly
-// (cutlass_nvfp4_sf_size + 256-byte alignment, contiguous expert groups as ONE entry) and
+// (nvfp4_sfatom_size + 256-byte alignment, contiguous expert groups as ONE entry) and
 // include the GDN/SSM projections phase 0b registers; the old elems/16 heuristic omitted
 // them and was not an upper bound under SfAtom padding.
 
@@ -24,13 +25,13 @@ namespace {
 
 size_t sf_entry(int n, int k_packed) {
     constexpr size_t kSfAlign = 256;
-    size_t sz = imp::cutlass_nvfp4_sf_size(n, k_packed * 2);
+    size_t sz = imp::nvfp4_sfatom_size(n, k_packed * 2);
     return (sz + kSfAlign - 1) / kSfAlign * kSfAlign;
 }
 
 size_t sf_group(int ne, int n, int k_packed) {
     constexpr size_t kSfAlign = 256;
-    size_t sz = static_cast<size_t>(ne) * imp::cutlass_nvfp4_sf_size(n, k_packed * 2);
+    size_t sz = static_cast<size_t>(ne) * imp::nvfp4_sfatom_size(n, k_packed * 2);
     return (sz + kSfAlign - 1) / kSfAlign * kSfAlign;
 }
 
@@ -110,6 +111,21 @@ TEST(VramBudgetReserve, PlannedPostCacheReserveSumsLaterClaims) {
     b.ssm_footprint_bytes = 34 * MiB;
     EXPECT_EQ(planned_post_cache_reserve(b, 32579 * MiB),
               (2178 + 256 + 543 + 100 + 34) * MiB + vram_allocator_headroom(32579 * MiB));
+}
+
+// B-138: a GGUF plan that rejects the configuration (Qwen3.8-27B-Q8_0: 3472 MiB distributable,
+// over by 13094 MiB) leaves the optional weight caches no grant; NVFP4-prequant keeps its own path.
+TEST(VramBudgetReserve, RejectedGgufPlanGrantsTheOptionalCachesNothing) {
+    const size_t MiB = 1024ull * 1024;
+    PlanResult rejected;
+    rejected.ok = false;
+    VRAMBudget gguf;
+    apply_plan_to_weight_caches(gguf, rejected, 3472 * MiB, /*nvfp4_prequant=*/false);
+    EXPECT_EQ(gguf.weight_cache_grant_bytes, 0u);
+    EXPECT_EQ(gguf.kv_plan_bytes, 0u);
+    VRAMBudget prequant;
+    apply_plan_to_weight_caches(prequant, rejected, 3472 * MiB, /*nvfp4_prequant=*/true);
+    EXPECT_EQ(prequant.weight_cache_grant_bytes, static_cast<size_t>(-1));
 }
 
 // GGUF MoE NVFP4 demand (gguf_moe_nvfp4_cache_bytes): whole eligible layers only, so the plan's

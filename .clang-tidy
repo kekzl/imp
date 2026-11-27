@@ -60,6 +60,28 @@
 #   clang-analyzer-optin.core.EnumCastOutOfRange         LLVM 23: 1 finding, QType(255) is the "unset" sentinel
 # On (findings fixed): clang-analyzer-unix.Stream (2), clang-analyzer-core.NullDereference (1),
 #   clang-analyzer-core.NullPointerArithm (2).
+#
+# cppcoreguidelines-* / concurrency-* errors (2026-11-27, 550 src + tools TUs, unique findings):
+#   cppcoreguidelines-slicing                           13: all NOLINT, the view base of a cache entry
+#   cppcoreguidelines-rvalue-reference-param-not-moved   5: all NOLINT, field-wise steal of a POD view
+#   cppcoreguidelines-missing-std-forward               32: fixed (std::forward on a single call,
+#       const F& on a repeated call, `this Self&` on 4 deducing-this getters)
+#   concurrency-mt-unsafe                               41: 4 fixed (getpwuid_r, generic_category()
+#       for strerror), 24 via cli_exit / config_env (one NOLINT each), 13 NOLINT (XDG/HF env,
+#       CUBLAS_WORKSPACE_CONFIG, tok_dump mode flags)
+# Read and left off (same sweep, src + tools | tests):
+#   cppcoreguidelines-special-member-functions  162 | 53; with AllowImplicitlyDeletedCopyOrMove,
+#       AllowMissingMoveFunctions(WhenCopyIsDeleted), AllowSoleDefaultDtor 26 | 33: 12 local
+#       scope guards (aggregates, never copied), 8 classes with deleted copy and no dtor, 4
+#       move-only cache entries, GPUBatchPool (non-owning arena slice), 1 real: HessianWriter
+#       owned a FILE* and was copyable (double fclose), copy deleted. Tests: local RAII helpers.
+#   cppcoreguidelines-owning-memory  100 | 94: no gsl::owner in the repo, every finding asks for
+#       it: 50 legacy fopen/fclose/malloc calls, 34 `new` into a raw pointer, 9 deletes (C API
+#       handles, unique_ptr deleters, the snapshot store), 7 other.
+#   cppcoreguidelines-pro-type-member-init (stays advisory)  58 | 33: 54 uninitialized locals
+#       (device register-state structs, fp8/half locals written next), 2 KVCache ctors
+#       (n_kv_heads_, head_dim_, block_bytes_ set by layout_layers_ before any read), 2 device
+#       POD parameter structs (apa Problem, GdnInputArgs).
 
 Checks: >
   clang-analyzer-*,
@@ -69,6 +91,10 @@ Checks: >
   readability-*,
   cppcoreguidelines-pro-type-cstyle-cast,
   cppcoreguidelines-pro-type-member-init,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-rvalue-reference-param-not-moved,
+  cppcoreguidelines-missing-std-forward,
+  concurrency-mt-unsafe,
   modernize-use-starts-ends-with,
   modernize-use-emplace,
   modernize-use-nullptr,
@@ -125,6 +151,6 @@ Checks: >
   -clang-analyzer-core.NonNullParamChecker,
   -clang-analyzer-optin.core.EnumCastOutOfRange
 
-WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
+WarningsAsErrors: 'bugprone-*,clang-analyzer-*,cppcoreguidelines-slicing,cppcoreguidelines-rvalue-reference-param-not-moved,cppcoreguidelines-missing-std-forward,concurrency-mt-unsafe'
 HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'
 FormatStyle: file

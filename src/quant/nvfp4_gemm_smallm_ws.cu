@@ -327,7 +327,7 @@ bool args_ok(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, const half* 
 }
 
 template <int kMT, int kU, typename Launch>
-void by_m(int M, Launch&& go) {
+void by_m(int M, const Launch& go) {
     if (M <= 8)
         go(nvfp4_smallm_ws_kernel<kMT, 1, kU>, nvfp4_smallm_ws_multi_kernel<kMT, 1, kU>);
     else if (M <= 16)
@@ -337,7 +337,7 @@ void by_m(int M, Launch&& go) {
 }
 
 template <typename Launch>
-bool by_cfg(int rows, int unroll, int M, Launch&& go) {
+bool by_cfg(int rows, int unroll, int M, const Launch& go) {
     if (rows == 16 && unroll == 1)
         by_m<1, 1>(M, go);
     else if (rows == 16 && unroll == 2)

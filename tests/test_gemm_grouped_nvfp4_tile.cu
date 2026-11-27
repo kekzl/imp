@@ -2,11 +2,11 @@
 // reference (nvfp4_fp64_ref.h) on device-args operands, B as a slab (mode a) and as pointer arrays
 // (mode b, bit-identical to a). Timing cases: tests/bench/test_gemm_grouped_nvfp4_tile_bench.cu.
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "core/tensor.h"
 #include "nvfp4_fp64_ref.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 

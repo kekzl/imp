@@ -9,7 +9,7 @@
 namespace imp {
 
 // Generic dequant->cuBLAS catch-all: fires after every tier-specific dispatcher
-// (MXFP4/NVFP4/CUTLASS/FP8/FP16 cache/GGUF small-M) returns NoMatch or PreconditionFail
+// (MXFP4/NVFP4/NVFP4_SFATOM/FP8/FP16 cache/GGUF small-M) returns NoMatch or PreconditionFail
 // and the weight qtype is dequantable. Strategy key (FP16, NONE, m_is_one=false): NONE
 // is qtype-agnostic, the handler reads weight.qtype and dequantizes itself (exec/weight_dequant.h).
 // Preconditions: input/output/weight_payload/dequant_scratch non-null,

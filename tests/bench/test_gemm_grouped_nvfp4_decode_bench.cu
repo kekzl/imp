@@ -1,13 +1,13 @@
 // Timing cases of tests/test_gemm_grouped_nvfp4_decode.cu, built into test-bench (make test-bench), not into
 // the default GPU run.
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_decode.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "core/tensor.h"
 #include "model/model_config.h"
 #include "nvfp4_fp64_ref.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
@@ -76,7 +76,7 @@ TEST_F(GroupedNvfp4DecodeTest, Bench) {
             // (Gemma-4, 4 tokens: 163344 B needed, 35200 held).
             size_t sfa_bytes = 16;
             for (int v : x.M_per)
-                sfa_bytes += cutlass_nvfp4_sf_size(v, mm.eff);
+                sfa_bytes += nvfp4_sfatom_size(v, mm.eff);
             cudaMalloc(&g16, size_t(rows) * mm.eff * 2);
             cudaMalloc(&u16, size_t(rows) * mm.eff * 2);
             cudaMalloc(&dpk, size_t(rows) * mm.eff / 2 + 16);
@@ -142,8 +142,8 @@ TEST_F(GroupedNvfp4DecodeTest, Bench) {
             const double t_a = timed([&](int) {
                 compute_sfa_offsets_device(x.d_M, d_off2, 128, mm.eff, s_, d_bases, dsf);
                 bzero_sfa_active(dsf, d_off2, 128, sfa_bytes, s_);
-                fused_act_quantize_fp16_to_nvfp4_cutlass_moe(g16, u16, dpk, d_bases, x.d_off, rows, mm.eff,
-                                                             128, mm.act, s_);
+                fused_act_quantize_fp16_to_nvfp4_sfatom_moe(g16, u16, dpk, d_bases, x.d_off, rows, mm.eff,
+                                                            128, mm.act, s_);
             });
             const double t_d = timed([&](int c) {
                 (void)gemm_grouped_nvfp4_tile(128, mm.d, mm.eff, rows, tile_args(down_in, wd[c], out), s_);

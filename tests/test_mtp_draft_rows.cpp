@@ -35,7 +35,7 @@ TEST(MtpDraftRows, FullCopyAndFp8HeadFollowDraftVocab) {
     EXPECT_EQ(mtp_draft_pass_rows(kVocab, 0, /*fp8=*/true, 0), kVocab);
 }
 
-TEST(MtpDraftRows, CutlassHeadScoresEveryRow) {
+TEST(MtpDraftRows, SfAtomHeadScoresEveryRow) {
     EXPECT_EQ(mtp_draft_pass_rows(kVocab, 0, /*fp8=*/false, kPrefix), kVocab)
         << "the W4A4 head GEMM has no row prefix";
 }

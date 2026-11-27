@@ -27,12 +27,12 @@ void compact_alpha_active(
     int n_experts,
     cudaStream_t stream);
 
-// Exclusive prefix sum of cutlass_nvfp4_sf_size(M_per[e],K) into device SFA offsets, so
+// Exclusive prefix sum of nvfp4_sfatom_size(M_per[e],K) into device SFA offsets, so
 // ptr_SFA[e] = base_SFA + d_sfa_offsets_out[e] matches the grouped NVFP4 GEMM's
 // GroupedNvfp4DeviceArgs (gemm_grouped_nvfp4_tile.h). Phase 3 of
 // moe_prefill_graphs_plan_2026_05_10.
 // Padding: n_row_tiles=ceil(M_e/128), n_k_tiles=ceil(K/64), bytes=n_row_tiles*n_k_tiles*512
-// (see cutlass_nvfp4_sf_size, nvfp4_sfatom_quant.cu). Single-block 256-thread; n_experts<=256.
+// (see nvfp4_sfatom_size, nvfp4_sfatom_quant.cu). Single-block 256-thread; n_experts<=256.
 // d_sfa_bases_out (nullable): also writes d_sfa_bases_out[e] = base_sf + offset[e] in the
 // same launch. Capture-safe.
 void compute_sfa_offsets_device(const int32_t* d_M_per, int64_t* d_sfa_offsets_out, int n_experts, int K,

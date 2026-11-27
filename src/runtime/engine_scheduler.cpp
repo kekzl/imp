@@ -238,7 +238,7 @@ void Engine::log_resolved_dispatch_once_() {
     char moe[96];
     if (!is_moe) {
         snprintf(moe, sizeof(moe), "%s", moe_prefill_outer_name(MoePrefillOuter::NONE));
-    } else if (r.moe_prefill_outer == MoePrefillOuter::CUTLASS3X && r.moe_prefill_tier_set) {
+    } else if (r.moe_prefill_outer == MoePrefillOuter::GROUPED_NVFP4 && r.moe_prefill_tier_set) {
         snprintf(moe, sizeof(moe), "%s → %s", moe_prefill_outer_name(r.moe_prefill_outer),
                  moe_prefill_path_name(r.moe_prefill_tier));
     } else {

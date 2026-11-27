@@ -3,14 +3,14 @@
 // epilogues bit-equal to tile(gate) + tile(up) + fused_act_quantize (packed bytes and UE4M3 scales of every
 // valid row). Timing cases: tests/bench/test_gemm_grouped_nvfp4_decode_bench.cu.
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_decode.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "core/tensor.h"
 #include "model/model_config.h"
 #include "nvfp4_fp64_ref.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
@@ -146,7 +146,7 @@ TEST_F(GroupedNvfp4DecodeTest, ActEpilogueBitEqualToUnfusedPath) {
             size_t ref_sf_bytes = 0;
             std::vector<size_t> m16_off(x.ne + 1, 0);  // M16 layout: ceil(M_e / 16) tiles x N/64 atoms x 64 B
             for (int e = 0; e < x.ne; ++e) {
-                ref_sf_bytes += cutlass_nvfp4_sf_size(x.M_per[e], c.N);
+                ref_sf_bytes += nvfp4_sfatom_size(x.M_per[e], c.N);
                 m16_off[e + 1] = m16_off[e] + (size_t((x.M_per[e] + 15) / 16) * ((c.N + 63) / 64) * 64);
             }
             const size_t act_bytes = gemm_grouped_nvfp4_decode_act_bytes(x.ne, x.M_total, c.N);
@@ -162,8 +162,8 @@ TEST_F(GroupedNvfp4DecodeTest, ActEpilogueBitEqualToUnfusedPath) {
             cudaMemset(ref_sf, 0, ref_sf_bytes + 16);
             cudaMemset(dec, 0, act_bytes);
             compute_sfa_offsets_device(x.d_M, d_ref_off, x.ne, c.N, s_, d_ref_bases, ref_sf);
-            fused_act_quantize_fp16_to_nvfp4_cutlass_moe(gated ? g16 : nullptr, u16, ref_packed, d_ref_bases,
-                                                         x.d_off, x.M_total, c.N, x.ne, c.act, s_);
+            fused_act_quantize_fp16_to_nvfp4_sfatom_moe(gated ? g16 : nullptr, u16, ref_packed, d_ref_bases,
+                                                        x.d_off, x.M_total, c.N, x.ne, c.act, s_);
             ASSERT_TRUE(gemm_grouped_nvfp4_decode(x.ne, c.N, c.K, x.M_total, c.epi,
                                                   dec_args(x, up, gated ? &gate : nullptr, dec,
                                                            static_cast<char*>(dec) + sf_at, false),

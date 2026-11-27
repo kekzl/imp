@@ -1,11 +1,11 @@
 // NVFP4 SfAtom layout, weight scale conversion and activation quantizers for the block-scaled NVFP4 GEMMs
 // (own tile and grouped kernels, cuBLASLt block-scaled on refusal). Moved
-// verbatim from gemm_cutlass_sm120.cu. Weight conversion (once at init): packed FP4 [N,K/2] borrowed,
+// verbatim from nvfp4_sfatom_quant.cu. Weight conversion (once at init): packed FP4 [N,K/2] borrowed,
 // micro_scales linear [N,K/16] -> SfAtom UE4M3, tensor_scale stays the GEMM alpha. Activations per prefill
 // call: FP16 [M,K] -> NVFP4 packed [M,K/2] + SfAtom UE4M3 scales. No CUTLASS include.
 
-#include "compute/gemm_cutlass_sm120.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_quant.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "memory/device_alloc_all.h"
 #include "compute/gpt_oss_glu.cuh"
 #include "model/model_config.h"
@@ -42,7 +42,7 @@ static constexpr int kAtomKElems = kSFVecSize * kAtomKGroups;  // 64
 static constexpr int kAtomSize = kAtomRows * kAtomKGroups;     // 512
 // sfatom_offset(row, k_group, n_k_tiles): quant/nvfp4_sfatom_act.cuh.
 
-size_t cutlass_nvfp4_sf_size(int rows, int K) {
+size_t nvfp4_sfatom_size(int rows, int K) {
     int n_row_tiles = (rows + kAtomRows - 1) / kAtomRows;
     int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
     return static_cast<size_t>(n_row_tiles) * n_k_tiles * kAtomSize;
@@ -77,7 +77,7 @@ __global__ void convert_scales_sfatom_kernel(const uint8_t* __restrict__ src_ms,
 }
 
 // MoE variant: one launch converts SF for all `ne` experts. Source stride N*K_groups
-// bytes/expert; dest stride cutlass_nvfp4_sf_size(N,K) bytes/expert. blockIdx.y selects
+// bytes/expert; dest stride nvfp4_sfatom_size(N,K) bytes/expert. blockIdx.y selects
 // the expert; inner work identical to the single-tensor kernel.
 __global__ void convert_scales_sfatom_moe_kernel(const uint8_t* __restrict__ src_ms,
                                                  uint8_t* __restrict__ dst_sf, int N, int K, int n_k_tiles,
@@ -156,7 +156,7 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* input_row
 
 // Single-tensor quantize: row numbering is direct, SFA is a single linear buffer
 // with SfAtom layout over (row, k_group).
-__global__ void quantize_fp16_nvfp4_cutlass_kernel(
+__global__ void quantize_fp16_nvfp4_sfatom_kernel(
     const half* __restrict__ input,    // [M, K] FP16
     uint8_t* __restrict__ packed_out,  // [M, K/2] packed nibbles
     uint8_t* __restrict__ sf_out,      // SfAtom layout UE4M3
@@ -192,7 +192,7 @@ __device__ __forceinline__ int moe_find_expert(const int* offsets, int ne, int r
 
 // MoE variant: one kernel quantizes all [expanded, K] rows into contiguous
 // packed output + per-expert SFA slabs (one per expert).
-__global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
+__global__ void quantize_fp16_nvfp4_sfatom_moe_kernel(
     const half* __restrict__ input,          // [expanded, K] (gather=null) OR [n_tokens, K] (gather!=null)
     const int32_t* __restrict__ gather,      // [expanded] sorted_token_ids permutation, or null
     uint8_t* __restrict__ packed_out,        // [expanded, K/2] contiguous
@@ -226,8 +226,8 @@ __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
 // Host-callable functions
 // ---------------------------------------------------------------------------
 
-void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Owned& dst, cudaStream_t stream) {
-    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_cutlass: src.packed_data is null");
+void convert_nvfp4_to_sfatom(const NvFP4QuantResult& src, NvFP4SfAtomOwned& dst, cudaStream_t stream) {
+    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_sfatom: src.packed_data is null");
     int64_t N = src.N;
     int64_t K = src.K;
 
@@ -235,9 +235,9 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Owned& ds
     // Despite LayoutBTag=ColumnMajor, CUTLASS block-scaled GEMM uses RowMajor stride.
 
     // Allocate SfAtom scale buffer
-    size_t sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+    size_t sf_bytes = nvfp4_sfatom_size(static_cast<int>(N), static_cast<int>(K));
     void* d_sf = nullptr;
-    cuda_alloc_or_throw(device_alloc_all(dev_req(d_sf, sf_bytes)), "convert_nvfp4_to_cutlass scales");
+    cuda_alloc_or_throw(device_alloc_all(dev_req(d_sf, sf_bytes)), "convert_nvfp4_to_sfatom scales");
     dst.sf_owned.adopt(d_sf, sf_bytes, nullptr);
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));  // zero-init for padding
 
@@ -261,20 +261,20 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Owned& ds
     dst.K = K;
     dst.sf_bytes = sf_bytes;
 
-    IMP_LOG_DEBUG("convert_nvfp4_to_cutlass: N=%lld K=%lld sf=%.2f MiB (data borrowed)", (long long)N,
+    IMP_LOG_DEBUG("convert_nvfp4_to_sfatom: N=%lld K=%lld sf=%.2f MiB (data borrowed)", (long long)N,
                   (long long)K, sf_bytes / (1024.0 * 1024.0));
 }
 
-void convert_nvfp4_to_cutlass_borrowed(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, void* sf_dst,
-                                       cudaStream_t stream) {
-    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_cutlass_borrowed: src.packed_data is null");
-    IMP_CHECK(sf_dst != nullptr, "convert_nvfp4_to_cutlass_borrowed: sf_dst is null");
+void convert_nvfp4_to_sfatom_borrowed(const NvFP4QuantResult& src, NvFP4SfAtomWeight& dst, void* sf_dst,
+                                      cudaStream_t stream) {
+    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_sfatom_borrowed: src.packed_data is null");
+    IMP_CHECK(sf_dst != nullptr, "convert_nvfp4_to_sfatom_borrowed: sf_dst is null");
     int64_t N = src.N;
     int64_t K = src.K;
 
     // Write micro-scales into the caller's pre-zeroed slab sub-region (no alloc,
     // no memset — the slab is zeroed once for all entries). Same kernel/layout
-    // as convert_nvfp4_to_cutlass.
+    // as convert_nvfp4_to_sfatom.
     int K_groups = static_cast<int>(K) / kSFVecSize;
     int total = static_cast<int>(N) * K_groups;
     int n_k_tiles = (static_cast<int>(K) + kAtomKElems - 1) / kAtomKElems;
@@ -290,7 +290,7 @@ void convert_nvfp4_to_cutlass_borrowed(const NvFP4QuantResult& src, CutlassNvFP4
     dst.tensor_scale = src.tensor_scale;
     dst.N = N;
     dst.K = K;
-    dst.sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+    dst.sf_bytes = nvfp4_sfatom_size(static_cast<int>(N), static_cast<int>(K));
 }
 
 void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N, int K,
@@ -300,7 +300,7 @@ void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfa
     int K_groups = K / kSFVecSize;
     int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
     size_t native_stride = static_cast<size_t>(N) * K_groups;
-    size_t sfatom_stride = cutlass_nvfp4_sf_size(N, K);
+    size_t sfatom_stride = nvfp4_sfatom_size(N, K);
 
     // Pre-zero so SfAtom row-tile padding bytes are well-defined (the kernel
     // writes only valid (n, k_group) positions; padding rows pad up to 128).
@@ -321,9 +321,9 @@ void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfa
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
-                                    cudaStream_t stream, float act_scale) {
-    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_cutlass: K=%d must be multiple of %d", K,
+void quantize_fp16_to_nvfp4_sfatom(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
+                                   cudaStream_t stream, float act_scale) {
+    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_sfatom: K=%d must be multiple of %d", K,
               kSFVecSize);
 
     // SfAtom padding bytes are pre-zeroed once at workspace allocation
@@ -336,16 +336,17 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 
     int threads = 256;
     int blocks = (total_mb + threads - 1) / threads;
-    quantize_fp16_nvfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_data),
-        reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles, act_scale);
+    quantize_fp16_nvfp4_sfatom_kernel<<<blocks, threads, 0, stream>>>(reinterpret_cast<const half*>(src_fp16),
+                                                                      reinterpret_cast<uint8_t*>(dst_data),
+                                                                      reinterpret_cast<uint8_t*>(dst_sf), M,
+                                                                      K, n_k_tiles, act_scale);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, uint8_t* const* d_sfa_bases,
-                                        const int* d_offsets, int expanded, int K, int ne,
-                                        cudaStream_t stream, float act_scale) {
-    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_cutlass_moe: K=%d must be multiple of %d", K,
+void quantize_fp16_to_nvfp4_sfatom_moe(const void* src_fp16, void* dst_packed, uint8_t* const* d_sfa_bases,
+                                       const int* d_offsets, int expanded, int K, int ne, cudaStream_t stream,
+                                       float act_scale) {
+    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_sfatom_moe: K=%d must be multiple of %d", K,
               kSFVecSize);
     if (expanded == 0)
         return;
@@ -356,20 +357,20 @@ void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, 
 
     int threads = 256;
     int blocks = (total_mb + threads - 1) / threads;
-    quantize_fp16_nvfp4_cutlass_moe_kernel<<<blocks, threads, 0, stream>>>(
+    quantize_fp16_nvfp4_sfatom_moe_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const half*>(src_fp16), /*gather=*/nullptr, reinterpret_cast<uint8_t*>(dst_packed),
         d_sfa_bases, d_offsets, expanded, K, ne, n_k_tiles, act_scale);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16, const int32_t* sorted_token_ids,
-                                               void* dst_packed, uint8_t* const* d_sfa_bases,
-                                               const int* d_offsets, int expanded, int K, int ne,
-                                               cudaStream_t stream, float act_scale) {
-    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_cutlass_moe_gather: K=%d must be multiple of %d",
-              K, kSFVecSize);
+void quantize_fp16_to_nvfp4_sfatom_moe_gather(const void* src_fp16, const int32_t* sorted_token_ids,
+                                              void* dst_packed, uint8_t* const* d_sfa_bases,
+                                              const int* d_offsets, int expanded, int K, int ne,
+                                              cudaStream_t stream, float act_scale) {
+    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_sfatom_moe_gather: K=%d must be multiple of %d", K,
+              kSFVecSize);
     IMP_CHECK(sorted_token_ids != nullptr,
-              "quantize_fp16_to_nvfp4_cutlass_moe_gather: sorted_token_ids must not be null");
+              "quantize_fp16_to_nvfp4_sfatom_moe_gather: sorted_token_ids must not be null");
     if (expanded == 0)
         return;
 
@@ -379,20 +380,20 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16, const int32
 
     int threads = 256;
     int blocks = (total_mb + threads - 1) / threads;
-    quantize_fp16_nvfp4_cutlass_moe_kernel<<<blocks, threads, 0, stream>>>(
+    quantize_fp16_nvfp4_sfatom_moe_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const half*>(src_fp16), sorted_token_ids, reinterpret_cast<uint8_t*>(dst_packed),
         d_sfa_bases, d_offsets, expanded, K, ne, n_k_tiles, act_scale);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Fused activation + NVFP4 CUTLASS quantize (phase-5 review section 2.2, #604): reads gate+up
+// Fused activation + NVFP4 SfAtom quantize (phase-5 review section 2.2, #604): reads gate+up
 // from HBM, computes SwiGLU/GeGLU/ReLU^2 in registers, writes only packed FP4 + SFA. Replaces
 // apply_expert_activation + quantize_..._moe, saving one HBM round-trip of the swiglu
 // intermediate (never materialized in HBM).
 
 // Compile-time activation tag: keeps the inner branch a no-op in PTX.
 template <int kAct>
-__global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
+__global__ void fused_act_quantize_fp16_nvfp4_sfatom_moe_kernel(
     const half* __restrict__ gate,           // [expanded, K] or nullptr when kAct == RELU_SQR
     const half* __restrict__ up,             // [expanded, K]
     uint8_t* __restrict__ packed_out,        // [expanded, K/2]
@@ -467,14 +468,13 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
                                          sfa + sfatom_offset(local_row, k_group, n_k_tiles), act_scale);
 }
 
-void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const void* up_fp16,
-                                                  void* dst_packed, uint8_t* const* d_sfa_bases,
-                                                  const int* d_offsets, int expanded, int K, int ne,
-                                                  FFNActivation act_type, cudaStream_t stream,
-                                                  const void* gate_bias_fp16, const void* up_bias_fp16,
-                                                  float act_scale) {
-    IMP_CHECK(K % kSFVecSize == 0,
-              "fused_act_quantize_fp16_to_nvfp4_cutlass_moe: K=%d must be multiple of %d", K, kSFVecSize);
+void fused_act_quantize_fp16_to_nvfp4_sfatom_moe(const void* gate_fp16, const void* up_fp16, void* dst_packed,
+                                                 uint8_t* const* d_sfa_bases, const int* d_offsets,
+                                                 int expanded, int K, int ne, FFNActivation act_type,
+                                                 cudaStream_t stream, const void* gate_bias_fp16,
+                                                 const void* up_bias_fp16, float act_scale) {
+    IMP_CHECK(K % kSFVecSize == 0, "fused_act_quantize_fp16_to_nvfp4_sfatom_moe: K=%d must be multiple of %d",
+              K, kSFVecSize);
     const bool relu = act_type == FFNActivation::RELU_SQR;
     const bool gpt_oss = act_type == FFNActivation::GPT_OSS_GLU;
     IMP_CHECK(relu || gate_fp16 != nullptr,
@@ -487,10 +487,10 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
     const int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
     const int threads = 256;
     const int blocks = ((expanded * (K / kSFVecSize)) + threads - 1) / threads;
-    auto* kernel = act_type == FFNActivation::SWIGLU  ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<0>
-                   : act_type == FFNActivation::GEGLU ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<1>
-                   : gpt_oss                          ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<3>
-                                                      : fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<2>;
+    auto* kernel = act_type == FFNActivation::SWIGLU  ? fused_act_quantize_fp16_nvfp4_sfatom_moe_kernel<0>
+                   : act_type == FFNActivation::GEGLU ? fused_act_quantize_fp16_nvfp4_sfatom_moe_kernel<1>
+                   : gpt_oss                          ? fused_act_quantize_fp16_nvfp4_sfatom_moe_kernel<3>
+                                                      : fused_act_quantize_fp16_nvfp4_sfatom_moe_kernel<2>;
     kernel<<<blocks, threads, 0, stream>>>(relu ? nullptr : static_cast<const half*>(gate_fp16),
                                            static_cast<const half*>(up_fp16),
                                            static_cast<uint8_t*>(dst_packed), d_sfa_bases, d_offsets,
@@ -500,13 +500,13 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Dense SwiGLU + CUTLASS NVFP4 quantize: one thread per 16-value micro-block, FP16 math of
-// swiglu_fp16_kernel, quantized from the stored FP16 values (= quantize_fp16_nvfp4_cutlass_kernel).
-__global__ void swiglu_quantize_fp16_nvfp4_cutlass_kernel(const half* __restrict__ gate,
-                                                          const half* __restrict__ up, half* __restrict__ out,
-                                                          uint8_t* __restrict__ packed_out,
-                                                          uint8_t* __restrict__ sf_out, int M, int K,
-                                                          int n_k_tiles, float act_scale) {
+// Dense SwiGLU + SfAtom NVFP4 quantize: one thread per 16-value micro-block, FP16 math of
+// swiglu_fp16_kernel, quantized from the stored FP16 values (= quantize_fp16_nvfp4_sfatom_kernel).
+__global__ void swiglu_quantize_fp16_nvfp4_sfatom_kernel(const half* __restrict__ gate,
+                                                         const half* __restrict__ up, half* __restrict__ out,
+                                                         uint8_t* __restrict__ packed_out,
+                                                         uint8_t* __restrict__ sf_out, int M, int K,
+                                                         int n_k_tiles, float act_scale) {
     const int k_groups = K / kSFVecSize;
     const int64_t mb = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (mb >= static_cast<int64_t>(M) * k_groups)
@@ -527,15 +527,15 @@ __global__ void swiglu_quantize_fp16_nvfp4_cutlass_kernel(const half* __restrict
                                          k_group, sf_out + sfatom_offset(row, k_group, n_k_tiles), act_scale);
 }
 
-void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up_fp16, void* out_fp16,
-                                           void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream,
-                                           float act_scale) {
-    IMP_CHECK(K % kSFVecSize == 0, "swiglu_quantize_fp16_to_nvfp4_cutlass: K=%d must be multiple of %d", K,
+void swiglu_quantize_fp16_to_nvfp4_sfatom(const void* gate_fp16, const void* up_fp16, void* out_fp16,
+                                          void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream,
+                                          float act_scale) {
+    IMP_CHECK(K % kSFVecSize == 0, "swiglu_quantize_fp16_to_nvfp4_sfatom: K=%d must be multiple of %d", K,
               kSFVecSize);
     const int threads = 256;
     const int blocks = static_cast<int>(((static_cast<int64_t>(M) * (K / kSFVecSize)) + threads - 1) /
                                         threads);
-    swiglu_quantize_fp16_nvfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
+    swiglu_quantize_fp16_nvfp4_sfatom_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<const half*>(gate_fp16), static_cast<const half*>(up_fp16), static_cast<half*>(out_fp16),
         static_cast<uint8_t*>(dst_data), static_cast<uint8_t*>(dst_sf), M, K,
         (K + kAtomKElems - 1) / kAtomKElems, act_scale);

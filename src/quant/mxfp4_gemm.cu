@@ -447,7 +447,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_ke
 // Host launchers
 // ---------------------------------------------------------------------------
 
-void gemv_mxfp4_kpar(const CutlassMxFP4Weight& W, const half* x, half* y, int N, int K, cudaStream_t stream) {
+void gemv_mxfp4_kpar(const MxFP4SfAtomWeight& W, const half* x, half* y, int N, int K, cudaStream_t stream) {
     static int kpar_dbg = 0;
     ++kpar_dbg;
     if (kpar_dbg <= 200 && (K != 5120 || kpar_dbg <= 3))
@@ -468,7 +468,7 @@ void gemv_mxfp4_kpar(const CutlassMxFP4Weight& W, const half* x, half* y, int N,
     }
 }
 
-void gemv_mxfp4_kpar_fp32(const CutlassMxFP4Weight& W, const half* x, float* y, int N, int K,
+void gemv_mxfp4_kpar_fp32(const MxFP4SfAtomWeight& W, const half* x, float* y, int N, int K,
                           cudaStream_t stream) {
     int n_groups = K / kMxGroupSize;
     int mr_blocks = (N + kMRWarps - 1) / kMRWarps;
@@ -484,8 +484,8 @@ void gemv_mxfp4_kpar_fp32(const CutlassMxFP4Weight& W, const half* x, float* y, 
     }
 }
 
-void gemv_mxfp4_qkv_fused(const CutlassMxFP4Weight& wq, const CutlassMxFP4Weight& wk,
-                          const CutlassMxFP4Weight& wv, const half* x, half* yq, half* yk, half* yv,
+void gemv_mxfp4_qkv_fused(const MxFP4SfAtomWeight& wq, const MxFP4SfAtomWeight& wk,
+                          const MxFP4SfAtomWeight& wv, const half* x, half* yq, half* yk, half* yv,
                           int q_rows, int k_rows, int v_rows, int K, cudaStream_t stream) {
     int total_rows = q_rows + k_rows + v_rows;
     gemv_mxfp4_qkv_kernel<<<total_rows, kKparThreads, 0, stream>>>(
@@ -496,7 +496,7 @@ void gemv_mxfp4_qkv_fused(const CutlassMxFP4Weight& wq, const CutlassMxFP4Weight
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void gemv_mxfp4_gate_up_fused(const CutlassMxFP4Weight& wg, const CutlassMxFP4Weight& wu, const half* x,
+void gemv_mxfp4_gate_up_fused(const MxFP4SfAtomWeight& wg, const MxFP4SfAtomWeight& wu, const half* x,
                               half* yg, half* yu, int rows, int K, cudaStream_t stream) {
     gemv_mxfp4_gate_up_kernel<<<rows * 2, kKparThreads, 0, stream>>>(
         static_cast<const uint8_t*>(wg.data), static_cast<const uint8_t*>(wg.linear_scales),
@@ -505,7 +505,7 @@ void gemv_mxfp4_gate_up_fused(const CutlassMxFP4Weight& wg, const CutlassMxFP4We
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void gemv_mxfp4_residual(const CutlassMxFP4Weight& W, const half* x, half* y, const half* residual, int N,
+void gemv_mxfp4_residual(const MxFP4SfAtomWeight& W, const half* x, half* y, const half* residual, int N,
                          int K, cudaStream_t stream) {
     gemv_mxfp4_residual_kernel<<<N, kKparThreads, 0, stream>>>(static_cast<const uint8_t*>(W.data),
                                                                static_cast<const uint8_t*>(W.linear_scales),
@@ -513,7 +513,7 @@ void gemv_mxfp4_residual(const CutlassMxFP4Weight& W, const half* x, half* y, co
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void gemv_mxfp4_swiglu_residual(const CutlassMxFP4Weight& W, const half* gate, const half* up, half* y,
+void gemv_mxfp4_swiglu_residual(const MxFP4SfAtomWeight& W, const half* gate, const half* up, half* y,
                                 const half* residual, int N, int K, cudaStream_t stream) {
     gemv_mxfp4_swiglu_residual_kernel<<<N, kKparThreads, 0, stream>>>(static_cast<const uint8_t*>(W.data),
                                                                       static_cast<const uint8_t*>(
@@ -522,7 +522,7 @@ void gemv_mxfp4_swiglu_residual(const CutlassMxFP4Weight& W, const half* gate, c
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void gemv_mxfp4_geglu_residual(const CutlassMxFP4Weight& W, const half* gate, const half* up, half* y,
+void gemv_mxfp4_geglu_residual(const MxFP4SfAtomWeight& W, const half* gate, const half* up, half* y,
                                const half* residual, int N, int K, cudaStream_t stream) {
     gemv_mxfp4_geglu_residual_kernel<<<N, kKparThreads, 0, stream>>>(static_cast<const uint8_t*>(W.data),
                                                                      static_cast<const uint8_t*>(

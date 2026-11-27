@@ -44,12 +44,12 @@ protected:
         if (path == nullptr)
             GTEST_SKIP() << "Set " << GetParam().env << " to run deterministic-mode E2E";
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, GetParam().env));
+        path_ = path;  // copied first: setenv below may invalidate getenv's pointer
         // Must be set BEFORE imp_context_create: engine init pulls the
         // env-seeded RuntimeConfig via take_pending_runtime_config().
         setenv("IMP_DETERMINISTIC", "1", 1);
-        path_ = path;
         fmt_ = is_safetensors_dir(path_) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
-        ASSERT_EQ(imp_model_load(path, fmt_, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(path_.c_str(), fmt_, &model_), IMP_SUCCESS);
     }
 
     void TearDown() override {

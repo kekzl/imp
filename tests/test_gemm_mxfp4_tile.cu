@@ -68,9 +68,9 @@ struct Operands {
 
 void quantize(const half* src, void** data, void** sf, int rows, int K, cudaStream_t s) {
     ASSERT_EQ(cudaMalloc(data, size_t(rows) * K / 2), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(sf, cutlass_mxfp4_sf_size(rows, K)), cudaSuccess);
-    cudaMemsetAsync(*sf, 0, cutlass_mxfp4_sf_size(rows, K), s);
-    quantize_fp16_to_mxfp4_cutlass(src, *data, *sf, rows, K, s);
+    ASSERT_EQ(cudaMalloc(sf, mxfp4_sfatom_size(rows, K)), cudaSuccess);
+    cudaMemsetAsync(*sf, 0, mxfp4_sfatom_size(rows, K), s);
+    quantize_fp16_to_mxfp4_sfatom(src, *data, *sf, rows, K, s);
 }
 
 void make_operands(Operands& o, int M, int N, int K, cudaStream_t s) {

@@ -63,7 +63,7 @@ static std::string generate(ImpModel model, ImpContext ctx, const std::string& p
 // Helper: detect n-gram repetition in a token sequence.
 // Returns the fraction of tokens that are part of a repeating n-gram.
 static float repetition_ratio(const std::string& text, int ngram_size = 3) {
-    if (text.size() < static_cast<size_t>(ngram_size * 3))
+    if (text.size() < static_cast<size_t>(ngram_size) * 3)
         return 0.0f;
 
     // Split into words (crude but effective)
@@ -82,7 +82,7 @@ static float repetition_ratio(const std::string& text, int ngram_size = 3) {
     if (!word.empty())
         words.push_back(word);
 
-    if (words.size() < static_cast<size_t>(ngram_size * 3))
+    if (words.size() < static_cast<size_t>(ngram_size) * 3)
         return 0.0f;
 
     // Count n-gram occurrences
@@ -161,7 +161,7 @@ TEST_F(DegenerationTest, ShortPromptNoRepetition) {
 // Test 2: Second request after first should still produce coherent output
 TEST_F(DegenerationTest, SecondRequestNotCorrupt) {
     // First request
-    std::string out1 = generate(model_, ctx_, "Say hello", 20);
+    (void)generate(model_, ctx_, "Say hello", 20);
 
     // Reset context
     EXPECT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);

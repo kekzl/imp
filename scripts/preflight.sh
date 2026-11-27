@@ -35,12 +35,12 @@ inner() {
         grep -q '^  FAIL  ' "$OUT/static-gates.log" || row "static gates" FAIL $((SECONDS - t0)) "exit $rc"
     fi
 
-    echo "== clang-tidy (changed .cpp + src .cu host side) =="
+    echo "== clang-tidy (changed .cpp + src/tests .cu host side) =="
     t0=$SECONDS
-    mapfile -t cpp < <(printf '%s\n' "${files[@]}" | grep -E '^(src|tools)/.*\.cpp$')
-    mapfile -t cu < <(printf '%s\n' "${files[@]}" | grep -E '^src/.*\.cu$')
+    mapfile -t cpp < <(printf '%s\n' "${files[@]}" | grep -E '^(src|tools|tests)/.*\.cpp$')
+    mapfile -t cu < <(printf '%s\n' "${files[@]}" | grep -E '^(src|tests)/.*\.cu$')
     if [ $(( ${#cpp[@]} + ${#cu[@]} )) -eq 0 ]; then
-        row "clang-tidy" skip 0 "no changed src/tools .cpp or src .cu"
+        row "clang-tidy" skip 0 "no changed src/tools/tests .cpp or src/tests .cu"
     else
         # Same configure as CI's tidy job (cmake --preset ci); a reconfigure costs ~3 s.
         if cmake --preset ci -B "$OUT/build" \

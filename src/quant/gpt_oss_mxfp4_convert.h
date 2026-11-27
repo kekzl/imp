@@ -20,7 +20,7 @@ namespace imp {
 // interleaved sub-matrices: gate offset0/stride2, up offset1/stride2, down offset0/stride1.
 // extra_scale folds a constant into the per-expert tensor scale (gpt-oss's residual 2^-4 rescale
 // on down).
-// h_tscales_out (optional): host copy of per-expert FP32 tensor scales for CUTLASS
+// h_tscales_out (optional): host copy of per-expert FP32 tensor scales for the SfAtom
 // per-expert weight registration.
 [[nodiscard]] bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_scales, int ne,
                                                     int64_t n_rows_total, int64_t K, int row_offset,

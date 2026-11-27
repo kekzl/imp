@@ -20,10 +20,13 @@ static std::string repo_to_cache_name(const std::string& repo_id) {
 }
 
 std::string hf_cache_dir() {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): huggingface_hub cache rule (HUGGINGFACE_HUB_CACHE)
     if (const char* v = std::getenv("HUGGINGFACE_HUB_CACHE"))
         return v;
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): huggingface_hub cache rule (HF_HOME)
     if (const char* v = std::getenv("HF_HOME"))
         return std::string(v) + "/hub";
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): huggingface_hub cache rule (HOME)
     if (const char* v = std::getenv("HOME"))
         return std::string(v) + "/.cache/huggingface/hub";
     return "";

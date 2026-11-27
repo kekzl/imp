@@ -22,8 +22,8 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#include "compute/cutlass_nvfp4_owned.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_owned.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/process_diag.h"
 #include "quant/nvfp4_gemm_tile.h"
 #include "compute/activation.h"
@@ -173,8 +173,8 @@ bool read_gdn_state(SSMState& ssm, int seq, int n_layers, size_t layer_bytes, fl
 // Full forward pass
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
-    if (lm_head_cutlass_ready_)
+void GraphExecutor::build_lm_head_sfatom_(cudaStream_t stream) {
+    if (lm_head_sfatom_ready_)
         return;
     // Opt-in (gemm.nvfp4_lm_head_cutlass). Only batched decode (n>1) uses it;
     // single-stream (n==1) keeps the weight-bound M=1 GEMV.
@@ -188,42 +188,39 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
         return;  // LM head is not in the NVFP4 decode cache (nvfp4_lm_head off / GDN)
     // Phase 3b's prefill cache may already hold the head's SfAtom: borrow it (both freed in
     // free_buffers). Qwen3-14B-NVFP4, gemm.nvfp4_lm_head=on: 46.4 MiB not built twice.
-    if (const CutlassNvFP4CacheEntry* ct = lm_e.cutlass_nvfp4;
-        ct != nullptr && ct->scale_factors != nullptr) {
-        CutlassNvFP4Weight view = *ct;  // a sliced copy of an entry is a view
-        lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(view));
-        lm_head_cutlass_ready_ = lm_head_cutlass_.data != nullptr;
-        IMP_LOG_INFO(
-            "LM head: batched-decode CUTLASS GEMM borrows the prefill SfAtom (%zu KiB not duplicated)",
-            lm_head_cutlass_.sf_bytes / 1024);
+    if (const NvFP4SfAtomCacheEntry* ct = lm_e.nvfp4_sfatom; ct != nullptr && ct->scale_factors != nullptr) {
+        NvFP4SfAtomWeight view = *ct;  // NOLINT(cppcoreguidelines-slicing): a sliced entry is a view
+        lm_head_sfatom_ = NvFP4SfAtomCacheEntry(std::move(view));
+        lm_head_sfatom_ready_ = lm_head_sfatom_.data != nullptr;
+        IMP_LOG_INFO("LM head: batched-decode W4A4 GEMM borrows the prefill SfAtom (%zu KiB not duplicated)",
+                     lm_head_sfatom_.sf_bytes / 1024);
         return;
     }
     // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
-    CutlassNvFP4Owned built;
-    convert_nvfp4_to_cutlass(*lm_e.nvfp4, built, stream);
-    lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(built));  // owns the SfAtom scales
+    NvFP4SfAtomOwned built;
+    convert_nvfp4_to_sfatom(*lm_e.nvfp4, built, stream);
+    lm_head_sfatom_ = NvFP4SfAtomCacheEntry(std::move(built));  // owns the SfAtom scales
     if (const cudaError_t err = cudaStreamSynchronize(stream); err != cudaSuccess) {
-        IMP_LOG_WARN("LM head: CUTLASS NVFP4 conversion failed (%s), GEMV path stays",
-                     cudaGetErrorString(err));
-        lm_head_cutlass_ = CutlassNvFP4CacheEntry{};
+        IMP_LOG_WARN("LM head: SfAtom conversion failed (%s), GEMV path stays", cudaGetErrorString(err));
+        lm_head_sfatom_ = NvFP4SfAtomCacheEntry{};
         return;
     }
-    lm_head_cutlass_ready_ =
-        (lm_head_cutlass_.data != nullptr && lm_head_cutlass_.scale_factors != nullptr);
-    if (lm_head_cutlass_ready_)
-        IMP_LOG_INFO("LM head: CUTLASS NVFP4 tensor-core GEMM enabled for batched decode "
-                     "(N=%lld K=%lld, +%zu KiB SfAtom scales)",
-                     static_cast<long long>(lm_head_cutlass_.N),
-                     static_cast<long long>(lm_head_cutlass_.K), lm_head_cutlass_.sf_bytes / 1024);
+    lm_head_sfatom_ready_ = (lm_head_sfatom_.data != nullptr && lm_head_sfatom_.scale_factors != nullptr);
+    if (lm_head_sfatom_ready_)
+        IMP_LOG_INFO(
+            "LM head: NVFP4 tile GEMM enabled for batched decode "
+            "(N=%lld K=%lld, +%zu KiB SfAtom scales)",
+            static_cast<long long>(lm_head_sfatom_.N), static_cast<long long>(lm_head_sfatom_.K),
+            lm_head_sfatom_.sf_bytes / 1024);
 }
 
 bool GraphExecutor::lm_head_nvfp4_gemm_f32_(int rows, float* logits, cudaStream_t stream) {
     const auto& cfg = model_->config();
-    void* const ws = process_diag_deterministic() ? nullptr : qscratch_.cutlass_workspace.get();
-    return gemm_nvfp4_tile_f32(qscratch_.cutlass_act_data.get(), qscratch_.cutlass_act_sf.get(),
-                               lm_head_cutlass_.data, lm_head_cutlass_.scale_factors,
-                               lm_head_cutlass_.tensor_scale, logits, rows, cfg.vocab_size, cfg.d_model,
-                               stream, ws, qscratch_.cutlass_workspace_size);
+    void* const ws = process_diag_deterministic() ? nullptr : qscratch_.tile_workspace.get();
+    return gemm_nvfp4_tile_f32(qscratch_.tile_act_data.get(), qscratch_.tile_act_sf.get(),
+                               lm_head_sfatom_.data, lm_head_sfatom_.scale_factors,
+                               lm_head_sfatom_.tensor_scale, logits, rows, cfg.vocab_size, cfg.d_model,
+                               stream, ws, qscratch_.tile_workspace_size);
 }
 
 void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream) {
@@ -345,9 +342,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     Tensor h = view_tokens(hidden_, n);
     // Native MXFP4 table: unpacked in place, scales in its cache entry (without one the MXFP4 overload
     // throws).
-    const CutlassMxFP4CacheEntry* emb_mx = model_->tok_emb_id != kInvalidTensorID
-                                               ? registry_.handle(model_->tok_emb_id).entries.cutlass_mxfp4
-                                               : nullptr;
+    const MxFP4SfAtomCacheEntry* emb_mx = model_->tok_emb_id != kInvalidTensorID
+                                              ? registry_.handle(model_->tok_emb_id).entries.mxfp4_sfatom
+                                              : nullptr;
     if (model_->tok_emb_.qtype == QType::MXFP4 && emb_mx != nullptr)
         embedding_lookup_mxfp4(emb_mx->data, emb_mx->linear_scales, state.token_ids, n, h, stream);
     else
@@ -753,7 +750,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no_last.data),
                                         static_cast<half*>(no_last.data), 1, cfg.d_model, hbs, stream);
-            CutlassMxFP4Weight mxfp4_lm_w{};
+            MxFP4SfAtomWeight mxfp4_lm_w{};
             mxfp4_lm_w.data = lm_h->payload.mxfp4.weight;
             mxfp4_lm_w.scale_factors = lm_h->payload.mxfp4.scales;
             mxfp4_lm_w.linear_scales = lm_h->payload.mxfp4.linear_scales;
@@ -841,7 +838,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no_final.data),
                                         static_cast<half*>(no_final.data), 1, cfg.d_model, hbs, stream);
-            CutlassMxFP4Weight mxfp4_lm_w{};
+            MxFP4SfAtomWeight mxfp4_lm_w{};
             mxfp4_lm_w.data = lm_h->payload.mxfp4.weight;
             mxfp4_lm_w.scale_factors = lm_h->payload.mxfp4.scales;
             mxfp4_lm_w.linear_scales = lm_h->payload.mxfp4.linear_scales;
@@ -923,10 +920,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             // Tensor-core path: one NVFP4 tile GEMM (M=n, gemm_nvfp4_tile_f32) reads the
             // LM-head weight ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (samplers read
             // float logits). Falls back to the GEMV if disabled or the kernel declines the shape.
-            if (!lm_done && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data.get() != nullptr &&
-                qscratch_.cutlass_act_sf.get() != nullptr) {
-                quantize_fp16_to_nvfp4_cutlass(no_final.data, qscratch_.cutlass_act_data.get(),
-                                               qscratch_.cutlass_act_sf.get(), n, cfg.d_model, stream);
+            if (!lm_done && lm_head_sfatom_ready_ && qscratch_.tile_act_data.get() != nullptr &&
+                qscratch_.tile_act_sf.get() != nullptr) {
+                quantize_fp16_to_nvfp4_sfatom(no_final.data, qscratch_.tile_act_data.get(),
+                                              qscratch_.tile_act_sf.get(), n, cfg.d_model, stream);
                 lm_done = lm_head_nvfp4_gemm_f32_(n, static_cast<float*>(lg.data), stream);
             }
             if (!lm_done) {

@@ -48,8 +48,8 @@ TEST(TensorKindTable, AttentionProjectionsSupportAllQuantTiers) {
         const auto& cap = capabilities_of(k);
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::FP16));
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::FP8));
-        EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4));
-        EXPECT_TRUE(mask_contains(cap.supported, StorageTier::CUTLASS_NVFP4));
+        EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4_LINEAR));
+        EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4_SFATOM));
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::MXFP4))
             << "kind " << tensor_kind_name(k) << " must support MXFP4 for fused QKV path";
     }
@@ -66,10 +66,10 @@ TEST(EffectiveCapabilities, SubFiveBitSourcesStripNVFP4) {
     for (auto qtype :
          {QType::Q4_K, QType::Q4_0, QType::Q5_0, QType::Q5_1, QType::Q3_K, QType::Q2_K, QType::Q4_1}) {
         auto cap = effective_capabilities(TensorKind::W_GATE, qtype);
-        EXPECT_FALSE(mask_contains(cap.supported, StorageTier::NVFP4))
+        EXPECT_FALSE(mask_contains(cap.supported, StorageTier::NVFP4_LINEAR))
             << "qtype " << qtype_name(qtype) << " (sub-5-bit) must NOT support NVFP4 overlay";
-        EXPECT_FALSE(mask_contains(cap.supported, StorageTier::CUTLASS_NVFP4))
-            << "qtype " << qtype_name(qtype) << " must NOT support CUTLASS_NVFP4 overlay";
+        EXPECT_FALSE(mask_contains(cap.supported, StorageTier::NVFP4_SFATOM))
+            << "qtype " << qtype_name(qtype) << " must NOT support NVFP4_SFATOM overlay";
         EXPECT_FALSE(mask_contains(cap.supported, StorageTier::MXFP4))
             << "qtype " << qtype_name(qtype) << " must NOT support MXFP4 overlay";
         EXPECT_EQ(cap.required_floor, StorageTier::FP16)
@@ -84,10 +84,10 @@ TEST(EffectiveCapabilities, NVFP4BeneficialSourcesPreserveNVFP4) {
     // win. Capabilities should be unchanged from the kind defaults.
     for (auto qtype : {QType::Q5_K, QType::Q6_K, QType::Q8_0, QType::Q8_K}) {
         auto cap = effective_capabilities(TensorKind::W_GATE, qtype);
-        EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4))
+        EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4_LINEAR))
             << "qtype " << qtype_name(qtype) << " (>=5.5-bit) must support NVFP4 overlay";
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::FP16));
-        EXPECT_EQ(cap.required_floor, StorageTier::NVFP4)
+        EXPECT_EQ(cap.required_floor, StorageTier::NVFP4_LINEAR)
             << "qtype " << qtype_name(qtype) << " floor stays at NVFP4 (compression win available)";
     }
 }
@@ -96,18 +96,18 @@ TEST(EffectiveCapabilities, NativeNVFP4Source) {
     // Native NVFP4 source: only NVFP4-family tiers are valid. The "overlay"
     // IS the source storage.
     auto cap = effective_capabilities(TensorKind::W_GATE, QType::NVFP4);
-    EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4));
-    EXPECT_TRUE(mask_contains(cap.supported, StorageTier::CUTLASS_NVFP4));
+    EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4_LINEAR));
+    EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4_SFATOM));
     EXPECT_FALSE(mask_contains(cap.supported, StorageTier::FP16))
         << "native NVFP4 should not propose FP16 (no dequant path expected)";
-    EXPECT_EQ(cap.required_floor, StorageTier::NVFP4);
+    EXPECT_EQ(cap.required_floor, StorageTier::NVFP4_LINEAR);
 }
 
 TEST(EffectiveCapabilities, NativeMXFP4Source) {
     auto cap = effective_capabilities(TensorKind::W_GATE, QType::MXFP4);
     EXPECT_TRUE(mask_contains(cap.supported, StorageTier::MXFP4));
     EXPECT_FALSE(mask_contains(cap.supported, StorageTier::FP16));
-    EXPECT_FALSE(mask_contains(cap.supported, StorageTier::NVFP4));
+    EXPECT_FALSE(mask_contains(cap.supported, StorageTier::NVFP4_LINEAR));
     EXPECT_EQ(cap.required_floor, StorageTier::MXFP4);
 }
 
@@ -115,7 +115,7 @@ TEST(EffectiveCapabilities, F16SourceStripsNVFP4) {
     // F16 source: matches runtime nvfp4_beneficial() policy — no NVFP4 path
     // exists for raw FP16 weights. Used by LM head / embeddings.
     auto cap = effective_capabilities(TensorKind::WQ, QType::F16);
-    EXPECT_FALSE(mask_contains(cap.supported, StorageTier::NVFP4));
+    EXPECT_FALSE(mask_contains(cap.supported, StorageTier::NVFP4_LINEAR));
     EXPECT_EQ(cap.required_floor, StorageTier::FP16);
 }
 

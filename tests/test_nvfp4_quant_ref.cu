@@ -161,6 +161,7 @@ TEST(Nvfp4QuantRefTest, Fp16ToNvfp4TensorScaleIsAbsmaxOverSix) {
     const float want_scale = absmax / 6.0f;
     EXPECT_EQ(q.tensor_scale, want_scale);
 
+    // NOLINTNEXTLINE(cppcoreguidelines-slicing): the view of the owner
     NvFP4QuantResult view = q;
     view.tensor_scale = want_scale;
     dequantize_nvfp4_to_fp16(view, d_output, nullptr);
