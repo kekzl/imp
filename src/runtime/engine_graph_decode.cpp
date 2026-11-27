@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "memory/device_alloc_all.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/cuda_graph.h"

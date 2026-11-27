@@ -474,9 +474,19 @@ void InklingForward::capture_decode_(int T, cudaStream_t s) {
         decode_graph_ok_ = false;
         return;
     }
-    f16_to_f32(dec_h_, h_, n, s);
-    layers_(T, s);
-    f32_to_f16(mix_[0], dec_h_, n, s);
+    try {
+        f16_to_f32(dec_h_, h_, n, s);
+        layers_(T, s);
+        f32_to_f16(mix_[0], dec_h_, n, s);
+    } catch (...) {
+        // A kernel guard refused (B-108): end the capture so s takes work again, then let it fail the call.
+        cudaGraph_t dead = nullptr;
+        (void)cudaStreamEndCapture(s, &dead);
+        if (dead)
+            (void)cudaGraphDestroy(dead);
+        decode_graph_ok_ = false;
+        throw;
+    }
     cudaGraphExec_t ex = nullptr;
     if (cudaStreamEndCapture(s, &g) != cudaSuccess || cudaGraphInstantiate(&ex, g, 0) != cudaSuccess) {
         IMP_LOG_WARN("inkling: graph capture of the %d-row step failed, small calls stay eager", T);

@@ -226,11 +226,11 @@ bool Engine::init_weights() {
     // Before init(): allocate_workspaces() sizes the sparse decode budget in
     // BLOCKS, and the conversion from a token count needs the real block size.
     executor_->set_kv_block_size(config_.kv_block_size.value_or(0));
-    executor_->set_kv_cache_dtype(config_.kv_cache_dtype);
+    executor_->set_kv_cache_dtype(rt_.kv_cache_dtype);
     executor_->set_prefill_chunk(resolve_prefill_chunk_size_());
     {
-        int eff_batch = config_.max_batch_size;
-        if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, config_.max_seq_len,
+        int eff_batch = rt_.max_batch_size;
+        if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, rt_.max_seq_len,
                              config_.use_fp8_prefill, config_.use_nvfp4_decode))
             return false;
 
@@ -274,14 +274,16 @@ bool Engine::init_weights() {
     retain_async_pool_memory();
 
     // Compute VRAM reserve for expert weight upload
-    model_->upload_batch_fit_ = UploadBatchFit{upload_reserve_for(*model_, config_, runtime_config_,
+    model_->upload_batch_fit_ = UploadBatchFit{upload_reserve_for(*model_,
+                                                                  resolved_engine_config(config_, rt_),
+                                                                  runtime_config_,
                                                                   executor_->workspace_estimate()),
-                                               config_.max_batch_size, config_.max_batch_size};
+                                               rt_.max_batch_size, rt_.max_batch_size};
     const UploadReserve& upload_reserve = model_->upload_batch_fit_.reserve;
-    const size_t expert_reserve = upload_reserve_bytes(upload_reserve, config_.max_batch_size);
+    const size_t expert_reserve = upload_reserve_bytes(upload_reserve, rt_.max_batch_size);
     IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
                  expert_reserve / (1024.0 * 1024.0), executor_->workspace_estimate() / (1024.0 * 1024.0),
-                 upload_reserve_kv_bytes(upload_reserve, config_.max_batch_size) / (1024.0 * 1024.0));
+                 upload_reserve_kv_bytes(upload_reserve, rt_.max_batch_size) / (1024.0 * 1024.0));
 
     // Upload weights
     size_t free_before = 0, total_before = 0;
@@ -305,16 +307,16 @@ bool Engine::init_weights() {
         IMP_LOG_ERROR("Weight upload failed. Try a smaller quantization.");
         return false;
     }
-    apply_upload_batch_fit(model_->upload_batch_fit_.fitted, config_.max_batch_size,
+    apply_upload_batch_fit(model_->upload_batch_fit_.fitted, rt_.max_batch_size,
                            runtime_config_.runtime.max_batch_size, scheduler_.get());
-    if (const int b = batch_after_host_expert_pin(config_.max_batch_size,
+    if (const int b = batch_after_host_expert_pin(rt_.max_batch_size,
                                                   runtime_config_.runtime.max_batch_size <= 0,
                                                   model_->upload_batch_fit_.host_experts_unpinned);
-        b != config_.max_batch_size) {
+        b != rt_.max_batch_size) {
         IMP_LOG_INFO(
             "max_batch_size: auto %d -> %d (host experts unpinned, the host expert tier runs one row)",
-            config_.max_batch_size, b);
-        apply_upload_batch_fit(b, config_.max_batch_size, runtime_config_.runtime.max_batch_size,
+            rt_.max_batch_size, b);
+        apply_upload_batch_fit(b, rt_.max_batch_size, runtime_config_.runtime.max_batch_size,
                                scheduler_.get());
     }
     model_->upload_batch_fit_ = {};

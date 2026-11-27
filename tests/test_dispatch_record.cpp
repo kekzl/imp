@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -105,6 +106,86 @@ TEST(DispatchRecord, StartsUnsetAndGatesTheDump) {
     dispatch_record::reset();
     EXPECT_FALSE(dispatch_record::current().has_prefill());
     EXPECT_FALSE(dispatch_record::current().has_decode());
+}
+
+// Dense GEMM ladder (D-2): every DensePath exit is named and distinct, or the
+// "Resolved dense GEMM" line prints '?' or two exits under one name.
+TEST(DispatchPaths, EveryDensePathHasADistinctName) {
+    std::vector<std::string> seen;
+    for (int p = 0; p < static_cast<int>(DensePath::COUNT); ++p) {
+        const char* name = dense_path_name(static_cast<DensePath>(p));
+        expect_named(name);
+        for (const auto& s : seen)
+            EXPECT_NE(s, name) << "duplicate dense path name: " << name;
+        seen.emplace_back(name);
+    }
+    EXPECT_EQ(seen.size(), 53u) << "UNSET + 28 ladder exits + 24 fused / sibling exits: DensePath gained or "
+                                   "lost an exit, update its recording site and this count";
+}
+
+// The first line is logged after one prefill step; decode routes (and the graph capture that records
+// them) arrive later. Each step that adds an exit bit logs the summary once more, a step without one
+// logs nothing.
+TEST(DispatchRecord, DenseLogLineRepeatsOnlyWhenAnExitIsNew) {
+    dispatch_record::reset();
+    auto& r = dispatch_record::current();
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/true), "Resolved dense GEMM: none recorded");
+
+    // Prefill step: Q4_K source GEMMs without a tier entry.
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::UNCACHED_FALLBACK);
+    dispatch_record::set_dense(TensorKind::W_DOWN, DensePath::UNCACHED_FALLBACK);
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/true),
+              "Resolved dense GEMM: WQ=uncached_fallback W_DOWN=uncached_fallback");
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/false), "") << "no new exit, no line";
+
+    // First decode step: the fused q|k|v GEMV and the dp4a down with residual.
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::QKV_DP4A);
+    dispatch_record::set_dense(TensorKind::W_DOWN, DensePath::DP4A_RESIDUAL);
+    EXPECT_EQ(
+        dispatch_record::dense_log_line(r, /*first=*/false),
+        "Resolved dense GEMM (+2 new): WQ=uncached_fallback+qkv_dp4a W_DOWN=uncached_fallback+dp4a_residual");
+
+    // Later decode steps replay the same exits: nothing new, nothing logged.
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::QKV_DP4A);
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/false), "");
+    dispatch_record::reset();
+}
+
+// A sibling launch (q|k|v, gate|up, ssm_in|gdn_gate) is one exit for each weight in it: before the
+// fused routes recorded, Qwen3.8 showed no WQ / WK / WV / W_GATE / W_UP and Qwen3-8B-FP8 printed "none".
+TEST(DispatchRecord, SiblingLaunchRecordsEveryWeight) {
+    dispatch_record::reset();
+    const TensorKind qkv[3] = {TensorKind::WQ, TensorKind::WK, TensorKind::WV};
+    dispatch_record::set_dense_each(qkv, 3, DensePath::FP8_SMALLM_MULTI);
+    EXPECT_EQ(dispatch_record::dense_summary(dispatch_record::current()),
+              "WQ=fp8_smallm_multi WK=fp8_smallm_multi WV=fp8_smallm_multi");
+    dispatch_record::reset();
+}
+
+// set_dense keeps the last exit per kind and a bit per exit ever taken; a kind
+// out of range is dropped, not written past the arrays.
+TEST(DispatchRecord, DenseKeepsLastAndEverySeenExitPerKind) {
+    dispatch_record::reset();
+    const auto& r = dispatch_record::current();
+    const int wq = static_cast<int>(TensorKind::WQ);
+    const int down = static_cast<int>(TensorKind::W_DOWN);
+    EXPECT_EQ(r.dense_last[wq], DensePath::UNSET);
+    EXPECT_EQ(r.dense_seen[wq], 0u);
+    EXPECT_EQ(dispatch_record::dense_summary(r), "");
+
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::NVFP4_TILE);
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::GEMV_NVFP4);
+    dispatch_record::set_dense(TensorKind::W_DOWN, DensePath::SMALLM_A4);
+    dispatch_record::set_dense(TensorKind::COUNT, DensePath::FP16_CACHE);
+    EXPECT_EQ(r.dense_last[wq], DensePath::GEMV_NVFP4);
+    EXPECT_EQ(r.dense_last[down], DensePath::SMALLM_A4);
+    EXPECT_EQ(r.dense_seen[wq], (uint64_t{1} << static_cast<int>(DensePath::NVFP4_TILE)) |
+                                    (uint64_t{1} << static_cast<int>(DensePath::GEMV_NVFP4)));
+    // Kinds in TensorKind order, exits in DensePath order.
+    EXPECT_EQ(dispatch_record::dense_summary(r), "WQ=gemv_nvfp4+nvfp4_tile W_DOWN=smallm_a4");
+
+    dispatch_record::reset();
+    EXPECT_EQ(dispatch_record::dense_summary(dispatch_record::current()), "");
 }
 
 // The two-level paths (outer → tier) must report the tier only once it was

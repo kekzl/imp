@@ -43,7 +43,7 @@ void Engine::bind_mrope_(InferenceState& state, int n_tokens, VramOwned<int32_t>
             return;
         }
         // A fixed buffer is sized once, to the batch ceiling, not to this step.
-        const int want = fixed ? std::max(n_tokens, std::max(1, config_.max_batch_size)) : n_tokens;
+        const int want = fixed ? std::max(n_tokens, std::max(1, rt_.max_batch_size)) : n_tokens;
         buf.reset();  // before the allocation: old and new never coexist
         buf = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(3) * want, "mrope_positions");
         if (!buf) {
@@ -162,7 +162,7 @@ void Engine::bind_mrope_decode_(InferenceState& state, const std::vector<std::sh
             IMP_LOG_ERROR("M-RoPE: decode batch of %d exceeds the %d it was sized for", n, mrope_decode_cap_);
             return;
         }
-        const int want = std::max(n, std::max(1, config_.max_batch_size));
+        const int want = std::max(n, std::max(1, rt_.max_batch_size));
         d_mrope_decode_ = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(want), "mrope_delta");
         if (!d_mrope_decode_)
             return;

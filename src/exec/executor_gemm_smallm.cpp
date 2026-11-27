@@ -319,6 +319,7 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
                     n, N, K);
             }
             swiglu_epi_ = {q, sf};
+            record_dense_({ly.w_up_id}, DensePath::NVFP4_TILE_SWIGLU_QUANT);
             return;
         }
     }
@@ -399,8 +400,11 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     xq.tensor_scale = as;
     xq.N = M;
     xq.K = K;
-    return kern == SmallMKernel::kWs ? gemm_nvfp4_smallm_ws_multi(sib, count, xq, M, K, ctx.stream)
-                                     : gemm_nvfp4_smallm_v2_multi_a4(sib, count, xq, M, K, ctx.stream);
+    if (kern == SmallMKernel::kWs)
+        return record_dense_if_(gemm_nvfp4_smallm_ws_multi(sib, count, xq, M, K, ctx.stream), ids, count,
+                                DensePath::SMALLM_MULTI_WS);
+    return record_dense_if_(gemm_nvfp4_smallm_v2_multi_a4(sib, count, xq, M, K, ctx.stream), ids, count,
+                            DensePath::SMALLM_MULTI_V2);
 }
 
 }  // namespace imp

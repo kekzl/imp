@@ -11,6 +11,7 @@
 #include "quant/nvfp4_quant.h"
 #include "runtime/cuda_graph.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/mtp_head_graph.h"
 
 #include <algorithm>

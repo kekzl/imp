@@ -6,7 +6,8 @@
 # must be served (HTTP 200, finish_reason) and pass scripts/degen_verdict.sh on its words; a banned word
 # (banned_strings, B-111 S6) never appears and the reply before it equals the unbanned one.
 # Prints one line per request; exit 0 = 11 of 11 served and coherent and a logit_lens request
-# refused with 400 unsupported_feature (audit C-6). verify.sh and `make verify-inkling` run it.
+# refused with 400 unsupported_feature (audit C-6), the draft attached at init (B-111). verify.sh and
+# `make verify-inkling` run it.
 set -uo pipefail
 SRV="$1" MODEL="$2" PORT="${3:-18190}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,6 +31,15 @@ chat() {
 }
 
 FAILS=0 SERVED=0
+# B-111: the draft loads at init (after the KV pool binds), not at the first forward.
+la=$(grep -n "inkling2_loop: decode lookahead" "$TMP/log" | head -1 | cut -d: -f1)
+mp=$(grep -n "Serving metadata pool" "$TMP/log" | head -1 | cut -d: -f1)
+if [ -n "$la" ] && [ -n "$mp" ] && [ "$la" -lt "$mp" ]; then
+    echo "ok   draft: '$(sed -n "${la}p" "$TMP/log" | grep -o 'decode lookahead.*')' at init"
+else
+    echo "FAIL draft: lookahead line ${la:-missing}, metadata pool line ${mp:-missing}: not attached at init"
+    FAILS=$((FAILS + 1))
+fi
 # C-6: the layer-loop features Inkling's own forward skips are refused, not served without them.
 jq -nc --arg m "$M" '{model:$m,messages:[{role:"user",content:"hi"}],max_tokens:4,logit_lens:2}' >"$TMP/lens.req"
 code=$(curl -s -m 120 -o "$TMP/lens.json" -w '%{http_code}' "http://127.0.0.1:$PORT/v1/chat/completions" \

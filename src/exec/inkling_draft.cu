@@ -9,6 +9,7 @@
 
 #include "compute/dspark_attention.h"
 #include "compute/gemm.h"
+#include "compute/head_norm_rope.h"
 #include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
 #include "core/graph_epoch.h"
@@ -32,6 +33,7 @@ namespace {
 
 constexpr int kT = 256;
 constexpr int kHd = 128;
+static_assert(kHd == kHeadNormRopeDim, "q / k heads go through head_norm_rope_fp16_seq");
 constexpr float kLogitCap = 30.0f;  // the target's final_logit_softcapping
 
 unsigned blocks(size_t n) { return static_cast<unsigned>((n + kT - 1) / kT); }
@@ -56,34 +58,6 @@ __global__ void draft_mix_k(const float* feat, size_t plane, int row0, const flo
             m += alpha[t] * feat[(size_t)t * plane + r + c];
         out[(size_t)blockIdx.x * H + c] = __float2half(m * inv * w[c]);
     }
-}
-
-// Per (row, head) of the sub-block starting at column col0: RMSNorm over the head (w, or none) and
-// NeoX RoPE at position pos0 + row, in place. 64 threads: thread i owns the pair (i, i + 64).
-// d_pos (optional, device): added to pos0.
-__global__ void draft_norm_rope_k(half* x, int stride, int col0, int heads, const float* w, int pos0,
-                                  float log2_theta, float eps, const int* d_pos) {
-    __shared__ float part[2];
-    const int row = blockIdx.x / heads, head = blockIdx.x % heads;
-    half* v = x + (size_t)row * stride + col0 + (size_t)head * kHd;
-    const int i = threadIdx.x;
-    float a = __half2float(v[i]), b = __half2float(v[i + kHd / 2]);
-    if (w) {
-        float ss = a * a + b * b;
-        for (int o = 16; o > 0; o >>= 1)
-            ss += __shfl_xor_sync(0xffffffffu, ss, o);
-        if ((i & 31) == 0)
-            part[i >> 5] = ss;
-        __syncthreads();
-        const float inv = rsqrtf((part[0] + part[1]) / kHd + eps);
-        a *= inv * w[i];
-        b *= inv * w[i + kHd / 2];
-    }
-    const float freq = exp2f(-log2_theta * (2.0f * i) / kHd);
-    float sn = 0.0f, cs = 0.0f;
-    sincosf(static_cast<float>(pos0 + (d_pos ? *d_pos : 0) + row) * freq, &sn, &cs);
-    v[i] = __float2half(a * cs - b * sn);
-    v[i + kHd / 2] = __float2half(b * cs + a * sn);
 }
 
 // dst[row][c] = src[row][col0 + c] for n rows of width columns; dst row 0 is row row0 (+ *d_row, device,
@@ -302,9 +276,8 @@ void InklingDraft::convert_(const float* feat, size_t plane, int row0, int n, in
                                      ly.dflare, xc_, H, c.eps, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
         lin_(xc_, n, H, ly.kv_ctx, 2 * KD, kvc_, s);
-        draft_norm_rope_k<<<n * c.kv_heads, kHd / 2, 0, s>>>(kvc_, 2 * KD, 0, c.kv_heads, ly.k_norm_ctx, pos0,
-                                                             log2_theta, c.eps, nullptr);
-        IMP_CUDA_CHECK_LAUNCH();
+        head_norm_rope_fp16_seq(kvc_, n, 2 * KD, c.kv_heads, ly.k_norm_ctx, pos0, nullptr, log2_theta, c.eps,
+                                s);
         const size_t nk = static_cast<size_t>(n) * KD;
         hw_ = std::max(hw_, pos0 + n);
         if (ring_ > 0 && c.local[static_cast<size_t>(i)]) {
@@ -379,12 +352,9 @@ bool InklingDraft::block_(cudaStream_t s) {
         half *kc = k_[static_cast<size_t>(i)], *vc = v_[static_cast<size_t>(i)];
         rms_norm(h_, ly.in_norm, nullptr, xn_, B, H, c.eps, s);
         lin8_(xn_, B, H, ly.qkv8, ly.qkv, QD + 2 * KD, qkv_, s);
-        draft_norm_rope_k<<<B * c.heads, kHd / 2, 0, s>>>(qkv_, QD + 2 * KD, 0, c.heads, ly.q_norm, 0,
-                                                          log2_theta, c.eps, d_pos);
-        IMP_CUDA_CHECK_LAUNCH();
-        draft_norm_rope_k<<<B * c.kv_heads, kHd / 2, 0, s>>>(qkv_, QD + 2 * KD, QD, c.kv_heads, ly.k_norm, 0,
-                                                             log2_theta, c.eps, d_pos);
-        IMP_CUDA_CHECK_LAUNCH();
+        head_norm_rope_fp16_seq(qkv_, B, QD + 2 * KD, c.heads, ly.q_norm, 0, d_pos, log2_theta, c.eps, s);
+        head_norm_rope_fp16_seq(qkv_ + QD, B, QD + 2 * KD, c.kv_heads, ly.k_norm, 0, d_pos, log2_theta, c.eps,
+                                s);
         // The block's own K/V rows go behind the context rows, at its positions.
         // A local layer attends the last window positions before the block and the block.
         const bool local = c.local[static_cast<size_t>(i)];
@@ -457,7 +427,17 @@ void InklingDraft::capture_(cudaStream_t s) {
     exec_epoch_ = graph_epoch();
     graph_ok_ = cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) == cudaSuccess;
     if (graph_ok_) {
-        const bool body = block_(s);
+        bool body = false;
+        try {
+            body = block_(s);
+        } catch (...) {
+            // A kernel guard refused (B-108): end the capture so s takes work again, then fail the call.
+            (void)cudaStreamEndCapture(s, &g);
+            if (g)
+                (void)cudaGraphDestroy(g);
+            graph_ok_ = false;
+            throw;
+        }
         graph_ok_ = cudaStreamEndCapture(s, &g) == cudaSuccess && body &&
                     cudaGraphInstantiate(&ex, g, 0) == cudaSuccess;
     }

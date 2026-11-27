@@ -80,6 +80,7 @@ void GraphExecutor::dp4a_qkv_(const TransformerLayer& ly, int layer, const Tenso
     if (!v_same)
         dispatch_dp4a_gemv(ly.wv.qtype, ly.wv.data, q8, qscratch_.d8_buf.data(), static_cast<half*>(vv.data),
                            v_rows, K, stream);
+    record_dense_({ly.wq_id, ly.wk_id, ly.wv_id}, DensePath::QKV_DP4A);
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +671,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         gemv_nvfp4_residual(wo_nvfp4, static_cast<const half*>(ao.data), static_cast<half*>(h.data),
                             static_cast<const half*>(h.data), M_o, K_o, stream,
                             norm_fold_arm_(layer, /*after_ffn=*/false, view_tokens(norm_out_, 1)));
+        record_dense_({ly.wo_id}, DensePath::GEMV_NVFP4_RESIDUAL);
     } else if (will_fuse_o_residual) {
         int K_o = static_cast<int>(ly.wo.shape[1]);
         int M_o = static_cast<int>(ly.wo.shape[0]);
@@ -678,6 +680,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         quantize_attn_out_q8_(ao, K_o, q8_epi.written, stream);
         dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data(),
                                static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
+        record_dense_({ly.wo_id}, DensePath::DP4A_RESIDUAL);
     } else if (will_fuse_o_beta1 && !ctx.mode.force_fp16 && wo_tier == StorageTier::FP8 &&
                qscratch_.fp8_act.get() != nullptr && qscratch_.d_act_scale.data() != nullptr) {
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden. The checkpoint's input scale or per-token
@@ -687,7 +690,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int64_t wshape[2] = {wo_h.shape[0], wo_h.shape[1]};
             Tensor fp8_wo(wo_h.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
             Tensor fp8_ao(qscratch_.fp8_act.get(), QType::FP8_E4M3, ao.ndim, ao.shape, true);
-            gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, a, wo_h.payload.fp8.d_scale, stream);
+            record_dense_({ly.wo_id},
+                          gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, a, wo_h.payload.fp8.d_scale, stream));
         } else {
             gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
         }

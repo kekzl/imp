@@ -12,7 +12,6 @@
 #include "vision/vision_pipeline.h"
 #include "vision/qwen3vl_pipeline.h"
 #include "audio/audio_pipeline.h"
-#include "runtime/config.h"
 #include "runtime/engine_config.h"
 #include "runtime/engine_capabilities.h"
 #include "runtime/engine_metrics_snapshot.h"
@@ -71,6 +70,7 @@ class TokenRecycleTable;       // src/runtime/token_recycle_draft.h
 class ConstraintManager;       // src/runtime/constraint_manager.h
 struct MtpRequestState;        // src/runtime/spec_request.h
 class RecurrentSnapshotStore;  // src/memory/recurrent_snapshot_store.h
+struct RuntimeConfig;          // src/runtime/config.h: complete only in the TUs that read a key
 
 // Typed owners of the forward-declared workspaces: operator() = delete, in engine.cpp.
 struct MtpDraftWorkspaceDeleter { void operator()(MtpDraftWorkspace* ws) const noexcept; };
@@ -329,7 +329,7 @@ public:
     // in init_compute_max_seq_len_), may be < the model's declared max context.
     // Callers MUST gate prompt length on this, not model().config().max_seq_len,
     // or an over-long prompt overruns the KV/position buffers (SIGSEGV).
-    int max_seq_len() const noexcept { return config_.max_seq_len; }
+    int max_seq_len() const noexcept { return rt_.max_seq_len; }
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
     const std::vector<int32_t>& banned_token_ids() const { return banned_token_ids_; }
     GraphExecutor* executor() const noexcept { return executor_.get(); }
@@ -358,14 +358,17 @@ private:
     // set_pending_runtime_config() first, embeddings without one get an
     // env-seeded default. Mutated in-place afterward by engine_init_resolver
     // helpers for arch-specific defaults (deterministic_gemm, prefill_graph).
-    RuntimeConfig runtime_config_;
+    // Owned through a pointer so engine.h needs no runtime/config.h (X-4): a TU that reads a key
+    // includes it. runtime_config_ = *runtime_config_owner_, bound in Engine().
+    std::unique_ptr<RuntimeConfig> runtime_config_owner_;
+    RuntimeConfig& runtime_config_;
     // Snapshot of the nine sections src/exec reads, filled once in init_weights()
     // after the init resolvers have run (F-10). exec/ holds a pointer to THIS,
     // which is what lets it stop including runtime/config.h.
     DispatchPolicy dispatch_policy_;
     std::shared_ptr<Model> model_;
-    EngineConfig config_;    // what the operator set, plus init-time resolution
-    EngineRuntimeState rt_;  // graph and StreamingLLM flags flipped while serving
+    EngineConfig config_;  // what the operator set, plus init-time resolution of the fields rt_ does not hold
+    EngineRuntimeState rt_;  // batch, context, KV dtype resolved at init; graph and StreamingLLM flags (C-9)
 
     // compute_native_cache_demand(*model_) is a pure function of the
     // checkpoint's tensor shapes (stable pre- and post-upload by contract).
@@ -834,6 +837,13 @@ private:
     // the current batch when full. Returns -1 only if the pool is absent.
     int penalty_hist_slot_(int req_id, const std::vector<std::shared_ptr<Request>>& batch);
     void log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>& rows);
+    // One-time diagnoses per engine (audit C-12): a swapped-in model logs them again.
+    struct LogLatches {
+        bool spec_gate = false;           // why n-gram speculation is off (engine_scheduler.cpp)
+        bool pipeline_entered = false;    // first eligible batch entered or declined the pipeline
+        bool no_prefill_capture = false;  // which condition kept the prefill graph off (engine_prefill.cpp)
+    };
+    LogLatches log_latch_;
     // Embedding pooling scratch (#1005): [d_model] fp32 chunk partial sums,
     // consumed synchronously per chunk (host accumulation on the request) so
     // interleaved chunks of concurrent embedding requests can share it.
@@ -1258,7 +1268,8 @@ private:
     void init_apply_rope_override_();
     // One-shot "which kernels did this model actually resolve to" summary,
     // read back from compute/dispatch_record.h after the first step that has
-    // seen both a prefill and a decode (#1205).
+    // seen both a prefill and a decode (#1205); after it, one more dense GEMM line per step that
+    // recorded a new exit (decode routes, captured graphs).
     void log_resolved_dispatch_once_();
 
     void init_resolve_kv_dtype_policy_();
