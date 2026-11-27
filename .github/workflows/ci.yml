@@ -69,11 +69,11 @@ jobs:
 
     container:
       # .github/ci-image/Dockerfile (1104 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
-      # nvcc, cuBLAS, git, python3, cmake, ninja, ccache preinstalled, so no job runs apt for its toolchain.
+      # nvcc, cuBLAS, git, python3, cmake, ninja, ccache, clang-tidy preinstalled: no job runs apt for its toolchain.
       # Ubuntu 26.04, GCC 15.2: same libstdc++ 15 as the release image (#903).
       # Empty image = the runner itself (ubuntu-26.04, same python3): only for code=false, where
       # every toolchain step below is skipped and only the static gates run.
-      image: ${{ needs.changes.outputs.code != 'false' && 'ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c' || '' }}
+      image: ${{ needs.changes.outputs.code != 'false' && 'ghcr.io/kekzl/imp-ci:cuda13.5@sha256:db036c56c3dc6ce82caea0f3afb54e82373f98a19c457676fd239047f005f81e' || '' }}
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -309,16 +309,9 @@ jobs:
       # the one context `Build`. Lints only the changed src|tools|tests .cpp and the host
       # side of changed src|tests .cu (clang `-x cuda --cuda-host-only`, #2210) against this
       # job's own build/ (compile_commands.json, _deps, generated headers).
-      # Cost over 8 PR runs of the former job: install 8-11 s + lint 9-37 s, median
-      # 30 s, against a median 327 s `Build` on the 12 PR runs that linted.
       # Device code has no automated lane (docs/audit/SETTLED.md F-5, F2-7).
-      # Pin, key fingerprint: scripts/install_llvm.sh. The CUDA apt source goes first:
-      # its index shipped malformed on 2026-09-16 and the script runs apt-get update.
-      - name: Install clang-tidy
-        if: steps.changes.outputs.cpp == 'true' && steps.changes.outputs.code == 'true'
-        run: |
-          rm -f /etc/apt/sources.list.d/cuda*.list
-          bash scripts/install_llvm.sh clang-tidy
+      # clang-tidy ships in the CI image (scripts/install_llvm.sh at image build): the per-run
+      # apt.llvm.org install was 12 s median, 41 s p90 on push, and an apt mirror on the required path.
 
       # Hard (#2210): scripts/tidy_lane.sh fails on a clang-tidy nonzero exit, on a .cu with
       # a clang error (#2219's first run: 89 of 89, response-file includes lost) and on a
@@ -662,7 +655,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     container:
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:db036c56c3dc6ce82caea0f3afb54e82373f98a19c457676fd239047f005f81e
     defaults:
       run:
         shell: bash
@@ -772,7 +765,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     container:
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:db036c56c3dc6ce82caea0f3afb54e82373f98a19c457676fd239047f005f81e
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
     # flags, so nothing here is shareable with the `Build` (Release) or
     # `PTX fallback` stores and a shared dir would only evict theirs.

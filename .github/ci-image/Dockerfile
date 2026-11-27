@@ -21,3 +21,9 @@ RUN apt-get update \
 
 ENV PATH=/usr/local/cuda/bin:${PATH}
 ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+
+# clang-tidy for `Build`'s lint step: the per-run apt.llvm.org install was 12 s median, 41 s p90 on push.
+# Pin and key fingerprint: scripts/install_llvm.sh (named context `scripts`, ci-image.yml).
+COPY --from=scripts install_llvm.sh /tmp/install_llvm.sh
+RUN bash /tmp/install_llvm.sh clang-tidy \
+    && rm -rf /var/lib/apt/lists/* /tmp/install_llvm.sh
