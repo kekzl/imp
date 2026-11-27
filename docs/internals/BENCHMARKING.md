@@ -72,7 +72,7 @@ Both pass `--set speculative.ngram=false` now, which `tests/perf_baseline.json` 
 
 - Until #1625 only `verify.sh` did, while the two were documented as one gate.
 - A decode delta worse than -8 % **fails**; a prefill delta worse than -8 % warns (cuBLAS variance).
-- Inkling-2-Mini runs its own forward (B-111) and has its own row, `.extra_models["Inkling-2-Mini"]`: `make verify-inkling` runs `scripts/inkling_perf.sh` after the serve smoke (the gate bench plus the row's `set` flags, 3 processes, median, same thresholds). `verify.sh` does not read the row.
+- Inkling-2-Mini runs its own forward (B-111) and has its own row, `.extra_models["Inkling-2-Mini"]`: `make verify-inkling` runs `scripts/inkling_perf.sh` after the serve smoke (the gate bench plus the row's `set` flags, 3 processes, median) at the row's own `thresholds`, 5 % decode and prefill (run medians 400.65-411.33 tok/s, spread 2.7 %; at 8 % a stored tg128 x 1.10 passed in 2 of 4 runs), other models keep the top-level 8 %. `verify.sh` does not read the row.
 - `make verify-fast` reaches the row only through its last leg (B-142, `scripts/inkling_leg.sh`): `make verify-inkling` when the diff touches Inkling, KV, BlockPool, scheduler or `src/memory/` paths, 42 s on 2026-11-27; else a `SKIP Inkling leg` line. `IMP_VERIFY_INKLING=1` forces it.
 
 | Rule | Detail |
