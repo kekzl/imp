@@ -173,8 +173,8 @@ jobs:
       # change that invalidates many TUs (typical refactor), ccache hits
       # on the TUs whose post-preprocessor content didn't actually change —
       # saves the slow nvcc ptxas pass for sm_120a.
-      # restore + explicit "Save ccache" at the end: the save (median 27 s) is
-      # skipped when the build missed nothing, 6 of 38 green PR Builds before.
+      # restore + explicit "Save ccache" at the end: the save (median 38 s) runs on
+      # a main push with at least one miss, never on a PR.
       - name: Restore ccache
         if: steps.changes.outputs.code == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -273,14 +273,14 @@ jobs:
           # Fail-open: an unparsable count saves.
           misses="$(awk '/^ *Misses:/ {print $2; exit}' "$RUNNER_TEMP/ccache-stats.txt")"
           echo "misses=${misses:-unknown}" >> "$GITHUB_OUTPUT"
-          # A PR saves from 30 misses on (a re-push recompiles less than that in under 90 s);
-          # main saves on any miss: its entry is the one every PR restores.
+          # Only a main push saves, on any miss: its entry is the one every PR restores.
+          # A PR save cost 38 s of `Build` and 1.49 GB of the 10 GB cache; 72 of 77 PR branches ran CI once.
           save=true
           case "${misses:-unknown}" in
             *[!0-9]*) ;;
             0) save=false ;;
-            *) [ "$GITHUB_EVENT_NAME" != pull_request ] || [ "$misses" -ge 30 ] || save=false ;;
           esac
+          [ "$GITHUB_EVENT_NAME" = push ] || save=false
           echo "save=$save" >> "$GITHUB_OUTPUT"
 
       # Stage 2 (CI / CPU): run every CPU-runnable GTest. The `unit` ctest label
@@ -367,8 +367,7 @@ jobs:
           [ "$rc" = 0 ] || echo "::error::scripts/ci_static_gates.sh exited $rc"
           exit "$rc"
 
-      # 68 of 83 PR Builds saved (median 20 s, 765 MB each) with the repo cache at 10.8 of 10 GB;
-      # 45 of the 83 compiled for under 90 s.
+      # Main pushes only (see "ccache stats"): PR saves evicted main's entries from the 10 GB repo cache.
       - name: Save ccache
         if: steps.changes.outputs.code == 'true' && steps.ccstats.outputs.save == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -682,9 +681,18 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "fallback build: run=$run"
 
+      # Saved on push to main only, like `Build` and `Sanitizers`: PRs restore main's store.
       - name: Restore ccache
-        if: steps.scope.outputs.run == 'true'
+        if: steps.scope.outputs.run == 'true' && github.event_name == 'push'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/.ccache-ptx
+          key: ${{ runner.os }}-cuda13.5-ccache-ptx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda13.5-ccache-ptx-
+      - name: Restore ccache (no save)
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'push'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache-ptx
           key: ${{ runner.os }}-cuda13.5-ccache-ptx-${{ github.sha }}
