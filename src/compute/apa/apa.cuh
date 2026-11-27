@@ -224,7 +224,8 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
     const int stride = prep_stride(w);
     const int ns = (w.nchunk + stride - 1) / stride, nkeys = stats_keys(p.Skv, w.nchunk, stride);
     stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, nullptr, stride);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
 #ifdef APA_DBG_KMEAN_LEN  // diagnostic: K mean over the first N keys only (multiple of 1024), maxima over all
     const int kml = std::min(p.Skv, APA_DBG_KMEAN_LEN), kmc = kml / (STATS_TILES * BKV);
@@ -244,19 +245,23 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
     const bool chk = prep_check(w);
     finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, ns, w.ksum, w.hs, kml,
                                                           P2 ? APA_PREP_HEADROOM : 1.f, nullptr, P2);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     if (w.nseg == 1) {
         quant_kv_kernel<D, Reader>
             <<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0, 0, nullptr, chk ? w.ovf : nullptr);
-        if ((e = cudaPeekAtLastError()) != cudaSuccess)
+        e = cudaPeekAtLastError();
+        if (e != cudaSuccess)
             return e;
     }
     if (chk && w.nseg == 1) {  // redo on overflow (kernels exit early when ovf == 0)
-        if ((e = redo_stats<D>(rd, p, w, st)) != cudaSuccess)
+        e = redo_stats<D>(rd, p, w, st);
+        if (e != cudaSuccess)
             return e;
         quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0, dm.ntkv, w.ovf);
-        if ((e = cudaPeekAtLastError()) != cudaSuccess)
+        e = cudaPeekAtLastError();
+        if (e != cudaSuccess)
             return e;
     }
     quant_q_kernel<D, T>
@@ -331,7 +336,8 @@ inline cudaError_t launch_d(const T* Q, const RS& rs, T* O, const Problem& p, co
         if (with_pass1 && eps >= 0.f)
             e = cudaMemsetAsync(w.warp_hot, 0, masks, st);
         if (with_pass1 && eps < 0.f) {  // exact baseline: every tile to pass 2, no cold partials (l = 0)
-            if ((e = cudaMemsetAsync(w.warp_hot, 0xFF, masks, st)) == cudaSuccess)
+            e = cudaMemsetAsync(w.warp_hot, 0xFF, masks, st);
+            if (e == cudaSuccess)
                 e = cudaMemsetAsync(w.ml, 0, bhk * w.rp * 8, st);
         }
         if (e == cudaSuccess)
@@ -360,10 +366,14 @@ inline cudaError_t launch_d(const T* Q, const RS& rs, T* O, const Problem& p, co
     // per instantiation: SM count (pass-2 workers, one CTA per SM) and the device the smem opt-in was set on
     static int nsm = 0, attr_dev[4] = {-1, -1, -1, -1};
     int dev = 0;
-    if ((e = cudaGetDevice(&dev)) != cudaSuccess)
+    e = cudaGetDevice(&dev);
+    if (e != cudaSuccess)
         return e;
-    if (nsm == 0 && (e = cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev)) != cudaSuccess)
-        return e;
+    if (nsm == 0) {
+        e = cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
+        if (e != cudaSuccess)
+            return e;
+    }
     const int n1 = (with_pass1 && eps >= 0.f) ? (int)bhk * w.nqb : 0;
     const int sw = CAUSAL && dm.swin > 0;                // sliding window kernel (causal only)
     const int seg = APA_P2_SEG && w.nseg > 1 && n1 > 0;  // pass 2 per KV-window segment
@@ -372,17 +382,20 @@ inline cudaError_t launch_d(const T* Q, const RS& rs, T* O, const Problem& p, co
                 : (seg ? apa_kernel<D, CAUSAL, false, true, T, RS>
                        : apa_kernel<D, CAUSAL, false, false, T, RS>);
     if (attr_dev[sw * 2 + seg] != dev) {
-        if ((e = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)) != cudaSuccess)
+        e = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+        if (e != cudaSuccess)
             return e;
         attr_dev[sw * 2 + seg] = dev;
     }
     k<<<nsm, NW * 32, smem, st>>>(w.Qq, w.Qs, w.Qr, w.KV, w.hs, Q, rs, O, dm, p.scale * LOG2E, out, n1, w.nqb,
                                   w.ticket, wn, gate);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess || !chk || gate != nullptr)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess || !chk || gate != nullptr)
         return e;
     // window: a 16-block past the sampled scales (ovf) redoes exact stats and this launch, gated on the
     // device flag
-    if ((e = redo_stats<D>(rs, p, w, st)) != cudaSuccess)
+    e = redo_stats<D>(rs, p, w, st);
+    if (e != cudaSuccess)
         return e;
     return launch_d<D, CAUSAL>(Q, rs, O, p, w, eps, true, st, w.ovf);
 }
@@ -490,7 +503,8 @@ struct KvState {
 inline size_t kv_state_bytes(int B, int Hkv, int D, int cap_tokens) {
     auto al = [](size_t x) { return (x + 255) & ~size_t(255); };
     const size_t bhk = (size_t)B * Hkv, cap = (cap_tokens + BKV - 1) / BKV;
-    return al(bhk * cap * tile_bytes(D)) + al(bhk * sizeof(HeadScale)) + al(bhk * D * 4) + al(48 * 4) + al(4);
+    return al(bhk * cap * tile_bytes(D)) + al(bhk * sizeof(HeadScale)) + al(bhk * D * 4) +
+           al(48 * sizeof(float)) + al(4);
 }
 inline KvState kv_state_carve(void* base, int B, int Hkv, int D, int cap_tokens) {
     auto al = [](size_t x) { return (x + 255) & ~size_t(255); };
@@ -504,7 +518,7 @@ inline KvState kv_state_carve(void* base, int B, int Hkv, int D, int cap_tokens)
     st.kmean = reinterpret_cast<float*>(b);
     b += al(bhk * D * 4);
     st.fp = reinterpret_cast<float*>(b);
-    st.redo = reinterpret_cast<int*>(b + al(48 * 4));
+    st.redo = reinterpret_cast<int*>(b + al(48 * sizeof(float)));
     st.cap = (int)cap;
     return st;
 }
@@ -524,7 +538,7 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
     const int* gate = restart ? nullptr : st.redo;
     constexpr bool P2 = APA_PREP_SAMPLE > 0;  // same sampling and scales as prep_d (0: exact, unrounded)
     const int stride = stats_stride(w.nchunk), ns = (w.nchunk + stride - 1) / stride;
-    cudaError_t e = cudaMemsetAsync(w.amax, 0, (bhk * 3 + 1) * 4, s);  // amax and ovf
+    cudaError_t e = cudaMemsetAsync(w.amax, 0, (bhk * 3 + 1) * sizeof(float), s);  // amax and ovf
     if (e == cudaSuccess && !restart) {
         kv_fingerprint_kernel<D, Reader><<<1, 32, 0, s>>>(rd, dm, st.fp, st.len, st.redo, true);
         e = cudaPeekAtLastError();
@@ -532,15 +546,18 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
     if (e != cudaSuccess)
         return e;
     stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, gate, stride);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, ns, st.kmean, st.hs,
                                                stats_keys(p.Skv, w.nchunk, stride), KV_HEADROOM, gate, P2);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     quant_kv_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dq, st.kmean, st.hs, st.KV, 0,
                                                    restart ? 0 : st.len / BKV, gate, P2 ? w.ovf : nullptr);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     if (P2) {  // a key beyond the frozen or sampled scales: exact stats over all keys, every tile again
                // (gated)
@@ -549,15 +566,18 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
         finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, w.nchunk, st.kmean, st.hs, p.Skv,
                                                    std::max(KV_HEADROOM, 1.f), w.ovf, true);
         quant_kv_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dq, st.kmean, st.hs, st.KV, 0, dm.ntkv, w.ovf);
-        if ((e = cudaPeekAtLastError()) != cudaSuccess)
+        e = cudaPeekAtLastError();
+        if (e != cudaSuccess)
             return e;
     }
     kv_fingerprint_kernel<D, Reader><<<1, 32, 0, s>>>(rd, dm, st.fp, p.Skv, st.redo, false);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     quant_q_kernel<D, T>
         <<<dim3((dm.R + BKV - 1) / BKV, p.Hkv, p.B), 256, 0, s>>>(Q, dm, p.scale * LOG2E, w.Qq, w.Qs, w.Qr);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     st.len = p.Skv;
     if (restart)

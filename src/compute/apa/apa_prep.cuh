@@ -55,6 +55,7 @@ struct PagedF16KV {
         const int blk = block_table[(size_t)b * max_blocks + bi];
         return blk < 0 ? nullptr : (isv ? v : k) + (((size_t)blk * bs + si) * dm.Hkv + hk) * D;
     }
+    // NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): lane/tile/smem/counter offsets < 2^24
     // Pass-2 tile loads: 31-bit element offset of row s, bit 31 = tail buffer, ~0u = hole; resolved by at().
     __device__ __forceinline__ uint32_t row_off(int b, int s, int hk, const Dims& dm, int D) const {
         if (s >= tail)
@@ -391,5 +392,6 @@ __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, D
         Qs[(rows + row) * (D / 16) + g] = sb2;
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace apa

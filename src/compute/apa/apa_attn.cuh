@@ -53,6 +53,7 @@ struct Rows {
 #endif
 };
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): lane/tile/smem/counter offsets < 2^24
 template <int D>
 __device__ __forceinline__ void load_q(uint32_t (&qa)[Cfg<D>::KSTEPS][4], uint32_t (&qsf)[Cfg<D>::KSTEPS],
                                        const uint8_t* Qq, const uint8_t* Qs, size_t q_lo, size_t q_hi,
@@ -587,5 +588,6 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
             mbar_inval(empty0 + s * 8);
         }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace apa

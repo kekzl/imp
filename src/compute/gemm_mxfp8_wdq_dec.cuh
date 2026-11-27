@@ -104,6 +104,7 @@ struct Mx8Dec {
 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
                     uint4 o;
+                    // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): reg index < 16
                     mx8_word(w8[2 * j], s2, o.x, o.y);
                     mx8_word(w8[(2 * j) + 1], s2, o.z, o.w);
                     *reinterpret_cast<uint4*>(ws + (r * C::kRS) + (C::chunk(r, (4 * hb) + j) * 16)) = o;

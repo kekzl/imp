@@ -64,6 +64,7 @@ if want filesize; then
     run "that gate still counts what it must"   python3 tools/check_complexity.py --selftest
     run "CCN pins only shrink vs the base"      ccn_pins_vs_base
     run "tidy findings gate still counts"       python3 tools/check_tidy_findings.py --selftest
+    run "tidy lane still maps a header to its TUs" bash scripts/tidy_lane.sh --selftest
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "that gate still catches its drift"     python3 tools/check_determinism_sites.py --selftest
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py

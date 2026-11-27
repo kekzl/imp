@@ -124,6 +124,7 @@ __device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_o
         __half2 xh[8];
 #pragma unroll
         for (int i = 0; i < 8; ++i)
+            // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): reg index < 16
             xh[i] = __floats2half2_rn(x[2 * i], x[2 * i + 1]);
         const int c0 = sb;
         float best = INFINITY;

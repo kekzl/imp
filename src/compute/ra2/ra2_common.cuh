@@ -136,6 +136,7 @@ __device__ __forceinline__ void dec8_e2m1(uint32_t w, float* out) {
             : "=r"(h)
             : "r"(w >> (8 * j)));
         const __half2 v = *reinterpret_cast<const __half2*>(&h);
+        // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): reg index < 16
         out[2 * j] = __low2float(v);
         out[2 * j + 1] = __high2float(v);
     }
