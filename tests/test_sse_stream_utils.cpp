@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "utils.h"            // tools/imp-server/utils.h
+#include <httplib.h>          // httplib::DataSink (bind_sink)
 #include "client_error_log.h"  // tools/imp-server/client_error_log.h
 #include "logit_bias.h"       // tools/imp-server/logit_bias.h
 #include "completion_prompt.h"  // tools/imp-server/completion_prompt.h
