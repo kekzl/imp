@@ -109,6 +109,18 @@ public:
     [[nodiscard]] bool restore(std::span<const int32_t> tokens, const void* entry, int pos, cudaStream_t s,
                                bool with_draft = true);
     [[nodiscard]] bool has_lookahead() const { return static_cast<bool>(spec_.propose); }
+    // Banned-phrase rewind (B-111 S6). conv_snapshot: the conv state at position() into dst (device,
+    // conv_state_bytes()), a stored lookahead call's last confirmed row, not its drafts. seek: the sequence
+    // goes on at pos <= position() from conv, a state taken at pos (device or pinned host); false = the
+    // sliding rings no longer hold the window before pos (reaches), nothing changed.
+    [[nodiscard]] size_t conv_state_bytes() const {
+        return conv_state_floats_ * conv_state_.size() * sizeof(float);
+    }
+    void conv_snapshot(float* dst, cudaStream_t s);
+    [[nodiscard]] bool reaches(int pos) const;
+    [[nodiscard]] bool seek(int pos, const float* conv, cudaStream_t s);
+    // The own checkpoint at pos (on the grid, still held), pinned host; null = none.
+    [[nodiscard]] const float* checkpoint_state(int pos) const;
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
     static constexpr int kGraphRows = kInklingGraphRows;  // rows of the largest call = anchor + drafts
@@ -367,7 +379,8 @@ struct InklingRuntime {
     // when inkling_dense8_fits; false = not one slot. slab: allocated here, holds each slot's conv state and
     // sliding rings; it must outlive the slots. make_inkling_runtime and the serve-path test use it.
     // draft (null = no lookahead): the slab also holds a lookahead region of vocab logits per row for the
-    // first kInklingLookaheadSlots slots (draft rings, lookahead planes; inkling_attach_draft_ views them).
+    // first kInklingLookaheadSlots slots (draft rings, lookahead planes; GraphExecutor::inkling_attach_draft
+    // views them).
     [[nodiscard]] bool init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
                                   int want, InklingSlab& slab, const InklingDraftConfig* draft = nullptr,
                                   int vocab = 0);

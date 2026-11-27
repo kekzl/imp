@@ -435,7 +435,7 @@ bool Engine::supports_chunked_prefill_() const {
     // INT4, INT8. TurboQuant variants would need their own gather kernels.
     // Before the pool exists (executor init sizes its workspaces from the chunk), the configured dtype.
     {
-        QType kvt = kv_cache_raw_ ? kv_cache_raw_->qtype() : config_.kv_cache_dtype;
+        QType kvt = kv_cache_raw_ ? kv_cache_raw_->qtype() : rt_.kv_cache_dtype;
         if (kvt != QType::F16 && kvt != QType::FP8_E4M3 && kvt != QType::NVFP4 && kvt != QType::MXFP4_KV &&
             kvt != QType::INT4 && kvt != QType::INT8)
             return false;
@@ -662,7 +662,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
     // Only fires once (guards on !streaming_kv_enabled). Every KV dtype's
     // decode kernels skip the -1 sentinels (#1704), so every pool has the valve.
     // Never under SWA sizing (streaming_kv_auto is cleared at init there).
-    if (!rt_.streaming_kv && config_.streaming_kv_auto) {
+    if (!rt_.streaming_kv && rt_.streaming_kv_auto) {
         // Reclaimable prefix-cache blocks are free for this purpose: the
         // allocator takes them before it fails. Counting only the free list
         // against blocks LIVE sequences hold fires falsely on a pool that is
@@ -826,10 +826,9 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         } else {
             // One-time diagnosis: say WHY speculation is inactive (gates are
             // silent otherwise and a misconfigured request looks identical
-            // to a draft-poor one).
-            static bool s_gate_logged = false;
-            if (!s_gate_logged && !decode_batch[0]->spec_ngram_given_up) {
-                s_gate_logged = true;
+            // to a draft-poor one). Once per engine.
+            if (!log_latch_.spec_gate && !decode_batch[0]->spec_ngram_given_up) {
+                log_latch_.spec_gate = true;
                 const auto& r = *decode_batch[0];
                 // Name the gate. The field dump below stays because a reader
                 // usually wants the neighbouring values too, but it is no
@@ -1475,9 +1474,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         if (!needs_logprobs && !needs_constrained && pipeline_batch_eligible_(valid_decode)) {
             piped = pipeline_enter_(valid_decode, gpu_batch, graph_idx, state, logits_out,
                                     dec_stream, tokens);
-            static bool entered_logged = false;
-            if (!entered_logged) {
-                entered_logged = true;
+            if (!log_latch_.pipeline_entered) {
+                log_latch_.pipeline_entered = true;
                 IMP_LOG_INFO("decode-pipeline: first eligible batch n=%d -> %s",
                              (int)valid_decode.size(), piped ? "ENTERED" : "enter DECLINED");
             }

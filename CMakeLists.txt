@@ -356,6 +356,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_dispatch.cpp
     src/compute/rope.cu
     src/compute/head_norm_rope.cu
+    src/compute/rms_norm_rows.cu
     src/compute/lora_rows.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
@@ -1314,6 +1315,8 @@ if(IMP_BUILD_TESTS)
         # B-108: the uncached GEMM fallback throws at each exit that cannot write the output
         # (no kernel launches on these arms, so the CPU lane holds it).
         tests/test_gemm_fallback_fails_loud.cpp
+        # B-108: the 5 Inkling kernel shape guards throw before any launch.
+        tests/test_inkling_guards_fail_loud.cpp
         # B-114: the per-forward GEMM mode travels in GemmContext, not in executor members.
         tests/test_gemm_mode.cpp
         # B-112: one LM-head route for serving, perplexity, prompt logprobs and the draft argmax head.
@@ -1457,10 +1460,13 @@ if(IMP_BUILD_TESTS)
         tests/test_shortconv.cu
         tests/test_inkling_parity.cu
         tests/test_inkling_cross_slot.cu
+        tests/test_inkling_phrase_rewind.cu
         tests/test_inkling_draft.cu
         tests/test_inkling_kernels.cu
         tests/test_inkling_lora.cu
         tests/test_inkling_attn_paged.cu
+        # D-14: the drafters' norm + RoPE and fp32-in RMSNorm are one kernel each (equal bits per arm).
+        tests/test_drafter_norm_primitives.cu
         tests/test_gemv_hot_cold_bench.cu
         tests/test_inkling_quality.cu
         tests/test_swiglu_quantize_cutlass.cu

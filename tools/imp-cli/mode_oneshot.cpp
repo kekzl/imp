@@ -6,6 +6,7 @@
 #include "model/image_placeholders.h"
 #include "model/tokenizer.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "vision/vision_family.h"
 #include "runtime/request.h"
 

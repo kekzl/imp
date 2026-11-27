@@ -8,9 +8,6 @@
 #
 # remaining: 17 files, 24 exits
 
-src/compute/inkling_attn.cu  # 1  Inkling shape guard: an out-of-range shape leaves the output unwritten (B-108 open, own slice)
-src/compute/inkling_fused.cu  # 3  Inkling shape guards: an out-of-range shape leaves the output unwritten (B-108 open, own slice)
-src/compute/inkling_ops.cu  # 1  Inkling shape guard: an out-of-range shape leaves the output unwritten (B-108 open, own slice)
 src/compute/mmq_q8_imma_scratch.cu  # 1  fallback imma_act_prealloc: no IMMA activation scratch, Q8 prefill dequantizes + FP16 GEMM
 src/compute/sampling_penalties.cu  # 1  fallback logit_bias_prealloc: no device slots, logit_bias applied by per-token copies
 src/exec/activation_calibrator.cu  # 2  fallback calib_shape_change: a mismatched batch is not counted, the entry keeps its first shape

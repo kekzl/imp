@@ -4,6 +4,7 @@
 // scheduler brings it back, oldest first, before admitting anything new.
 
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/graph_eligibility.h"
 #include "runtime/scheduler.h"
 #include "memory/host_pinned.h"

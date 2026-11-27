@@ -26,6 +26,7 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -64,7 +65,7 @@ void Engine::prewarm_spec_scratch_() {
     // the largest capture bucket, and a block table covering the whole context.
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int chunk_cap = std::max({spec_capture_bucket_max_(), cfg::kSpecDraftK + 1, 33});
-    const int ctx_for_table = std::max(config_.max_seq_len, spec_capture_ctx_cap_);
+    const int ctx_for_table = std::max(rt_.max_seq_len, spec_capture_ctx_cap_);
     const int table_cap = ((ctx_for_table + kv_bs - 1) / kv_bs) + 16;
     if (!ensure_spec_buffers_(chunk_cap, table_cap)) {
         IMP_LOG_WARN("[spec] scratch prewarm failed (chunk_cap=%d table_cap=%d) — "
@@ -98,7 +99,7 @@ int Engine::spec_capture_ctx_tier_(int ctx_padded, bool paged_attn) const {
     int tier = 4096;
     while (tier < ctx_padded)
         tier <<= 1;
-    const int cap = paged_attn ? std::max(spec_capture_ctx_cap_, config_.max_seq_len) : spec_capture_ctx_cap_;
+    const int cap = paged_attn ? std::max(spec_capture_ctx_cap_, rt_.max_seq_len) : spec_capture_ctx_cap_;
     return std::min(tier, std::max(cap, ctx_padded));
 }
 
@@ -133,8 +134,8 @@ bool Engine::spec_capture_ready_(int ctx_padded, int rows, bool paged_attn) {
         spec_capture_ctx_cap_ = 0;
         if (executor_->chunk_capture_supported()) {
             int cap = cfg::kSpecCaptureCtxCap;
-            if (config_.max_seq_len > 0)
-                cap = std::min(cap, config_.max_seq_len);
+            if (rt_.max_seq_len > 0)
+                cap = std::min(cap, rt_.max_seq_len);
             if (cap > 0 && executor_->ensure_chunk_capture_scratch(cap))
                 spec_capture_ctx_cap_ = cap;
         }
@@ -143,8 +144,7 @@ bool Engine::spec_capture_ready_(int ctx_padded, int rows, bool paged_attn) {
                      spec_capture_ctx_cap_);
     }
     const int max_rows = executor_->moe_host_rows_capture_max();  // 0 = no row cap
-    const int ctx_cap = paged_attn ? std::max(spec_capture_ctx_cap_, config_.max_seq_len)
-                                   : spec_capture_ctx_cap_;
+    const int ctx_cap = paged_attn ? std::max(spec_capture_ctx_cap_, rt_.max_seq_len) : spec_capture_ctx_cap_;
     return spec_capture_ctx_cap_ > 0 && ctx_padded <= ctx_cap && (max_rows == 0 || rows <= max_rows);
 }
 

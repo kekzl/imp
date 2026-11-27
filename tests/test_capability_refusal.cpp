@@ -21,8 +21,13 @@ using json = nlohmann::ordered_json;
 namespace {
 
 const imp::EngineCapabilities kGeneric = imp::derive_capabilities({.model_loaded = true});
-const imp::EngineCapabilities kInkling = imp::derive_capabilities(
-    {.model_loaded = true, .layer_loop_replaced = true, .own_forward_lora = true});
+const imp::EngineCapabilities kInkling = imp::derive_capabilities({.model_loaded = true,
+                                                                   .layer_loop_replaced = true,
+                                                                   .own_forward_lora = true,
+                                                                   .own_forward_rewind = true});
+// An own forward that cannot step its state back: no ban.
+const imp::EngineCapabilities kNoSeek = imp::derive_capabilities(
+    {.model_loaded = true, .layer_loop_replaced = true});
 
 ChatRequestContext ctx_for(const imp::EngineCapabilities& caps) {
     ChatRequestContext ctx;
@@ -50,13 +55,15 @@ const Ask kAsks[] = {
 
 }  // namespace
 
-TEST(CapabilityRefusal, InklingRefusesEveryLoopFeatureButGuidanceAndLora) {
+TEST(CapabilityRefusal, InklingRefusesEveryLoopFeatureButGuidanceLoraAndBans) {
     for (const Ask& a : kAsks) {
         ChatRequestContext ctx = ctx_for(kInkling);
         a.set(ctx.params);
         const ExtensionError e = extension_error(ctx);
-        // Guidance pairs run on two slots; LoRA deltas run in its own forward (B-111 S5).
-        if (std::string(a.field) == "cfg_scale" || std::string(a.field) == "lora") {
+        // Guidance pairs run on two slots; LoRA deltas run in its own forward (B-111 S5), a ban seeks it
+        // (S6).
+        if (std::string(a.field) == "cfg_scale" || std::string(a.field) == "lora" ||
+            std::string(a.field) == "banned_strings") {
             EXPECT_TRUE(e.message.empty()) << e.message;
             continue;
         }
@@ -86,7 +93,8 @@ TEST(CapabilityRefusal, PlainRequestIsUntouchedOnInkling) {
 TEST(CapabilityRefusal, BannedRegexNamesItsOwnField) {
     ChatRequestParams p;
     p.banned_regex.push_back(nullptr);  // the check reads presence, not the pattern
-    EXPECT_STREQ(unsupported_feature_field(p, kInkling), "banned_regex");
+    EXPECT_STREQ(unsupported_feature_field(p, kNoSeek), "banned_regex");
+    EXPECT_EQ(unsupported_feature_field(p, kInkling), nullptr);
 }
 
 TEST(CapabilityRefusal, OpenAIEnvelopeCarriesParamAndCode) {
