@@ -578,13 +578,14 @@ verify-fast: build $(VERIFY_INTERPOSE) check-gpu
 
 # verify-inkling: verify-fast's Inkling-2-Mini serve smoke (scripts/inkling_smoke.sh, ~25 GB) plus its perf row:
 # 2 sequence slots, 2 replies past 256 tokens, then 9 new requests; 11 of 11 served and coherent.
-# Then the perf row: scripts/inkling_perf.sh against .extra_models["Inkling-2-Mini"] of $(INKLING_BASELINE).
+# Then the perf row: scripts/inkling_perf.sh against .extra_models["Inkling-2-Mini"] of $(INKLING_BASELINE), at the
+# row's own thresholds (5 %); its --selftest (stub imp-cli, 5 cases) runs first.
 INKLING_MODELS ?= $(HOME)/models
 INKLING_BASELINE ?= tests/perf_baseline.json
 verify-inkling: build check-gpu
 	@$(GPU_LOCKED) docker run --rm --gpus all -v "$(CURDIR)":/src -w /src \
 	 -v "$(INKLING_MODELS)":"$(INKLING_MODELS)":ro --entrypoint bash $(DOCKER_IMG) -c \
-	 'bash scripts/inkling_smoke.sh /usr/local/bin/imp-server "$(INKLING_MODELS)/Inkling-2-Mini" && \
+	 'bash scripts/inkling_perf.sh --selftest && bash scripts/inkling_smoke.sh /usr/local/bin/imp-server "$(INKLING_MODELS)/Inkling-2-Mini" && \
 	  bash scripts/inkling_perf.sh /usr/local/bin/imp-cli "$(INKLING_MODELS)/Inkling-2-Mini" "$(INKLING_BASELINE)"'
 
 # vram-touch-audit: MiB held against MiB written per pool for one model (docs/VRAM_AUDIT.md). The

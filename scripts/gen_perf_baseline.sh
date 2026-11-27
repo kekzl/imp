@@ -181,13 +181,15 @@ cat > "$FRESH" << EOF
 EOF
 
 # Policy stays from the previous pin: its thresholds win (paired_decode_regression_pct is read by
-# verify_ab.sh), own_peak_note and _thresholds_note carry over. _note is per pin: write a new one.
+# verify_ab.sh), own_peak_note, _thresholds_note and extra_models (the Inkling row, its own thresholds) carry
+# over. _note is per pin: write a new one.
 if [ -f "$OUTPUT" ] && jq -e . "$OUTPUT" >/dev/null 2>&1; then
     jq --slurpfile prev "$OUTPUT" '
         $prev[0] as $p
         | .thresholds += ($p.thresholds // {})
         | if $p.metrics.memory_mb.own_peak_note then .metrics.memory_mb.own_peak_note = $p.metrics.memory_mb.own_peak_note else . end
         | if $p._thresholds_note then ._thresholds_note = $p._thresholds_note else . end
+        | if $p.extra_models then .extra_models = $p.extra_models else . end
     ' "$FRESH" > "$FRESH.merged" && mv "$FRESH.merged" "$FRESH"
 fi
 chmod 644 "$FRESH" && mv "$FRESH" "$OUTPUT"
