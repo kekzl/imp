@@ -173,7 +173,10 @@ test-gpu: build
 .PHONY: test-gpu-suite
 # The suite body; test-gpu holds the GPU lock across all three runs.
 test-gpu-suite:
-	$(DOCKER_RUN) imp-tests
+	@# The 9 model suites below read /models defaults here and run again, with their own
+	@# checkpoints, in the make test-e2e groups (448.75 s per run, TEST_SUITE_AUDIT P3): test-e2e
+	@# runs them, test-gpu does not.
+	$(DOCKER_RUN) imp-tests --gtest_filter="-ServingSignalsTest.*:MtpGreedyIdentityTest.*:SpecCaptureFidelityTest.*:BatchInvarianceTest.*:MtpQwen4ExpReference.*:DegenerationTest.*:DSparkDrafterTest.*:DFlashDrafterTest.*:DeviceFaultSignalTest.*"
 	@# #1575: DetEvalE2ETest is the only end-to-end determinism gate in the
 	@# tree, and it takes its GTEST_SKIP branch unless a model env var is set.
 	@# DOCKER_RUN carries none, so the pre-commit hook's "full suite" stage ran
@@ -412,18 +415,18 @@ bench: build check-gpu
 # Single model benchmark (quick check), then the kernel timing module.
 test-perf: build check-gpu
 	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-NVFP4-cortecs --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
-
-# Agentic benchmarks: boot a real imp-server and drive the two agent-shaped
-# harnesses — concurrency TTFT/ITL (agent_bench.py) and growing-transcript
-# per-turn TTFT with prefix cache on/off (agent_replay_bench.py). The metrics a
-# coding agent actually feels (see docs/GOAL.md "Agentic surface"). Override the
-# model with MODEL=<name-under-$HOME/models>.
 	$(BENCH_DOCKER_RUN) test-bench
 
 # Kernel timing, probe and bandwidth-floor cases (test-bench, TEST_SUITE_AUDIT P1/P2): the floors
 # assert wall-clock bounds, so they run only here, on a quiet card, not in make test-gpu.
 test-bench: build check-gpu
 	$(BENCH_DOCKER_RUN) test-bench
+
+# Agentic benchmarks: boot a real imp-server and drive the two agent-shaped
+# harnesses — concurrency TTFT/ITL (agent_bench.py) and growing-transcript
+# per-turn TTFT with prefix cache on/off (agent_replay_bench.py). The metrics a
+# coding agent actually feels (see docs/GOAL.md "Agentic surface"). Override the
+# model with MODEL=<name-under-$HOME/models>.
 AGENTIC_MODEL ?= Qwen3-8B-NVFP4-cortecs
 bench-competitive: build check-gpu
 	@echo "Competitive decode sweep vs vLLM on SafeTensors heroes (image pinned by digest in the script)"
