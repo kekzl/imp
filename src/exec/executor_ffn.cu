@@ -6,6 +6,7 @@
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_helpers.h"
 #include "exec/gemm_context.h"
+#include "exec/weight_tier_entries.h"
 #include "compute/layernorm.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
@@ -121,7 +122,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                  hwd->payload.mxfp4.linear_scales != nullptr);
     // NVFP4 down: primary tier OR Phase-3 secondary NVFP4 decode cache
     // (Q8_0/Q6_K/Q5_K models). c8763ad refactor dropped the secondary check.
-    const bool wd_nvfp4_secondary = (wcache_.nvfp4.contains(ly.w_down.data));
+    const NvFP4CacheEntry* wd_nv_e = nvfp4_entry_of(hwd);
+    const bool wd_nvfp4_secondary = (wd_nv_e != nullptr);
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_mxfp4 && n == 1 &&
                                  h.qtype == QType::F16 &&
                                  (wd_tier == StorageTier::NVFP4 || wd_nvfp4_secondary));
@@ -161,10 +163,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                           hwg->payload.mxfp4.linear_scales && hwu &&
                           hwu->primary_tier == StorageTier::MXFP4 && hwu->payload.mxfp4.linear_scales);
         // NVFP4 gate+up decode path: primary tier OR Phase-3 secondary cache
-        auto nv_g_it = wcache_.nvfp4.find(ly.w_gate.data);
-        auto nv_u_it = wcache_.nvfp4.find(ly.w_up.data);
-        const bool nv_g_secondary = (nv_g_it != wcache_.nvfp4.end());
-        const bool nv_u_secondary = (nv_u_it != wcache_.nvfp4.end());
+        const NvFP4CacheEntry* nv_g_e = nvfp4_entry_of(hwg);
+        const NvFP4CacheEntry* nv_u_e = nvfp4_entry_of(hwu);
+        const bool nv_g_secondary = (nv_g_e != nullptr);
+        const bool nv_u_secondary = (nv_u_e != nullptr);
         const bool wg_is_nvfp4 = (hwg && hwg->primary_tier == StorageTier::NVFP4) || nv_g_secondary;
         const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4) || nv_u_secondary;
         bool nvfp4_ffn = (n == 1 && wg_is_nvfp4 && wu_is_nvfp4);
@@ -197,7 +199,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             record_dense_({ly.w_gate_id, ly.w_up_id}, DensePath::GATE_UP_GEMV_MXFP4);
         } else if (nvfp4_ffn) {
             // NVFP4 gate+up: RMSNorm to FP16 (or folded into the producer), then NVFP4 fused GEMV
-            const NvFP4NormFoldIn ffn_fold = norm_fold_or_norm_(true, h, ffn_norm_w, no, kInvalidTensorID, n, eps, stream);
+            const NvFP4NormFoldIn ffn_fold = norm_fold_or_norm_(true, h, ffn_norm_w, no, kInvalidTensorID, n,
+                                                                eps, ctx.mode, stream);
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
             // Pick source: secondary NVFP4 cache (Q8_0/Q6_K/Q5_K) is already a
             // populated struct; primary-tier handle needs reconstruction.
@@ -212,8 +215,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 tmp.K = static_cast<int64_t>(static_cast<int>(hw->shape[1])) * 2;
                 return tmp;
             };
-            NvFP4QuantResult nv_g = nv_g_secondary ? nv_g_it->second : from_handle(hwg);
-            NvFP4QuantResult nv_u = nv_u_secondary ? nv_u_it->second : from_handle(hwu);
+            NvFP4QuantResult nv_g = nv_g_secondary ? NvFP4QuantResult(*nv_g_e) : from_handle(hwg);
+            NvFP4QuantResult nv_u = nv_u_secondary ? NvFP4QuantResult(*nv_u_e) : from_handle(hwu);
             gemv_nvfp4_gate_up_fused(nv_g, nv_u, static_cast<const half*>(no.data),
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                      stream, ffn_fold);
@@ -244,7 +247,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // Producer fusion: quantize into the small-M scratch inside the
             // norm kernel when gate will take that route (batched decode,
             // CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
-            rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, stream, norm_w_off_);
+            rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, ctx.mode, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
             const bool fp8_ffn = (n >= fp8x8_min_rows_ && !ctx.mode.force_fp16 && hwg &&
@@ -264,7 +267,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 Tensor* const o2[2] = {&go, &uo};
                 const float* const s2[2] = {hwg->payload.fp8.d_scale, hwu->payload.fp8.d_scale};
                 const TensorID i2[2] = {ly.w_gate_id, ly.w_up_id};
-                gemm_fp8x8_multi_(i2, fp8_no, w2, o2, s2, 2, fp8_a_scale, stream);
+                gemm_fp8x8_multi_(i2, fp8_no, w2, o2, s2, 2, fp8_a_scale, ctx.mode, stream);
             } else {
                 // Read fused gate+up via WeightRegistry handle — the wcache_
                 // map is no longer the lookup mechanism (it remains the
@@ -347,7 +350,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // is already a populated struct; primary-tier handle needs reconstruction.
             NvFP4QuantResult wd_nvfp4;
             if (wd_nvfp4_secondary) {
-                wd_nvfp4 = wcache_.nvfp4.at(ly.w_down.data);
+                wd_nvfp4 = *wd_nv_e;
             } else {
                 wd_nvfp4.packed_data = hwd->payload.nvfp4.data;
                 wd_nvfp4.micro_scales = hwd->payload.nvfp4.block_scales;
@@ -463,7 +466,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // Producer fusion: quantize into the small-M scratch
                     // inside the activation kernel when down will take that
                     // route; falls back to plain swiglu.
-                    down_prequant = swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream);
+                    down_prequant = swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, ctx.mode, stream);
                     break;
             }
             const Fp8ActScale down_a_scale = (will_fuse_down_beta1 && !ctx.mode.force_fp16 &&
@@ -476,7 +479,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 int64_t wshape[2] = {hwd->shape[0], hwd->shape[1]};
                 Tensor fp8_wd(hwd->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 record_dense_({ly.w_down_id}, gemm_fp8x8_(fp8_so, fp8_wd, h, 1.0f, down_a_scale,
-                                                          hwd->payload.fp8.d_scale, stream));
+                                                          hwd->payload.fp8.d_scale, ctx.mode, stream));
             } else if (will_fuse_down_beta1 && wd_tier == StorageTier::FP16) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));
@@ -500,7 +503,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     rmsnorm_add_residual(fo, ly.post_ffn_norm, r, h, eps, stream, norm_w_off_);
                 } else {
                     // No post-norm: h = fo + residual, fused with the next layer's attn norm (#2414)
-                    ffn_residual_add_(layer, fo, r, h, no, n, eps, stream);
+                    ffn_residual_add_(layer, fo, r, h, no, n, eps, ctx.mode, stream);
                 }
             }
         }

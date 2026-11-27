@@ -17,4 +17,18 @@ struct GemmMode {
     return n > 1 && (!is_prefill || spec_verify_chunk);
 }
 
+// Own FP8 x FP8 small-M GEMM rows: decode / verify rows, or any row when gemm.fp8_smallm_m1 set the
+// FP8 row floor to 1; prompt rows stay on the M-invariant cuBLASLt pin (#2152).
+[[nodiscard]] constexpr bool fp8_smallm_mode_rows(const GemmMode& m, int fp8_min_rows) {
+    return m.decode_rows || fp8_min_rows == 1;
+}
+
+// FP32-residual sandwich fusion: the M=1 decode row or decode / verify rows, never prompt rows.
+[[nodiscard]] constexpr bool fp32_resid_mode_rows(const GemmMode& m, int n) {
+    return n >= 1 && (n == 1 || m.decode_rows);
+}
+
+// M=1 launch fusions (GDN input, GDN out + residual, FP8 fold, attention q|k|v): no verify chunk.
+[[nodiscard]] constexpr bool m1_fusion_mode_ok(const GemmMode& m) { return !m.spec_verify; }
+
 }  // namespace imp

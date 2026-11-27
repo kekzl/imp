@@ -62,14 +62,14 @@ bool GraphExecutor::lm_head_fp8_tier_(const WeightHandle& lm_h, const Tensor& no
 }
 
 LmHeadFacts GraphExecutor::lm_head_facts_() const {
-    const void* w = model_->output_proj().data;
+    // No handle = no head data, so no cache entry either (Phase 4 registers every non-null tensor).
     const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)
                                    ? &registry_.handle(model_->out_proj_id)
                                    : nullptr;
     LmHeadFacts f;
     f.tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
-    f.fp8_cache = wcache_.fp8.contains(w);
-    f.nvfp4_cache = wcache_.nvfp4.contains(w);
+    f.fp8_cache = lm_h != nullptr && lm_h->entries.fp8 != nullptr;
+    f.nvfp4_cache = lm_h != nullptr && lm_h->entries.nvfp4 != nullptr;
     f.mxfp4_linear = f.tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales != nullptr;
     f.dp4a_ready = qscratch_.q8_1_buf.data() != nullptr && compute_dtype_ == QType::F16 &&
                    is_dp4a_qtype(model_->out_proj_.qtype);
@@ -77,10 +77,10 @@ LmHeadFacts GraphExecutor::lm_head_facts_() const {
 }
 
 NvFP4QuantResult GraphExecutor::lm_head_nvfp4_() const {
-    if (auto it = wcache_.nvfp4.find(model_->output_proj().data); it != wcache_.nvfp4.end())
-        return it->second;
-    const auto& cfg = model_->config();
     const WeightHandle& h = registry_.handle(model_->out_proj_id);
+    if (h.entries.nvfp4 != nullptr)
+        return *h.entries.nvfp4;
+    const auto& cfg = model_->config();
     NvFP4QuantResult r;
     r.packed_data = h.payload.nvfp4.data;
     r.micro_scales = h.payload.nvfp4.block_scales;
