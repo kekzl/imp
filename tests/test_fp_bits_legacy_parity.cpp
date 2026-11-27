@@ -1,6 +1,6 @@
 // H-011: each host fp16/bf16/E4M3 copy merged into core/fp_bits.h vs its pre-merge body, bit for bit.
 // Inputs: all 2^16 fp16, 2^16 bf16, 2^8 E4M3, 2^16 MXFP8 pairs, 2^24 ngram (e4m3, scale) pairs;
-// encoders: every float with exponent field 101..143 plus every 251st pattern outside it.
+// encoders: exponent fields 101..143 x the fp16 rounding-tie neighbourhood plus every 251st pattern outside.
 
 #include "../tools/imp-quantize/fp8_source.h"
 #include "core/fp_bits.h"
@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -166,14 +167,24 @@ float old_quantize_e4m3_to_float(uint8_t bits) {
 
 uint32_t fbits(float f) { return std::bit_cast<uint32_t>(f); }
 
-// Calls fn(float) for every float with exponent field in [101, 143] (fp16 flush, subnormal, normal and
-// overflow edges, both signs: 43 * 2^24), every 251st pattern outside it, and the 0/Inf/NaN bit patterns.
+// Calls fn(float) for exponent fields [101, 143] (fp16 flush, subnormal, normal and overflow edges),
+// both signs: every mantissa bit above the fp16 rounding point (13 normal, 126 - exp subnormal, max 23)
+// x the low bits {0, 1, tie - 1, tie, tie + 1, all ones}: 393228 floats (was 43 * 2^24 = 1.44e9, 2.4 s).
+// Then every 251st pattern outside the window and the 0/Inf/NaN bit patterns.
 template <class Fn>
 uint64_t for_each_float(Fn&& fn) {
     uint64_t n = 0;
     for (uint32_t sign : {0u, 0x80000000u}) {
-        for (uint32_t b = 101u << 23; b < (144u << 23); ++b, ++n)
-            fn(std::bit_cast<float>(sign | b));
+        for (uint32_t ue = 101; ue <= 143; ++ue) {
+            const uint32_t k = ue >= 113 ? 13u : std::min(126u - ue, 23u);
+            const uint32_t tie = 1u << (k - 1), low_mask = (1u << k) - 1u;
+            for (uint32_t hi = 0; hi < (1u << (23 - k)); ++hi) {
+                for (uint32_t lo : {0u, 1u, tie - 1u, tie, tie + 1u, low_mask}) {
+                    fn(std::bit_cast<float>(sign | (ue << 23) | (hi << k) | lo));
+                    ++n;
+                }
+            }
+        }
     }
     for (uint64_t u = 0; u <= 0xFFFFFFFFull; u += 251) {
         const auto b = static_cast<uint32_t>(u);
@@ -304,7 +315,7 @@ TEST(FpBitsLegacyParity, Fp16EncodeFloatSweep) {
     std::printf("[ parity ] fp16 encode: %llu floats, ngram %llu, wupload %llu mismatches\n",
                 static_cast<unsigned long long>(checked), static_cast<unsigned long long>(ngram),
                 static_cast<unsigned long long>(wup));
-    EXPECT_GT(checked, 43ull << 24);  // the [101, 143] exponent window alone, both signs
+    EXPECT_EQ(checked, 14630478ull);  // 393228 window + 14237240 at stride 251 + 10 edge patterns
     EXPECT_EQ(ngram, 0u);
     EXPECT_EQ(wup, 0u);
     // NaN -> signed Inf is the wrapper's policy; float_to_half keeps NaN.
