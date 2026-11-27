@@ -1,6 +1,6 @@
-// Launcher argument structs (audit D-11, B-133): every field is named at the call site. The
-// structured bindings pin the field count (an added or dropped field fails to compile); the
-// int runs a swap would silently corrupt are checked in declaration order.
+// Launcher argument structs (audit D-11, B-133): every field is named at the call site, so a
+// declaration-order swap fails the build there (nvcc/g++ out-of-order designated initializers).
+// Pinned here: the omitted-field defaults the old trailing parameters had, and the state types.
 
 #include <gtest/gtest.h>
 
@@ -12,7 +12,6 @@
 #include "exec/executor_kernels.h"
 #include "exec/sparse_attn_select.h"
 
-#include <array>
 #include <type_traits>
 
 namespace {
@@ -45,25 +44,11 @@ static_assert(std::is_aggregate_v<GdnScanArgs<float>>);
 static_assert(std::is_aggregate_v<GdnChunkparArgs<float>>);
 static_assert(std::is_aggregate_v<SsmScanPrefillArgs>);
 
-// 26 fields, the old gdn_scan_fused_{f32,bf16}_batched parameter list in order.
-TEST(GdnScanBatchedArgs, CarriesEveryFieldInDeclarationOrder) {
-    const GdnScanBatchedArgs<__nv_bfloat16> a{.conv_channels = 1,
-                                              .h_state_seq_stride = 2,
-                                              .n_seq = 3,
-                                              .n_tokens = 4,
-                                              .n_heads = 5,
-                                              .head_dim_ssm = 6,
-                                              .state_size = 7,
-                                              .n_groups = 8,
-                                              .grouped_layout = 9,
-                                              .fac_stride = 10};
-    const auto& [conv, cc, al, be, alog, dtb, pool, slots, stride, y, ns, nt, nh, hd, ss, ng, st, gl, rn,
-                 offs, snap, sn, outs, snaps, fac, fs] = a;
-    EXPECT_EQ((std::array{cc, ns, nt, nh, hd, ss, ng, gl, fs}), (std::array{1, 3, 4, 5, 6, 7, 8, 9, 10}));
-    EXPECT_EQ(stride, 2);
-    EXPECT_TRUE((std::is_same_v<std::remove_cvref_t<decltype(pool)>, __nv_bfloat16*>));
-    EXPECT_TRUE((std::is_same_v<std::remove_cvref_t<decltype(snap)>, __nv_bfloat16*>));
-}
+// The BF16 instantiations carry BF16 state and snapshot pointers.
+static_assert(std::is_same_v<decltype(GdnScanBatchedArgs<__nv_bfloat16>::h_state_pool), __nv_bfloat16*>);
+static_assert(std::is_same_v<decltype(GdnScanBatchedArgs<__nv_bfloat16>::h_snap), __nv_bfloat16*>);
+static_assert(std::is_same_v<decltype(GdnScanArgs<__nv_bfloat16>::h_state), __nv_bfloat16*>);
+static_assert(std::is_same_v<decltype(GdnScanArgs<__nv_bfloat16>::h_snap), __nv_bfloat16*>);
 
 // Defaults = the old trailing parameter defaults: tiled layout, no padding bound, no ragged
 // offsets, no snapshot, in-place commit, no factor rows, the legacy stream.
@@ -81,57 +66,12 @@ TEST(GdnScanBatchedArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ(a.stream, nullptr);
 }
 
-// 22 fields, the old write_kv_cache_rope_fused parameter list in order.
-TEST(KvWriteRopeArgs, CarriesEveryFieldInDeclarationOrder) {
-    const KvWriteRopeArgs a{.grid = dim3(11, 2),
-                            .threads = 1,
-                            .block_stride = 2,
-                            .row_elems = 3,
-                            .block_size = 4,
-                            .n_tokens = 5,
-                            .max_blocks_per_seq = 6,
-                            .n_sequences = 7,
-                            .n_kv_heads = 8,
-                            .head_dim = 9,
-                            .theta = 10.0f,
-                            .inv_scaling = 11.0f,
-                            .rope_pairs = 12,
-                            .neox = true};
-    const auto& [grid, thr, st, k, v, pos, bt, kc, vc, bstr, re, bs, nt, mbs, nseq, nkv, hd, th, inv, rp, nx,
-                 lr] = a;
-    EXPECT_EQ((std::array{thr, bstr, re, bs, nt, mbs, nseq, nkv, hd, rp}),
-              (std::array{1, 2, 3, 4, 5, 6, 7, 8, 9, 12}));
-    EXPECT_EQ((std::array{grid.x, grid.y, grid.z}), (std::array{11u, 2u, 1u}));
-    EXPECT_EQ((std::array{th, inv}), (std::array{10.0f, 11.0f}));
-    EXPECT_TRUE(nx);
-}
-
 TEST(KvWriteRopeArgs, OmittedFieldsTakeTheOldDefaults) {
     const KvWriteRopeArgs a{.threads = 1};
     EXPECT_EQ(a.inv_scaling, 1.0f);
     EXPECT_FALSE(a.neox);
     EXPECT_EQ(a.longrope_inv_freqs, nullptr);
     EXPECT_EQ(a.stream, nullptr);
-}
-
-// 21 fields, the old qknorm_rope_fused / qknorm_rope_fused_cta parameter list in order.
-TEST(QknormRopeArgs, CarriesEveryFieldInDeclarationOrder) {
-    const QknormRopeArgs a{.n_heads = 1,
-                           .n_kv_heads = 2,
-                           .head_dim = 3,
-                           .eps = 4.0f,
-                           .theta = 5.0f,
-                           .scaling = 6.0f,
-                           .rope_dim = 7,
-                           .neox = true,
-                           .weight_offset = 8.0f,
-                           .ext_factor = 9.0f,
-                           .attn_factor = 10.0f,
-                           .n_tokens = 11};
-    const auto& [q, k, qw, kw, nh, nkv, hd, eps, pos, th, sc, rd, nx, st, wo, ef, af, cd, lr, mr, nt] = a;
-    EXPECT_EQ((std::array{nh, nkv, hd, rd, nt}), (std::array{1, 2, 3, 7, 11}));
-    EXPECT_EQ((std::array{eps, th, sc, wo, ef, af}), (std::array{4.0f, 5.0f, 6.0f, 8.0f, 9.0f, 10.0f}));
-    EXPECT_TRUE(nx);
 }
 
 // Defaults = the old qknorm_rope_fused defaults: theta 1e4, unscaled, full head_dim, interleaved
@@ -152,24 +92,6 @@ TEST(QknormRopeArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ(a.n_tokens, 1);
 }
 
-// 19 fields, the old gdn_scan_fused_{f32,bf16} parameter list in order (chunkwise: the same plus
-// chunk_size as its own argument).
-TEST(GdnScanArgs, CarriesEveryFieldInDeclarationOrder) {
-    const GdnScanArgs<__nv_bfloat16> a{.conv_channels = 1,
-                                       .n_tokens = 2,
-                                       .n_heads = 3,
-                                       .head_dim_ssm = 4,
-                                       .state_size = 5,
-                                       .n_groups = 6,
-                                       .grouped_layout = 7,
-                                       .snap2_off = 8};
-    const auto& [conv, cc, al, be, alog, dtb, h, y, nt, nh, hd, ss, ng, st, gl, rn, snap, sn, s2] = a;
-    EXPECT_EQ((std::array{cc, nt, nh, hd, ss, ng, gl}), (std::array{1, 2, 3, 4, 5, 6, 7}));
-    EXPECT_EQ(s2, 8);
-    EXPECT_TRUE((std::is_same_v<std::remove_cvref_t<decltype(h)>, __nv_bfloat16*>));
-    EXPECT_TRUE((std::is_same_v<std::remove_cvref_t<decltype(snap)>, __nv_bfloat16*>));
-}
-
 // Defaults = the old trailing defaults: tiled layout, no padding bound, no snapshot, no second slab.
 TEST(GdnScanArgs, OmittedFieldsTakeTheOldDefaults) {
     const GdnScanArgs<float> a{.n_tokens = 1};
@@ -180,33 +102,11 @@ TEST(GdnScanArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ(a.snap2_off, 0);
 }
 
-// 18 fields, the old gdn_scan_chunkpar_{f32,bf16} parameter list in order; strip_chunks 0 = auto.
-TEST(GdnChunkparArgs, CarriesEveryFieldInDeclarationOrder) {
-    const GdnChunkparArgs<float> a{.conv_channels = 1,
-                                   .n_tokens = 2,
-                                   .n_heads = 3,
-                                   .head_dim_ssm = 4,
-                                   .state_size = 5,
-                                   .n_groups = 6,
-                                   .grouped_layout = 7,
-                                   .ws_bytes = 8,
-                                   .strip_chunks = 9};
-    const auto& [conv, cc, al, be, alog, dtb, h, y, nt, nh, hd, ss, ng, st, gl, ws, wsb, sc] = a;
-    EXPECT_EQ((std::array{cc, nt, nh, hd, ss, ng, gl, sc}), (std::array{1, 2, 3, 4, 5, 6, 7, 9}));
-    EXPECT_EQ(wsb, 8u);
-    EXPECT_EQ(GdnChunkparArgs<__nv_bfloat16>{}.strip_chunks, 0);
-}
-
-// 21 fields, the old ssm_scan_prefill parameter list in order; defaults FP32 state, no SSD.
-TEST(SsmScanPrefillArgs, CarriesEveryFieldInDeclarationOrder) {
-    const SsmScanPrefillArgs a{
-        .n_tokens = 1, .n_heads = 2, .head_dim_ssm = 3, .state_size = 4, .n_groups = 5};
-    const auto& [x, b, c, dt, alog, d, dtb, h, y, z, nt, nh, hd, ss, ng, hq, st, rn, snap, sn, ssd] = a;
-    EXPECT_EQ((std::array{nt, nh, hd, ss, ng}), (std::array{1, 2, 3, 4, 5}));
-    EXPECT_EQ(hq, imp::QType::F32);
-    EXPECT_FALSE(ssd);
-    EXPECT_EQ(rn, nullptr);
-}
+// Defaults the two deleted field-order cases asserted: strip_chunks 0 = auto; FP32 state, no SSD,
+// no padding bound.
+static_assert(GdnChunkparArgs<__nv_bfloat16>{}.strip_chunks == 0);
+static_assert(SsmScanPrefillArgs{}.h_dtype == imp::QType::F32 && !SsmScanPrefillArgs{}.ssd &&
+              SsmScanPrefillArgs{}.d_real_n == nullptr);
 
 // 20 fields, the old sparse_prefill_select_past parameter list in order.
 TEST(SparsePrefillSelectArgs, CarriesEveryFieldInDeclarationOrder) {
