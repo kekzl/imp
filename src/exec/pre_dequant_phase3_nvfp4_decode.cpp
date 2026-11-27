@@ -649,6 +649,9 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         // A failed query stops the loop (vram_query.h): never over.
         if (!vram_fits(nvfp4_bytes, vram_reserve_floor(vram_budget_total_bytes())))
             break;
+        // The plan grant covers both passes (B-138: 79 tensors, 1617 MiB past a 0 grant).
+        if (dctx.nvfp4_dense_bytes + second_bytes + nvfp4_bytes > dctx.cache_grant)
+            break;
 
         // Dequant from quantized weights via scratch buffer
         size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -684,6 +687,7 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
 
     if (second_count > 0) {
         wcache_->nvfp4_bytes += second_bytes;
+        dctx.nvfp4_dense_bytes += second_bytes;
         IMP_LOG_INFO("NVFP4 second pass: %d additional tensors, %.2f MiB", second_count,
                      second_bytes / (1024.0 * 1024.0));
     }

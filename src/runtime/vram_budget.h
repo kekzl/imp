@@ -39,9 +39,9 @@ struct VRAMBudget;
 size_t planned_post_cache_reserve(const VRAMBudget& budget, size_t total_vram);
 
 struct PlanResult;
-// GGUF only (no-op for NVFP4-prequant or a rejected plan): sets kv_plan_bytes to the plan's KV
-// pool and weight_cache_grant_bytes to optional_caches minus the allocator headroom the plan's
-// slack against `distributable` leaves uncovered.
+// GGUF only (no-op for NVFP4-prequant): sets kv_plan_bytes to the plan's KV pool and
+// weight_cache_grant_bytes to optional_caches minus the allocator headroom the plan's slack
+// against `distributable` leaves uncovered; a rejected plan grants 0 (B-138).
 void apply_plan_to_weight_caches(VRAMBudget& budget, const PlanResult& plan, size_t distributable,
                                  bool nvfp4_prequant);
 

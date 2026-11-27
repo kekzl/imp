@@ -54,8 +54,14 @@ size_t planned_post_cache_reserve(const VRAMBudget& budget, size_t total_vram) {
 
 void apply_plan_to_weight_caches(VRAMBudget& budget, const PlanResult& plan, size_t distributable,
                                  bool nvfp4_prequant) {
-    if (!plan.ok || nvfp4_prequant)
+    if (nvfp4_prequant)
         return;
+    // A rejected plan grants the optional caches nothing. B-138: Qwen3.8-27B-Q8_0 (plan over by 13094
+    // MiB) built 1856 MiB of NVFP4 decode cache, 267 MiB stayed free, no SSM slot committed: 0 tokens.
+    if (!plan.ok) {
+        budget.weight_cache_grant_bytes = 0;
+        return;
+    }
     const size_t total_vram = vram_budget_total_bytes();
     // The plan leaves no allocator headroom; KV growth keeps it free (kv_cache.cu).
     const size_t headroom = vram_allocator_headroom(total_vram);

@@ -41,18 +41,18 @@ namespace {
 // Returns the plane bytes still outstanding after giving back what `need` requires.
 size_t yield_imma_planes_to_one_sequence(VRAMBudget& budget, size_t used, size_t free_now, size_t need,
                                          int max_seq_len) {
-    size_t outstanding = budget.imma_plane_bytes > used ? budget.imma_plane_bytes - used : 0;
-    const size_t have = free_now > outstanding ? free_now - outstanding : 0;
-    if (outstanding == 0 || have >= need)
+    const size_t outstanding = budget.imma_plane_bytes > used ? budget.imma_plane_bytes - used : 0;
+    const size_t kept = imma_planes_kept(outstanding, free_now, need);
+    if (kept == outstanding)
         return outstanding;
-    const size_t give = std::min(outstanding, need - have);
+    const size_t give = outstanding - kept;
     budget.imma_plane_bytes -= give;
     mmq_q8_imma_set_plane_budget(budget.imma_plane_bytes);
     IMP_LOG_INFO(
         "KV cache: IMMA prefill planes cut by %.0f MiB to %.0f MiB so one max_seq_len=%d "
         "sequence fits the measured residual",
         give / (1024.0 * 1024.0), budget.imma_plane_bytes / (1024.0 * 1024.0), max_seq_len);
-    return outstanding - give;
+    return kept;
 }
 
 // AUTO max_seq_len = min(resolver bound, what the built pool holds; a growable pool its ceiling).
