@@ -12,61 +12,10 @@
 #include <vector>
 
 #include "compute/mmq_q4k_imma_tile.h"
+#include "test_mmq_q4k_imma_tile_util.cuh"
 
 namespace imp {
 namespace {
-
-constexpr int kSub = 32;
-
-// -------- Synthetic input generators --------
-
-void gen_random_w_sym_s8(std::vector<int8_t>& W, std::vector<__half>& alpha, std::vector<__half>& beta,
-                        int N, int K, unsigned seed) {
-    const int subs = K / kSub;
-    W.resize(static_cast<size_t>(N) * K);
-    alpha.resize(static_cast<size_t>(N) * subs);
-    beta.resize(static_cast<size_t>(N) * subs);
-    std::srand(seed);
-    for (int n = 0; n < N; ++n) {
-        for (int k = 0; k < K; ++k) {
-            int q = std::rand() % 16;       // ∈ [0, 15] unsigned nibble
-            W[static_cast<size_t>(n) * K + k] = static_cast<int8_t>(q - 8);  // symmetric
-        }
-        for (int s = 0; s < subs; ++s) {
-            float d_per_n = 0.005f + 0.002f * (std::rand() % 100);    // d ~ U[0.005, 0.205]
-            float dmin_per_n = 0.001f * (std::rand() % 100);
-            int sc = std::rand() % 64;
-            int m = std::rand() % 64;
-            float alpha_f = d_per_n * static_cast<float>(sc);
-            float beta_f = 8.0f * d_per_n * static_cast<float>(sc) -
-                           dmin_per_n * static_cast<float>(m);
-            alpha[static_cast<size_t>(n) * subs + s] = __float2half(alpha_f);
-            beta[static_cast<size_t>(n) * subs + s] = __float2half(beta_f);
-        }
-    }
-}
-
-void gen_random_x_s8(std::vector<int8_t>& X, std::vector<__half>& x_scale, std::vector<float>& x_rowsum,
-                    int M, int K, unsigned seed) {
-    const int subs = K / kSub;
-    X.resize(static_cast<size_t>(M) * K);
-    x_scale.resize(static_cast<size_t>(M) * subs);
-    x_rowsum.resize(static_cast<size_t>(M) * subs);
-    std::srand(seed);
-    for (int m = 0; m < M; ++m) {
-        for (int s = 0; s < subs; ++s) {
-            int row_sum = 0;
-            for (int k = 0; k < kSub; ++k) {
-                int q = (std::rand() % 255) - 127;  // ∈ [-127, 127]
-                X[static_cast<size_t>(m) * K + s * kSub + k] = static_cast<int8_t>(q);
-                row_sum += q;
-            }
-            float scale_f = 0.001f + 0.0005f * (std::rand() % 50);
-            x_scale[static_cast<size_t>(m) * subs + s] = __float2half(scale_f);
-            x_rowsum[static_cast<size_t>(m) * subs + s] = static_cast<float>(row_sum);
-        }
-    }
-}
 
 // CPU reference: out[m, n] = Σ_sub x_scale[m, sub] · (α[n, sub] · Σ X·W + β[n, sub] · Σ X)
 // Equivalent to the kernel's math, computed at FP32 precision.
@@ -193,97 +142,6 @@ TEST(MmqQ4kImmaTile, CorrectnessFFNLikeShape) {
     // FFN-like dimensions: K = 512 (16 sub-blocks), M = 128, N = 64.
     // Exercises the cross-sub-block float accumulator at scale.
     run_correctness(/*M=*/128, /*N=*/64, /*K=*/512, /*seed=*/37, /*abs=*/40.0f, /*rel=*/0.02f);
-}
-
-// Phase 2B.1 informational baseline, no perf assertion: prints kernel time and TOPS.
-// 1-warp-per-CTA tile (BLOCK_M=16,BLOCK_N=8) under-utilises each SM; Phase 2B.2 is the
-// next real lever.
-TEST(MmqQ4kImmaTile, BenchSweep) {
-    struct Shape { int M, N, K; };
-    // Production FFN shapes (Qwen3-32B FFN ~5120, Gemma-3-12B ~3072). Large M/N is mandatory
-    // for Phase 2B.3's BLOCK_M=64/BLOCK_N=32 tile: M=512 N=256 gives 64 CTAs, ~0.4 CTAs/SM,
-    // and regresses vs Phase 2B.2.
-    Shape shapes[] = {
-        {512,  512,  2048},
-        {1024, 512,  2048},
-        {2048, 512,  2048},
-        {4096, 1024, 2048},
-        {2048, 2048, 2048},
-        {4096, 4096, 2048},
-    };
-
-    std::fprintf(stderr,
-                 "\n[q4k-imma-tile Phase 2B.3 bench, 4 warps/CTA × WRM·WRN=2·2 "
-                 "(64×32 output), 2-stage cp.async]\n");
-    std::fprintf(stderr, "  %4s %4s %5s  %10s  %10s\n", "M", "N", "K", "ms/rep", "TOPS");
-
-    for (auto sh : shapes) {
-        std::vector<int8_t> hW;
-        std::vector<__half> halpha, hbeta;
-        gen_random_w_sym_s8(hW, halpha, hbeta, sh.N, sh.K, 71);
-
-        std::vector<int8_t> hX;
-        std::vector<__half> hx_scale;
-        std::vector<float> hx_rowsum;
-        gen_random_x_s8(hX, hx_scale, hx_rowsum, sh.M, sh.K, 73);
-
-        int8_t *dX = nullptr, *dW = nullptr;
-        __half *dxscale = nullptr, *dalpha = nullptr, *dbeta = nullptr;
-        float* dxrowsum = nullptr;
-        __half* dout = nullptr;
-        cudaMalloc(&dX, hX.size());
-        cudaMalloc(&dW, hW.size());
-        cudaMalloc(&dxscale, hx_scale.size() * sizeof(__half));
-        cudaMalloc(&dxrowsum, hx_rowsum.size() * sizeof(float));
-        cudaMalloc(&dalpha, halpha.size() * sizeof(__half));
-        cudaMalloc(&dbeta, hbeta.size() * sizeof(__half));
-        cudaMalloc(&dout, static_cast<size_t>(sh.M) * sh.N * sizeof(__half));
-        cudaMemcpy(dX, hX.data(), hX.size(), cudaMemcpyHostToDevice);
-        cudaMemcpy(dW, hW.data(), hW.size(), cudaMemcpyHostToDevice);
-        cudaMemcpy(dxscale, hx_scale.data(), hx_scale.size() * sizeof(__half),
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(dxrowsum, hx_rowsum.data(), hx_rowsum.size() * sizeof(float),
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(dalpha, halpha.data(), halpha.size() * sizeof(__half), cudaMemcpyHostToDevice);
-        cudaMemcpy(dbeta, hbeta.data(), hbeta.size() * sizeof(__half), cudaMemcpyHostToDevice);
-
-        for (int w = 0; w < 3; ++w) {
-            mmq_q4k_imma_tile(dX, dxscale, dxrowsum, dW, dalpha, dbeta, dout, sh.M, sh.N, sh.K,
-                              nullptr);
-        }
-        cudaDeviceSynchronize();
-
-        cudaEvent_t start, stop;
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-
-        constexpr int kReps = 20;
-        float total_ms = 0.0f;
-        for (int r = 0; r < kReps; ++r) {
-            cudaEventRecord(start);
-            mmq_q4k_imma_tile(dX, dxscale, dxrowsum, dW, dalpha, dbeta, dout, sh.M, sh.N, sh.K,
-                              nullptr);
-            cudaEventRecord(stop);
-            cudaEventSynchronize(stop);
-            float ms = 0.0f;
-            cudaEventElapsedTime(&ms, start, stop);
-            total_ms += ms;
-        }
-        float ms_per_rep = total_ms / kReps;
-        double ops = 2.0 * sh.M * sh.N * sh.K;
-        double tops = ops / (ms_per_rep * 1e-3) / 1e12;
-        std::fprintf(stderr, "  %4d %4d %5d  %10.4f  %10.3f\n", sh.M, sh.N, sh.K, ms_per_rep, tops);
-
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        cudaFree(dX);
-        cudaFree(dW);
-        cudaFree(dxscale);
-        cudaFree(dxrowsum);
-        cudaFree(dalpha);
-        cudaFree(dbeta);
-        cudaFree(dout);
-    }
 }
 
 }  // namespace

@@ -1466,7 +1466,6 @@ if(IMP_BUILD_TESTS)
         tests/test_inkling_attn_paged.cu
         # D-14: the drafters' norm + RoPE and fp32-in RMSNorm are one kernel each (equal bits per arm).
         tests/test_drafter_norm_primitives.cu
-        tests/test_gemv_hot_cold_bench.cu
         tests/test_inkling_quality.cu
         tests/test_swiglu_quantize_cutlass.cu
         tests/test_nvfp4_tile_swiglu_quant.cu
@@ -1578,15 +1577,7 @@ if(IMP_BUILD_TESTS)
         tests/test_quantize_nvfp4_roundtrip.cu
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/quant_report.cpp
-        tests/test_mxf4nvf4_probe.cu
-        tests/test_mxf4nvf4_mma_bench.cu
-        tests/test_mma_peak_saturated.cu
-        tests/test_mxf4nvf4_mma_variants_bench.cu
-        tests/test_fp4_pv_bench.cu
         tests/test_mxf4nvf4_qkt_validate.cu
-        tests/test_tma_block_scale_bench.cu
-        tests/test_fmha_v_load_bench.cu
-        tests/test_mmq_q4k_imma_bench.cu
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
@@ -1761,6 +1752,49 @@ if(IMP_BUILD_TESTS)
     # ctest -L unit/gpu/perf: source of truth for the CPU/GPU test split.
     # gtest filter (_unit_e2e_filter) applies only to test-e2e (mixed stub+CUDA E2E in one binary);
     # guard_e2e_lane_split asserts it resolves to the expected CPU-only set. Keep verify.sh's copy in sync.
+    # Timing, probe and bandwidth-floor cases (TEST_SUITE_AUDIT P1, P2): built with every other
+    # module, run by make test-bench (and make test-perf), not by imp-tests or make test-gpu.
+    imp_add_test_module(test-bench GPU SOURCES
+        tests/test_mxf4nvf4_probe.cu
+        tests/test_mxf4nvf4_mma_bench.cu
+        tests/test_mma_peak_saturated.cu
+        tests/test_mxf4nvf4_mma_variants_bench.cu
+        tests/test_fp4_pv_bench.cu
+        tests/test_tma_block_scale_bench.cu
+        tests/test_fmha_v_load_bench.cu
+        tests/test_mmq_q4k_imma_bench.cu
+        tests/test_gemv_hot_cold_bench.cu
+        tests/bench/test_attention_fmha_hd512_bench.cu
+        tests/bench/test_attention_paged_oracle_bench.cu
+        tests/bench/test_fmha_fp8_bench.cu
+        tests/bench/test_fp8_gemm_bench.cu
+        tests/bench/test_fp8_gemm_smallm_bench.cu
+        tests/bench/test_fp8_proj_stream_bench.cu
+        tests/bench/test_gemm_capture_fp16_sm120_bench.cu
+        tests/bench/test_gemm_f16_narrow_prefill_bench.cu
+        tests/bench/test_gemm_f16_narrow_smallm_bench.cu
+        tests/bench/test_gemm_f16_tile_bench.cu
+        tests/bench/test_gemm_fp8_tile_bench.cu
+        tests/bench/test_gemm_grouped_nvfp4_decode_bench.cu
+        tests/bench/test_gemm_grouped_nvfp4_tile_bench.cu
+        tests/bench/test_gemm_mxfp4_f16_tile_bench.cu
+        tests/bench/test_gemm_mxfp8_tile_bench.cu
+        tests/bench/test_gemm_nvfp4_f16_tile_bench.cu
+        tests/bench/test_gemm_q45k_f16_tile_bench.cu
+        tests/bench/test_gemm_q6k_f16_tile_bench.cu
+        tests/bench/test_inkling_attn_paged_bench.cu
+        tests/bench/test_inkling_kernels_bench.cu
+        tests/bench/test_mmq_q4k_imma_tile_sweep_bench.cu
+        tests/bench/test_mmq_q8_imma_tail_bench.cu
+        tests/bench/test_moe_router_fused_bench.cu
+        tests/bench/test_nvfp4_batched_smallm_equiv_bench.cu
+        tests/bench/test_nvfp4_gemm_tile_bench.cu
+        tests/bench/test_nvfp4_smallm_bench.cu
+        tests/bench/test_nvfp4_smallm_v2_bench.cu
+        tests/bench/test_nvfp4_smallm_ws_bench.cu
+    )
+    target_link_libraries(test-bench PRIVATE imp_test_kernels)
+
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
     # Each lane writes a GTest JSON report; guard_unit_skips fails on any skipped test in it.
@@ -1853,13 +1887,10 @@ if(IMP_BUILD_TESTS)
     set_tests_properties(gpu_compute gpu_attention gpu_quant gpu_kv gpu_moe_gdn gpu_e2e
         PROPERTIES LABELS "gpu")
 
-    set(_perf_filter "*Perf*:*Bench*:*Throughput*")
-    add_test(NAME perf_compute   COMMAND test-compute   "--gtest_filter=${_perf_filter}")
-    add_test(NAME perf_attention COMMAND test-attention "--gtest_filter=${_perf_filter}")
-    add_test(NAME perf_quant     COMMAND test-quant     "--gtest_filter=${_perf_filter}")
-    add_test(NAME perf_e2e       COMMAND test-e2e       "--gtest_filter=${_perf_filter}")
-    set_tests_properties(perf_compute perf_attention perf_quant perf_e2e
-        PROPERTIES LABELS "perf")
+    # The timing cases live in their own module; the old *Perf*:*Bench*:*Throughput* filter over
+    # four modules matched 0 cases in test-e2e and 12 DISABLED_ ones elsewhere.
+    add_test(NAME perf_bench COMMAND test-bench)
+    set_tests_properties(perf_bench PROPERTIES LABELS "perf")
 
     # Shell wrappers for the Docker runtime image (no CTestTestfile.cmake there), running the
     # same partitions ctest -L would. On a host build prefer ctest -L unit|gpu|perf.

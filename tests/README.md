@@ -1,7 +1,7 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-13
+verified: 2026-11-27
 commit: 81ffa573
 -->
 
@@ -52,6 +52,7 @@ affected one:
 | `test-kv` | KV-cache write/gather, FP8 KV, prefix cache, VRAM query/accounting | yes |
 | `test-moe-gdn` | MoE routing, GDN/SSM, json-schema FSM | yes |
 | `test-e2e` | forward pass, batching, determinism, greedy locks, vision golden, VRAM budget reserve | yes (some CPU-stub) |
+| `test-bench` | kernel timing, probes, bandwidth floors (`make test-bench`, `make test-perf`; not in `imp-tests` / `make test-gpu`) | yes |
 
 Run one binary / filter:
 

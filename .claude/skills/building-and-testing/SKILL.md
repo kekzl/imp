@@ -61,7 +61,7 @@ docker run --rm --gpus all -v $HOME/models:/models \
 
 | Where | What |
 |---|---|
-| `imp:test` image | `imp-server`, `imp-cli`, `imp-bench`, `imp-quantize`, `imp-tests` (full GPU), `imp-tests-unit` (generated wrapper = `ctest -L unit`: test-core + test-text + e2e unit filter), modules `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e` |
+| `imp:test` image | `imp-server`, `imp-cli`, `imp-bench`, `imp-quantize`, `imp-tests` (full GPU), `imp-tests-unit` (generated wrapper = `ctest -L unit`: test-core + test-text + e2e unit filter), modules `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e`, plus `test-bench` (timing, probes, bandwidth floors: `make test-bench` / `make test-perf`, not in `imp-tests`) |
 | `build-dev/` (host, from `make dev`) | same binaries; run them inside `imp:toolchain` with `-v $PWD:/src -w /src` (that mount hides the image's own `/src`) |
 
 `tests/test_ssm.cu` -> `test-moe-gdn`. `SamplingTest` -> `test-compute`. A new CPU test belongs in `test-core`. Lane census: `python3 tools/check_test_lanes.py --report` (the `Test lanes` check fails on a test in no ctest entry or a unit-lane test demoted vs the base; a new GPU test in a `gpu` module needs no edit). The unit lane has no skips (`guard_unit_skips` in `ctest -L unit` fails on any): a test that needs a GPU or a model file goes to `test-kv` or to `test-e2e` outside `_unit_e2e_filter`; fixture files live in `tests/fixtures/` (`IMP_TEST_FIXTURES_DIR`). A new tool binary needs a `cp` in the builder stage AND a `COPY --from=builder` line in the Dockerfile.

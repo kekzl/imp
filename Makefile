@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose interpose-build bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-inkling vram-touch-audit verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose interpose-build bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-bench test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-inkling vram-touch-audit verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -409,7 +409,7 @@ bench: build check-gpu
 	@# Both were dead paths, and each recipe line aborts the target, so `make
 	@# bench` died at the first of them and never reached the MXFP4 line at all.
 
-# Single model benchmark (quick check)
+# Single model benchmark (quick check), then the kernel timing module.
 test-perf: build check-gpu
 	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-NVFP4-cortecs --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 
@@ -418,6 +418,12 @@ test-perf: build check-gpu
 # per-turn TTFT with prefix cache on/off (agent_replay_bench.py). The metrics a
 # coding agent actually feels (see docs/GOAL.md "Agentic surface"). Override the
 # model with MODEL=<name-under-$HOME/models>.
+	$(BENCH_DOCKER_RUN) test-bench
+
+# Kernel timing, probe and bandwidth-floor cases (test-bench, TEST_SUITE_AUDIT P1/P2): the floors
+# assert wall-clock bounds, so they run only here, on a quiet card, not in make test-gpu.
+test-bench: build check-gpu
+	$(BENCH_DOCKER_RUN) test-bench
 AGENTIC_MODEL ?= Qwen3-8B-NVFP4-cortecs
 bench-competitive: build check-gpu
 	@echo "Competitive decode sweep vs vLLM on SafeTensors heroes (image pinned by digest in the script)"
