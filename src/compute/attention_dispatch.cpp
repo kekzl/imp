@@ -2,7 +2,8 @@
 #include "compute/attention_tc.h"
 #include "core/log_once.h"
 #include "core/logging.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/attention.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -46,7 +47,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Learned attention sinks (#547/#992): fp16-qk FA2 and the FP16 WMMA FMHA fold them into online
     // softmax. Route only there; fail loudly on decline instead of a sink-blind fallback.
     if (has_sinks) {
-        if (rcfg.attention.fmha_fa2 == "on") {
+        if (attention_section(rcfg).fmha_fa2 == "on") {
             sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
                                                      stream, q_offset, /*d_kv_len=*/nullptr, attn_sinks);
         }
@@ -72,7 +73,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
 
     // Register-resident FA2 ("echtes FA"): S/P/O in registers, 1 barrier/KV tile, f16 QK^T.
     // Default on via [attention] fmha_fa2 / IMP_FMHA_FA2, head_dim 64/128/256.
-    if (rcfg.attention.fmha_fa2 == "on") {
+    if (attention_section(rcfg).fmha_fa2 == "on") {
         sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
                                                  q_offset);
         if (sup.fa2_accepts) {
@@ -115,8 +116,9 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
              "qtype %d; fa2 %d (fmha_fa2=%s hd256=%d) fmha_sm120 %d blackwell %d",
              static_cast<int>(Q.shape[3]), static_cast<int>(Q.shape[0]), static_cast<int>(Q.shape[1]),
              static_cast<int>(Q.shape[2]), static_cast<int>(K.shape[1]), static_cast<int>(K.shape[2]),
-             q_offset, static_cast<int>(Q.qtype), (int)sup.fa2_accepts, rcfg.attention.fmha_fa2.c_str(),
-             (int)imp::process_diag_fa2_hd256(), (int)sup.fmha_sm120_accepts, (int)sup.blackwell_accepts);
+             q_offset, static_cast<int>(Q.qtype), (int)sup.fa2_accepts,
+             attention_section(rcfg).fmha_fa2.c_str(), (int)imp::process_diag_fa2_hd256(),
+             (int)sup.fmha_sm120_accepts, (int)sup.blackwell_accepts);
     throw std::runtime_error(msg);
 }
 

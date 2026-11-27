@@ -9,7 +9,8 @@
 #include "compute/layernorm.h"
 #include "core/logging.h"
 #include "exec/executor.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/moe.h"
 #include "exec/executor_debug.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
@@ -72,7 +73,7 @@ bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, co
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
     // The MoE phase-2 norm this launch takes over: sandwich models read ffn_pre_norm_2 (Gemma-4).
-    if (!fp32_resid_fuse_ok_(n, mode) || !layer_has_moe(layer) || dispatch_policy().moe.skip ||
+    if (!fp32_resid_fuse_ok_(n, mode) || !layer_has_moe(layer) || moe_section(dispatch_policy()).skip ||
         !model_->profile().sandwich_norms || !f16_weight(ly.ffn_pre_norm_2) ||
         !f16_weight(ly.post_attn_norm) || po.qtype != QType::F16 ||
         !fp32_residual_norm_fits(Fp32ResidMode::kPostAttn, cfg.d_model))

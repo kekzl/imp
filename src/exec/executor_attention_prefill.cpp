@@ -71,8 +71,8 @@
             // S-matrix fits; the fused hd=512 kernel serves only the S-matrix-overflow (O(n)) fallback.
             const bool prefer_fmha =
                 chunk_fmha_ok && hd != 512 &&
-                ((dispatch_policy().attention.fmha_prefill_threshold > 0 &&
-                  ctx_len >= dispatch_policy().attention.fmha_prefill_threshold) ||
+                ((attention_section(dispatch_policy()).fmha_prefill_threshold > 0 &&
+                  ctx_len >= attention_section(dispatch_policy()).fmha_prefill_threshold) ||
                  small_growing_chunk);
             if (!chunk_fa2_serves && !chunk_fmha_ok && !smatrix_fits) {
                 // Sinks/heterogeneous shapes can ONLY be served by cuBLAS — the
@@ -281,7 +281,7 @@
         // FMHA only above the S-matrix threshold (see the chunked path for why the
         // #493 prefer-FA2-everywhere override was reverted). hd=512 never prefers
         // the fused path (slower than cuBLAS); stays on cuBLAS until the S-matrix no longer fits.
-        const bool prefer_fmha = (seq_n >= dispatch_policy().attention.fmha_prefill_threshold) && hd != 512;
+        const bool prefer_fmha = (seq_n >= attention_section(dispatch_policy()).fmha_prefill_threshold) && hd != 512;
 
         // FP16-QK FA2 is the primary hd=128 prefill kernel at EVERY length: O(n)
         // memory (no S-matrix), at or above cuBLAS throughput across the whole

@@ -15,7 +15,7 @@
 #include "runtime/engine_config.h"
 #include "runtime/engine_capabilities.h"
 #include "runtime/engine_metrics_snapshot.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
 #include "runtime/graph_eligibility.h"
 #include "runtime/suffix_draft.h"
 #include "runtime/vram_budget.h"
@@ -364,8 +364,10 @@ private:
     RuntimeConfig& runtime_config_;
     // Snapshot of the nine sections src/exec reads, filled once in init_weights()
     // after the init resolvers have run (F-10). exec/ holds a pointer to THIS,
-    // which is what lets it stop including runtime/config.h.
-    DispatchPolicy dispatch_policy_;
+    // which is what lets it stop including runtime/config.h. Owned through a pointer so engine.h
+    // needs no core/config/* (B-123): a gemm key no longer recompiles every engine.h includer.
+    std::unique_ptr<DispatchPolicy> dispatch_policy_owner_;
+    DispatchPolicy& dispatch_policy_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;    // what the operator set plus the imp.conf bridge; init writes none of it (C-9)
     EngineRuntimeState rt_;  // every field init resolves (batch, context, KV, quant stack); serving flags

@@ -226,6 +226,9 @@ if want layering; then
     # C-9 / B-129: init resolves into rt_, config_ keeps the operator's (27 writes on 2026-11-27).
     run "Engine::config_ written by no one"     python3 tools/check_engine_config_writes.py
     run "that gate still catches its cases"     python3 tools/check_engine_config_writes.py --selftest
+    # X-4 / B-123: no header hands every config section to its includers (gemm.h fan-in 139 -> 95 TUs).
+    run "config headers behind a narrow fan-in" python3 tools/check_config_fanin.py
+    run "that gate still catches its cases"     python3 tools/check_config_fanin.py --selftest
 fi
 
 if want citations; then

@@ -3,6 +3,7 @@
 #include "runtime/engine.h"
 #include "runtime/request.h"
 #include "runtime/token_recycle_draft.h"
+#include "core/config/speculative.h"  // kRecycleSlots
 
 #include <algorithm>
 #include <memory>

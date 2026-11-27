@@ -1,6 +1,8 @@
 // Piecewise FFN prefill graphs (#2435): see exec/ffn_graph_cache.h.
 
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/moe.h"
+#include "core/config/diagnostics.h"
 #include "exec/executor.h"
 #include "exec/executor_debug.h"
 #include "exec/pre_dequant_internal.h"
@@ -26,7 +28,7 @@ int GraphExecutor::ffn_graph_begin_(const InferenceState& state, int n, cudaStre
     if (calib_ || lora_ != nullptr || offload_mgr_ != nullptr || fp32_accum_buf_.get() != nullptr ||
         model_->profile().gated_residual)
         return 0;
-    const auto& diag = dispatch_policy().diagnostics;
+    const auto& diag = diagnostics_section(dispatch_policy());
     if (diag.profile || !diag.moe_expert_hist.empty() || debug_forward_enabled() ||
         dump_hidden_dir() != nullptr)
         return 0;
@@ -52,7 +54,7 @@ int GraphExecutor::ffn_graph_begin_(const InferenceState& state, int n, cudaStre
 }
 
 void GraphExecutor::run_ffn_phase_(int layer, cudaStream_t stream) {
-    if (dispatch_policy().moe.skip)  // debug: skip all FFN/MoE to isolate attention bugs
+    if (moe_section(dispatch_policy()).skip)  // debug: skip all FFN/MoE to isolate attention bugs
         return;
     const bool moe = layer_has_moe(layer);
     if (!moe && !layer_has_dense_ffn(layer))

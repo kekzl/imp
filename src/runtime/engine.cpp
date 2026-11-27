@@ -83,7 +83,10 @@ void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept 
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
 
 Engine::Engine()
-    : runtime_config_owner_(std::make_unique<RuntimeConfig>()), runtime_config_(*runtime_config_owner_) {}
+    : runtime_config_owner_(std::make_unique<RuntimeConfig>()),
+      runtime_config_(*runtime_config_owner_),
+      dispatch_policy_owner_(std::make_unique<DispatchPolicy>()),
+      dispatch_policy_(*dispatch_policy_owner_) {}
 
 Engine::~Engine() {
     // The last step's work can still be queued (a pipelined decode step), and VMM-backed
