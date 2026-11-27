@@ -2,7 +2,6 @@
 #include "compute/constrain_common.h"
 #include "core/logging.h"
 
-#include <mutex>
 #include <cuda_runtime.h>
 #include <cfloat>
 #include <cstring>
@@ -709,16 +708,11 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     }
 
     if (!dev_.has_token_allow()) {
-        // Unreachable after a successful initialize() - the point: a constrainer that cannot mask must
-        // SAY so rather than let the request decode unconstrained and look like a model that ignored
-        // the schema (#1104).
-        static std::once_flag once;
-        std::call_once(once, [] {
-            IMP_LOG_ERROR(
-                "JsonConstrainer: no device allow list — the reply will NOT be constrained. "
-                "This should be impossible after initialize(); please report it.");
-        });
-        return;
+        // Unreachable after a successful initialize(): a constrainer that cannot mask fails the step
+        // rather than let the request decode unconstrained like a model that ignored the schema (#1104).
+        throw_runtime_error(
+            "JsonConstrainer: no device allow list after initialize(), the reply cannot be "
+            "constrained");
     }
     // Clamps to what initialize() reserved: the model's lm_head can be wider than the tokenizer
     // (padding rows), and the host list is sized to the model, but the kernel returns before
