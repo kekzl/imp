@@ -935,8 +935,8 @@ jobs:
   # replays 1500 fixed-seed iterations per target and can only re-find a known
   # defect class; libFuzzer with coverage feedback is what finds a new one, and
   # nothing ran it unless someone typed the docker line in fuzz/README.md. The
-  # four parser targets, 10 minutes each, corpus carried between nights in
-  # the cache, crashers in the run's artifacts. Advisory: a crasher is a
+  # four parser targets, 10 minutes each, corpus carried between nights as
+  # an artifact, crashers in the run's artifacts. Advisory: a crasher is a
   # warning here and an issue for a human. fuzz_tool_stream is not here: it
   # needs tool_call.cpp, whose utils.h pulls httplib and whose utils.cpp pulls
   # imp/imp.h: the chain ends at the engine, so a CPU-only build of it is a
@@ -956,24 +956,45 @@ jobs:
     # nothing and fuzzed nothing from its first night (2026-09-08) on.
     container:
       image: ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d # 26.04
+    # actions: read lists and downloads the previous run's fuzz-corpus artifact.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Toolchain
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            cmake ninja-build git ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev
+            cmake ninja-build git ca-certificates curl jq libcurl4-openssl-dev libjpeg-turbo8-dev
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: "clang + libFuzzer (pin: scripts/install_llvm.sh)"
         run: bash scripts/install_llvm.sh clang libclang-rt
 
+      # The corpus travels as an artifact (30 days), not a cache: CI's ccache entries evicted
+      # the cache entry before the next night (`Cache not found` in 2 of 2 nightlies).
+      # Fail-open: no artifact or an API error starts from an empty corpus.
+      - name: Find the newest corpus artifact
+        id: corpus
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts?name=fuzz-corpus&per_page=20" \
+            | jq -r '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .workflow_run.id // empty')" \
+            || { echo "::warning::artifact list failed: starting from an empty corpus"; run_id=""; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "corpus from run: ${run_id:-<none>}"
+
       - name: Restore the corpus
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.corpus.outputs.run_id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: fuzz-corpus
           path: fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          run-id: ${{ steps.corpus.outputs.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Build the parser targets
         run: |
@@ -991,6 +1012,16 @@ jobs:
             ./build-fuzz/$t -max_total_time=600 -artifact_prefix="fuzz/crashes/$t-" "fuzz/corpus/$t" \
               || echo "::warning::$t found a crasher (see the fuzz-crashes artifact)"
           done
+          find fuzz/corpus -type f | awk -F/ '{n[$3]++} END {for (t in n) printf "corpus %s: %d files\n", t, n[t]}'
+
+      - name: Keep the corpus
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-corpus
+          path: fuzz/corpus
+          retention-days: 30
+          if-no-files-found: ignore
 
       - name: Keep the crashers
         if: always()
