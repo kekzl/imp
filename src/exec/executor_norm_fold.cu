@@ -83,12 +83,12 @@ NvFP4NormFoldIn GraphExecutor::norm_fold_take_(const Tensor& norm_w, const Tenso
 
 NvFP4NormFoldIn GraphExecutor::norm_fold_or_norm_(bool allow, const Tensor& h, const Tensor& w, Tensor& no,
                                                   TensorID consumer_id, int n, float eps,
-                                                  cudaStream_t stream) {
+                                                  const GemmMode& mode, cudaStream_t stream) {
     NvFP4NormFoldIn f = norm_fold_take_(w, no, h, eps);
     if (!allow)
         f = {};
     if (!f.ssq)
-        rmsnorm_for_smallm_(h, w, no, consumer_id, n, eps, stream, norm_w_off_);
+        rmsnorm_for_smallm_(h, w, no, consumer_id, n, eps, mode, stream, norm_w_off_);
     return f;
 }
 

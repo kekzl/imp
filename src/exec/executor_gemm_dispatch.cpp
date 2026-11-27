@@ -1,11 +1,13 @@
 // executor_gemm_dispatch.cu — GEMM dispatch entry for the executor.
 #include "core/dispatch_policy.h"
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <utility>
 // Extracted from executor_kernels.cu (D3, structural-debt audit): the
 // WeightHandle-keyed GEMM dispatch (gemm_via_handle_) and its uncached
 // dequant->cuBLAS safety-net fallback, pulled out of the kernel grab-bag.
+#include "compute/dispatch_record.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_gemv_helpers.h"
@@ -116,8 +118,8 @@ static bool source_gemv(const WeightHandle& h, const Tensor& input, Tensor& outp
     return GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok;
 }
 
-static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, Tensor& output,
-                                   const GemmContext& ctx, bool decode_rows, void* ws, size_t ws_size) {
+static DensePath gemm_handle_last_route(const WeightHandle& h, const Tensor& input, Tensor& output,
+                                        const GemmContext& ctx, bool decode_rows, void* ws, size_t ws_size) {
     if (h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.payload.cutlass_nvfp4.sf == nullptr &&
         h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
         static LogOnce logged;
@@ -126,10 +128,11 @@ static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, T
                          qtype_name(h.source_qtype), static_cast<long long>(input.shape[0]), ctx.beta);
         }
         gguf_source_fallback(h, input, output, ctx, decode_rows);
-        return;
+        return DensePath::GGUF_SOURCE_NO_SFATOM;
     }
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta, ws, ws_size, ctx.stream,
                        ctx.nvfp4_dequant_ws());
+    return DensePath::GENERIC_DISPATCH;
 }
 
 // One NVFP4 prefill GEMM (own tile, cuBLASLt on refusal) via the kernel registry: quantizes `input`
@@ -185,6 +188,7 @@ void GraphExecutor::gemm_nvfp4_prequant_(TensorID id, const Tensor& input, const
                                                    act, act_sf);
     IMP_CHECK(ok, "gemm_nvfp4_prequant_: %s M=%d refused, no FP16 input to fall back on",
               tensor_kind_name(h.kind), M);
+    dispatch_record::set_dense(h.kind, DensePath::NVFP4_PREQUANT);
 }
 
 // gemm.nvfp4_gdn_proj_prefill: an FP16-primary handle with an NVFP4 prefill copy (phase 3d,
@@ -408,7 +412,27 @@ void GraphExecutor::rebind_streamed_sources_(int layer) {
 void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                      Tensor& output, const GemmContext& ctx) {
     const auto& h = registry_.handle(id);
+    dispatch_record::set_dense(h.kind, gemm_via_handle_(h, input, output, ctx));
+}
 
+void GraphExecutor::record_dense_(std::initializer_list<TensorID> ids, DensePath p) const {
+    (void)record_dense_if_(true, ids.begin(), static_cast<int>(ids.size()), p);
+}
+
+// The widest sibling launch is gemv_dp4a_multi (kDp4aMultiMaxSegs = 4 weights).
+bool GraphExecutor::record_dense_if_(bool ok, const TensorID* ids, int n, DensePath p) const {
+    TensorKind kinds[8];
+    int k = 0;
+    for (int i = 0; ok && i < n && k < static_cast<int>(std::size(kinds)); ++i) {
+        if (ids[i] >= 0 && ids[i] < static_cast<TensorID>(registry_.size()))
+            kinds[k++] = registry_.handle(ids[i]).kind;
+    }
+    dispatch_record::set_dense_each(kinds, k, p);
+    return ok;
+}
+
+DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& input, Tensor& output,
+                                          const GemmContext& ctx) {
     // Activation calibration ([calibration] enabled). Placed before the tier
     // switch so the statistic is the activation the weight consumes, not
     // whatever a particular tier's kernel happens to materialise.
@@ -418,10 +442,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // MXFP8 prefill copy of an F16 GDN projection (gemm.mxfp8_gdn_proj_prefill): the same
     // gate as the NVFP4 copy below, checked first. Quantizes the activation into the MXFP8
     // scratch on every call (ssm_in and gdn_gate share one input; the dedupe is a later lever).
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_mxfp8_prefill.contains(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && h.entries.mxfp8_prefill != nullptr) {
         const int Mp = static_cast<int>(input.shape[0]);
         const int Kp = static_cast<int>(input.shape[1]);
-        const auto& cw = wcache_.cutlass_mxfp8_prefill.find(h.source_data)->second;
+        const auto& cw = *h.entries.mxfp8_prefill;
         const auto& qs = qscratch_;
         bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                       !ctx.mode.spec_verify && h.source_qtype == QType::F16 &&
@@ -436,35 +460,34 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
         log_mxfp8_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
-            return;
+            return DensePath::MXFP8_PREFILL_COPY;
     }
 
     // NVFP4 prefill copy of an F16 GDN projection (gemm.nvfp4_gdn_proj_prefill). Ahead of the
     // tier split: on Qwen3.6-35B ssm_in and gdn_gate sit in no cache (tier Undefined) and
     // ssm_out carries the FP8 sidecar (tier FP16). Declines (beta=1, M<=32, spec verify, no
     // scratch) fall through to the route the handle had before.
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_nvfp4_prefill.contains(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && h.entries.nvfp4_prefill != nullptr) {
         const int Mp = static_cast<int>(input.shape[0]);
-        auto it = wcache_.cutlass_nvfp4_prefill.find(h.source_data);
         const bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                             nvfp4_prefill_copy_routes(h, Mp, ctx.mode.spec_verify, wcache_, qscratch_) &&
-                            dispatch_cutlass_nvfp4_prefill(it->second, input, output, ctx, Mp);
+                            dispatch_cutlass_nvfp4_prefill(*h.entries.nvfp4_prefill, input, output, ctx, Mp);
         log_nvfp4_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
-            return;
+            return DensePath::NVFP4_PREFILL_COPY;
     }
 
     // Phase 4b freed the source: rebuild it from a copy, never read source_data.
     if (h.source_released) {
         released_source_gemm_(h, input, output, ctx);
-        return;
+        return DensePath::RELEASED_SOURCE;
     }
 
     if (h.primary_tier == StorageTier::Undefined) {
         // Q4_K token GEMV without an FP16 tier (Q4_K in place): the same kernel the FP16 tier runs.
         if (h.source_qtype == QType::Q4_K && input.shape[0] == 1 && ctx.beta == 0.0f &&
             source_gemv(h, input, output, ctx))
-            return;
+            return DensePath::SOURCE_GEMV;
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         // Preserve semantic identity + NVFP4 scale sidecars so the uncached
         // fallback can (a) diagnose which weight leaked and (b) route packed
@@ -473,7 +496,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         weight.scales = h.source_scales;
         weight.tensor_scale = h.source_tensor_scale;
         gemm_dispatch_uncached_fallback(input, weight, output, ctx, ctx.mode.decode_rows);
-        return;
+        return DensePath::UNCACHED_FALLBACK;
     }
 
     int M = static_cast<int>(input.shape[0]);
@@ -490,7 +513,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                     gemv_nvfp4_kpar(*nv, reinterpret_cast<const half*>(input.data),
                                     reinterpret_cast<half*>(output.data), static_cast<int>(nv->N),
                                     static_cast<int>(nv->K), ctx.stream);
-                    return;
+                    return DensePath::GEMV_NVFP4;
                 }
                 break;
             }
@@ -502,11 +525,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                     int64_t wshape[2] = {h.shape[0],
                         (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
                     Tensor fp8_w(fp8->weight.data, QType::FP8_E4M3, 2, wshape, true);
-                    if (fp8->d_row_scales)
+                    if (fp8->d_row_scales) {
                         gemv_fp8_rowscale(fp8_w, input, output, fp8->d_row_scales, ctx.stream);
-                    else
-                        gemv_fp8(fp8_w, input, output, fp8->host_scale, ctx.stream);
-                    return;
+                        return DensePath::GEMV_FP8_ROWSCALE;
+                    }
+                    gemv_fp8(fp8_w, input, output, fp8->host_scale, ctx.stream);
+                    return DensePath::GEMV_FP8;
                 }
                 break;
             }
@@ -524,7 +548,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                     reinterpret_cast<half*>(output.data),
                                     static_cast<int>(nv.N),
                                     static_cast<int>(nv.K), ctx.stream);
-                    return;
+                    return DensePath::GEMV_NVFP4_SOURCE;
                 }
                 break;
             }
@@ -534,16 +558,16 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 if (output.qtype == QType::F32)
                     break;
                 imp::gemv_dispatch(h, input, output, ctx.stream);
-                return;
+                return DensePath::GEMV_DISPATCH;
             case StorageTier::FP16: {
                 if (source_gemv(h, input, output, ctx))
-                    return;
+                    return DensePath::SOURCE_GEMV;
                 imp::gemv_dispatch(h, input, output, ctx.stream);
-                return;
+                return DensePath::GEMV_DISPATCH;
             }
             default:
                 imp::gemv_dispatch(h, input, output, ctx.stream);
-                return;
+                return DensePath::GEMV_DISPATCH;
         }
     }
 
@@ -574,7 +598,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 auto& fn = (ctx.beta == 1.0f) ? gemm_nvfp4_batched_acc : gemm_nvfp4_batched;
                 fn(*nv, reinterpret_cast<const half*>(input.data), reinterpret_cast<half*>(output.data),
                    static_cast<int>(h.shape[0]), static_cast<int>(h.shape[1]), M, ctx.stream);
-                return;
+                return DensePath::VERIFY_NVFP4_OVERLAY;
             }
         }
         // #1055: native ST-NVFP4 verify chunks. The NVFP4 tile prefill block serves
@@ -598,7 +622,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             fn(nv, reinterpret_cast<const half*>(input.data),
                reinterpret_cast<half*>(output.data), static_cast<int>(nv.N),
                static_cast<int>(nv.K), M, ctx.stream);
-            return;
+            return DensePath::VERIFY_NVFP4_SOURCE;
         }
 
         // Small-M NVFP4 GEMM: batched decode at
@@ -624,7 +648,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                       reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_.get(),
                                       ctx.stream,
                                       /*accumulate=*/ctx.beta == 1.0f))
-                    return;
+                    return DensePath::SMALLM_A16;
             }
             // smallm_policy.h: impl 3 = v2 on its single-stripe shapes, else the weight-streaming kernel
             // (ws, K % 64); impl 2 = v2 (K % 256); else the dequant+HMMA kernel on packed activations
@@ -670,7 +694,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 xq.K = K;
                 if (smallm_launch_a4(kern, nv, xq, reinterpret_cast<half*>(output.data), M, N, K,
                                      smallm_ws_.get(), ctx.beta, ctx.stream))
-                    return;
+                    return DensePath::SMALLM_A4;
             }
         }
 
@@ -683,10 +707,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // cuBLAS call). Other qtypes decline there; M = 1 keeps its route.
         const bool k_quant = h.source_qtype == QType::Q4_K || h.source_qtype == QType::Q5_K;
         if (prefill == StorageTier::FP16 && M <= 32 && (M >= 2 || k_quant) && h.source_data != nullptr &&
-            !wcache_.q8_planes_only.contains(h.source_data)) {  // dropped Q8_0 source
+            !h.entries.q8_planes_only) {  // dropped Q8_0 source
             Tensor w(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
             if (gemm_uncached_in_place(input, w, output, ctx, ctx.mode.decode_rows))
-                return;
+                return DensePath::GGUF_IN_PLACE;
         }
         if (prefill == StorageTier::FP16 && ctx.beta == 0.0f && M <= 64) {
             const auto* qs = ctx.qscratch;
@@ -702,13 +726,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                         gemm_q4k_dp4a_dense(h.source_data, reinterpret_cast<const half*>(input.data),
                                             reinterpret_cast<half*>(output.data), qs->q8_1_prefill_buf.data(),
                                             qs->d8_prefill_buf.data(), M, N, K, ctx.stream);
-                        return;
+                        return DensePath::DP4A_Q4K;
                     }
                     if (h.source_qtype == QType::Q5_K) {
                         gemm_q5k_dp4a_dense(h.source_data, reinterpret_cast<const half*>(input.data),
                                             reinterpret_cast<half*>(output.data), qs->q8_1_prefill_buf.data(),
                                             qs->d8_prefill_buf.data(), M, N, K, ctx.stream);
-                        return;
+                        return DensePath::DP4A_Q5K;
                     }
                 }
             }
@@ -717,7 +741,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (prefill == StorageTier::FP16) {
             if (const Fp16CacheEntry* fp16 = h.entries.fp16) {
                 gemm(input, *fp16, output, 1.0f, ctx.beta, ctx.stream);
-                return;
+                return DensePath::FP16_CACHE;
             }
             // FP16-resident or dequantable source with no cache entry: the source IS
             // the weight (e.g. only the fp8_ssm_proj decode sidecar exists). Routes
@@ -731,13 +755,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 weight.scales = h.source_scales;
                 weight.tensor_scale = h.source_tensor_scale;
                 gemm_dispatch_uncached_fallback(input, weight, output, ctx, ctx.mode.decode_rows);
-                return;
+                return DensePath::UNCACHED_FALLBACK;
             }
         }
         if (prefill == StorageTier::FP8) {
             if (const FP8CacheEntry* fp8 = h.entries.fp8) {
                 gemm_fp8_prefill_(h, *fp8, input, output, ctx);
-                return;
+                return DensePath::FP8_PREFILL;
             }
         }
     }
@@ -753,9 +777,9 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     if (M > 1 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype) &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4)) {
         if (imma_source_prefill(h, input, output, ctx, M, ctx.mode.decode_rows))
-            return;
+            return DensePath::IMMA_SOURCE;
         gguf_source_fallback(h, input, output, ctx, ctx.mode.decode_rows);
-        return;
+        return DensePath::GGUF_SOURCE_DEQUANT;
     }
 
     // gemm.nvfp4_prompt_a16_attn (B-85): FP16 activations on the W4A16 decode tile; alpha folds the
@@ -771,7 +795,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             IMP_LOG_INFO("nvfp4_prompt_a16_attn: W4A16 prompt GEMM ACTIVE (M=%d N=%lld K=%lld)", M,
                          static_cast<long long>(nv.N), static_cast<long long>(nv.K));
         }
-        return;
+        return DensePath::NVFP4_PROMPT_A16;
     }
 
     // ---- CUTLASS_NVFP4 tier prefill via GemmKernelRegistry (own tile GEMM, qscratch buffers) ----
@@ -779,13 +803,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // Act-quant dedupe (QKV / gate-up share one normed input, see the
         // with_act_quant_hint call sites) and the beta=1 decline live in the helper.
         if (dispatch_cutlass_nvfp4_prefill(cutlass_weight_of(h), input, output, ctx, M, h.act_scale))
-            return;
+            return DensePath::NVFP4_TILE;
         // FP8 fallback for CUTLASS_NVFP4 (legacy path)
         if (const FP8CacheEntry* fp8 = h.entries.fp8) {
             int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};
             Tensor fp8_w(fp8->weight.data, QType::FP8_E4M3, 2, wshape, true);
             gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, fp8->d_scale, ctx.stream);
-            return;
+            return DensePath::NVFP4_TIER_FP8;
         }
     }
 
@@ -807,15 +831,16 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         nv.N = h.shape[0];
         nv.K = h.shape[1] * 2;  // packed K/2 → logical K
         gemm_nvfp4(nv, input, output, ctx.stream, ctx.beta, ctx.nvfp4_dequant_ws());
-        return;
+        return DensePath::NVFP4_DEQUANT;
     }
 
     if ((M > 1 || output.qtype == QType::F32) && h.primary_tier == StorageTier::MXFP4) {
         mxfp4_prefill_gemm(qscratch_, h, input, output, ctx);
-        return;
+        return DensePath::MXFP4_PREFILL;
     }
 
-    gemm_handle_last_route(h, input, output, ctx, ctx.mode.decode_rows, ws_.shared(), ws_.shared_size());
+    return gemm_handle_last_route(h, input, output, ctx, ctx.mode.decode_rows, ws_.shared(),
+                                  ws_.shared_size());
 }
 
 // Producer-side NVFP4 quantize fusion (batched decode): the small-M block
@@ -876,7 +901,7 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     if (input.qtype == QType::F16 && e.d_scale) {
         if (const Fp8ActScale a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
             Tensor fp8_in(qscratch_.fp8_act.get(), QType::FP8_E4M3, input.ndim, input.shape, true);
-            gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.stream);
+            gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.mode, ctx.stream);
             return;
         }
     }
@@ -897,15 +922,16 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, e.d_scale, ctx.stream);
 }
 
-void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, Fp8ActScale a,
-                                const float* w_scale, cudaStream_t stream) {
+DensePath GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta,
+                                     Fp8ActScale a, const float* w_scale, const GemmMode& mode,
+                                     cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const int N = static_cast<int>(w8.shape[0]);
     const bool own_ok = out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() && a && w_scale;
     // gemm.fp8_smallm_max_m: decode rows only (prompt rows stay on the M-invariant Lt pin, #2152).
     const int smallm_max = dispatch_policy().gemm.fp8_smallm_max_m;
-    if ((cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= smallm_max && own_ok &&
+    if (fp8_smallm_mode_rows(mode, fp8x8_min_rows_) && M <= smallm_max && own_ok &&
         gemm_fp8_smallm(a8.data, w8.data, a.d, w_scale, beta, static_cast<half*>(out.data), M, N, K, stream,
                         a.per_row)) {
         static LogOnce logged;  // activity proof, once
@@ -913,7 +939,7 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
             IMP_LOG_INFO("gemm.fp8_smallm_max_m: own FP8 small-M GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M,
                          N, K, beta);
         }
-        return;
+        return DensePath::FP8_SMALLM;
     }
     // imp::cfg::kFp8TileMinM: own tile from M 2048 (Qwen3-8B-FP8 pp4096 +0.6 %); below, cuBLASLt (pp512 own
     // -18
@@ -927,23 +953,24 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
         if (logged.first()) {
             IMP_LOG_INFO("fp8_tile: own FP8 prefill GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M, N, K, beta);
         }
-        return;
+        return DensePath::FP8_TILE;
     }
     if (a.per_row)  // quantize_act_fp8_ checked K % 64 and N % 8: unreachable unless a sibling's N is odd
         throw_runtime_error(
             "gemm_fp8x8_: FP8 per-token activation scales, no own GEMM serves M=%d N=%d K=%d beta=%.0f", M, N,
             K, beta);
     gemm_cublaslt(a8, w8, out, 1.0f, beta, a.d, w_scale, stream);
+    return DensePath::FP8_CUBLASLT;
 }
 
-void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor* const* out,
-                                      const float* const* w_scale, int count, Fp8ActScale a,
-                                      cudaStream_t stream) {
+void GraphExecutor::gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, const Tensor* w8,
+                                      Tensor* const* out, const float* const* w_scale, int count,
+                                      Fp8ActScale a, const GemmMode& mode, cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const auto& g = dispatch_policy().gemm;
-    bool ok = (cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= g.fp8_smallm_max_m &&
-              a8.is_contiguous() && count >= 2 && count <= kFp8SmallMMaxSiblings;
+    bool ok = fp8_smallm_mode_rows(mode, fp8x8_min_rows_) && M <= g.fp8_smallm_max_m && a8.is_contiguous() &&
+              count >= 2 && count <= kFp8SmallMMaxSiblings;
     Fp8SmallMSibling t[kFp8SmallMMaxSiblings] = {};
     for (int i = 0; ok && i < count; ++i) {
         ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();
@@ -955,10 +982,11 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
             IMP_LOG_INFO("fp8_smallm_multi: own FP8 small-M sibling GEMM ACTIVE (M=%d count=%d K=%d)", M,
                          count, K);
         }
+        (void)record_dense_if_(true, ids, count, DensePath::FP8_SMALLM_MULTI);
         return;
     }
     for (int i = 0; i < count; ++i)
-        gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], stream);
+        record_dense_({ids[i]}, gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], mode, stream));
 }
 
 Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,

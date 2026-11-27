@@ -641,13 +641,10 @@ bool sparse_score_uses_split(int n_kv_heads, int head_dim) {
     return split_score_kernel<ScoreMeanStd>(n_kv_heads, head_dim) != nullptr;
 }
 
-void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
-                                         const void* k_scale_base, int64_t sc_layer_stride_bytes,
-                                         void* minmax_base, int64_t mm_layer_stride_bytes,
-                                         const int* positions, const int* block_tables,
-                                         const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
-                                         int block_size, int n_tokens, int max_blocks_per_seq,
-                                         int n_sequences, cudaStream_t stream) {
+void sparse_update_key_minmax_all_layers(const SparseKeyMinmaxArgs& a) {
+    const auto& [cache_dtype, k_base, k_layer_stride_bytes, k_scale_base, sc_layer_stride_bytes, minmax_base,
+                 mm_layer_stride_bytes, positions, block_tables, seq_offsets, n_layers, n_kv_heads, head_dim,
+                 block_size, n_tokens, max_blocks_per_seq, n_sequences, stream] = a;
     if (n_tokens <= 0 || n_layers <= 0)
         return;
     const int row_elems = n_kv_heads * head_dim;
@@ -750,12 +747,10 @@ int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks) 
     return ((budget_blocks - 1) * block_size) + (past_len - ((n_blocks - 1) * block_size));
 }
 
-int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const void* minmax_layer,
-                               const int* past_block_table, int past_len, int n_heads, int n_kv_heads,
-                               int head_dim, int block_size, int capacity_blocks, int budget_blocks,
-                               int sink_blocks, int recent_blocks, float std_coef, float* scores_scratch,
-                               float* agg_scratch, int* out_block_table, int* out_ctx_scratch,
-                               cudaStream_t stream) {
+int sparse_prefill_select_past(const SparsePrefillSelectArgs& a) {
+    const auto& [q, n_rows, sample_rows, minmax_layer, past_block_table, past_len, n_heads, n_kv_heads,
+                 head_dim, block_size, capacity_blocks, budget_blocks, sink_blocks, recent_blocks, std_coef,
+                 scores_scratch, agg_scratch, out_block_table, out_ctx_scratch, stream] = a;
     const int n_blocks = (past_len + block_size - 1) / block_size;
     if (n_rows <= 0 || past_len <= 0 || n_blocks > capacity_blocks)
         return -1;

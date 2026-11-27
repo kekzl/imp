@@ -668,8 +668,20 @@ TEST_F(GdnBatchedScanTest, GroupedConvCommitsPerSlotAndSnapshotsGroupZero) {
     cudaMemset(d_snap, 0, win * sizeof(float));
     Tensor xg{}; xg.data = d_x; xg.ndim = 2; xg.shape[0] = static_cast<int64_t>(rows); xg.shape[1] = channels;
     xg.qtype = QType::F16;
-    ssm_conv1d_prefill_f32_silu_grouped(d_pool, d_slots, static_cast<int64_t>(win), n_seq, xg, w, b, d_out,
-                                        ksize, nullptr, d_lens, d_snap, d_lens + 1, d_prev);
+    ssm_conv1d_prefill_f32_silu_grouped({.conv_state_pool = d_pool,
+                                         .seq_slots = d_slots,
+                                         .slot_stride = static_cast<int64_t>(win),
+                                         .n_seq = n_seq,
+                                         .x_in = &xg,
+                                         .weight = &w,
+                                         .bias = &b,
+                                         .x_out_f32 = d_out,
+                                         .conv_kernel = ksize,
+                                         .stream = nullptr,
+                                         .d_real_n = d_lens,
+                                         .conv_snap = d_snap,
+                                         .d_snap_n = d_lens + 1,
+                                         .conv_prev = d_prev});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> pool_b(pool_elems), out_b(rows * channels), snap_b(win);
     cudaMemcpy(pool_b.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
@@ -908,9 +920,22 @@ TEST_F(GdnBatchedScanTest, VerifyGroupsConvCommitsToSpareAndSnapshotsInPlace) {
     cudaMemset(d_out, 0, rows * channels * sizeof(float));
     Tensor xg{}; xg.data = d_x; xg.ndim = 2; xg.shape[0] = static_cast<int64_t>(rows); xg.shape[1] = channels;
     xg.qtype = QType::F16;
-    ssm_conv1d_prefill_f32_silu_grouped(d_pool, d_live, static_cast<int64_t>(win), n_seq, xg, w, b, d_out, ksize,
-                                        nullptr, d_lens, /*conv_snap=*/nullptr, d_lens + 1, /*conv_prev=*/nullptr,
-                                        /*out_slots=*/d_spare, /*snap_slots=*/d_live);
+    ssm_conv1d_prefill_f32_silu_grouped({.conv_state_pool = d_pool,
+                                         .seq_slots = d_live,
+                                         .slot_stride = static_cast<int64_t>(win),
+                                         .n_seq = n_seq,
+                                         .x_in = &xg,
+                                         .weight = &w,
+                                         .bias = &b,
+                                         .x_out_f32 = d_out,
+                                         .conv_kernel = ksize,
+                                         .stream = nullptr,
+                                         .d_real_n = d_lens,
+                                         .conv_snap = nullptr,
+                                         .d_snap_n = d_lens + 1,
+                                         .conv_prev = nullptr,
+                                         .out_slots = d_spare,
+                                         .snap_slots = d_live});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> got(pool_elems), out_b(rows * channels);
     cudaMemcpy(got.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);

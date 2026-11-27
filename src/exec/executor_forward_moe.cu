@@ -422,6 +422,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
 
 void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     MoeFfnContext ctx;
+    ctx.mode = gemm_ctx_(stream).mode;
 
     moe_ffn_phase1_setup_();
     moe_ffn_phase2_state_and_norm_(layer, stream, ctx);
@@ -684,14 +685,14 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
     // Gemma-4 decode: the shared MLP input norm + its quantize, then one tail launch for both branch
     // post-norms, the add, post_ffn_norm, layer_out_scale and the next attn_norm
     // (executor_fp32_residual.cpp).
-    if (!ctx.residual_fused && fp32_tail_ok_(layer, ctx.n)) {
-        rmsnorm_for_smallm_(ctx.r, ly.ffn_norm, ctx.no, ly.w_up_shared_id, ctx.n, ctx.eps, stream,
+    if (!ctx.residual_fused && fp32_tail_ok_(layer, ctx.n, ctx.mode)) {
+        rmsnorm_for_smallm_(ctx.r, ly.ffn_norm, ctx.no, ly.w_up_shared_id, ctx.n, ctx.eps, ctx.mode, stream,
                             norm_w_off_);
         const Tensor sd = shared_expert_core_(layer, stream, ctx.n, ctx.d, ctx.eps, ctx.no,
                                               moe_.expert_gate.data, moe_.expert_up.data,
                                               moe_.expert_swiglu.data, moe_.expert_down.data,
                                               /*raw=*/true);
-        fp32_tail_fused_(layer, ctx.h, sd, ctx.n, stream);
+        fp32_tail_fused_(layer, ctx.h, sd, ctx.n, ctx.mode, stream);
     } else {
         moe_ffn_phase8_unfused_(layer, stream, ctx);
     }

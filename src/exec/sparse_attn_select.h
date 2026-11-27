@@ -21,13 +21,28 @@ namespace imp {
 // consecutive layers' block-0 pointers (uniform scalar geometry only). k_scale_base/
 // sc_layer_stride_bytes carry the NVFP4 UE4M3 group scales (nullptr/0 for F16 and FP8):
 // packed nibbles alone don't define a key value, so the metadata needs both regions.
-void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
-                                         const void* k_scale_base, int64_t sc_layer_stride_bytes,
-                                         void* minmax_base, int64_t mm_layer_stride_bytes,
-                                         const int* positions, const int* block_tables,
-                                         const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
-                                         int block_size, int n_tokens, int max_blocks_per_seq,
-                                         int n_sequences, cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); all required except seq_offsets and the scale pair.
+struct SparseKeyMinmaxArgs {
+    QType cache_dtype = QType::F16;
+    const void* k_base = nullptr;
+    int64_t k_layer_stride_bytes = 0;
+    const void* k_scale_base = nullptr;
+    int64_t sc_layer_stride_bytes = 0;
+    void* minmax_base = nullptr;
+    int64_t mm_layer_stride_bytes = 0;
+    const int* positions = nullptr;
+    const int* block_tables = nullptr;
+    const int* seq_offsets = nullptr;
+    int n_layers = 0;
+    int n_kv_heads = 0;
+    int head_dim = 0;
+    int block_size = 0;
+    int n_tokens = 0;
+    int max_blocks_per_seq = 0;
+    int n_sequences = 0;
+    cudaStream_t stream = nullptr;
+};
+void sparse_update_key_minmax_all_layers(const SparseKeyMinmaxArgs& a);
 
 // Scores every context block of every sequence against current queries and builds a
 // compacted block table (ascending order, at most budget_blocks entries per sequence;
@@ -59,11 +74,29 @@ int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks);
 // the budget it copies the table (dense equivalent). Returns the past token count to attend, or
 // -1 when the table exceeds capacity_blocks. Scratch: scores [64, capacity], agg [capacity],
 // out_block_table [capacity], out_ctx_scratch [2] (device).
-int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const void* minmax_layer,
-                               const int* past_block_table, int past_len, int n_heads, int n_kv_heads,
-                               int head_dim, int block_size, int capacity_blocks, int budget_blocks,
-                               int sink_blocks, int recent_blocks, float std_coef, float* scores_scratch,
-                               float* agg_scratch, int* out_block_table, int* out_ctx_scratch,
-                               cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); all required.
+struct SparsePrefillSelectArgs {
+    const half* q = nullptr;
+    int n_rows = 0;
+    int sample_rows = 0;
+    const void* minmax_layer = nullptr;
+    const int* past_block_table = nullptr;
+    int past_len = 0;
+    int n_heads = 0;
+    int n_kv_heads = 0;
+    int head_dim = 0;
+    int block_size = 0;
+    int capacity_blocks = 0;
+    int budget_blocks = 0;
+    int sink_blocks = 0;
+    int recent_blocks = 0;
+    float std_coef = 0.0f;
+    float* scores_scratch = nullptr;
+    float* agg_scratch = nullptr;
+    int* out_block_table = nullptr;
+    int* out_ctx_scratch = nullptr;
+    cudaStream_t stream = nullptr;
+};
+int sparse_prefill_select_past(const SparsePrefillSelectArgs& a);
 
 }  // namespace imp

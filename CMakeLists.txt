@@ -1325,7 +1325,7 @@ if(IMP_BUILD_TESTS)
         tests/test_weight_tier_entries.cpp
         # B-115: the split-K reduce's Q8_1 epilogue is a per-call argument, taken once per call.
         tests/test_paged_q8_epilogue.cpp
-        # B-133: GDN batched scan, KV-write RoPE and QK-norm RoPE argument structs (field count, defaults).
+        # B-133: launcher argument structs (GDN / SSM scans, RoPE, sparse select, APA paged; field count, defaults).
         tests/test_launcher_args.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         # FP16 FMHA tile selector: same invariant for fmha_sm120_prefill (#2243).

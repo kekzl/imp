@@ -64,6 +64,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
         return false;
     if (lora_ != nullptr || calib_)
         return false;
+    const TensorID ab_ids[2] = {alpha_id, beta_id};
     if (!narrow_operands_ok(input, alpha_out, beta_out))
         return false;
     const int64_t K = input.shape[1];
@@ -93,7 +94,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
             IMP_LOG_INFO("gdn alpha/beta prefill GEMM ACTIVE (M=%d, K=%lld, N=%lld x 2)", M, (long long)K,
                          (long long)N);
         }
-        return ok;
+        return record_dense_if_(ok, ab_ids, 2, DensePath::F16_NARROW);
     }
     const bool ok = gemm_f16_narrow_smallm(static_cast<const half*>(input.data), M, static_cast<int>(K), wa,
                                            static_cast<half*>(alpha_out.data), static_cast<int>(N), wb,
@@ -104,7 +105,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
         IMP_LOG_INFO("gdn alpha/beta narrow GEMM ACTIVE (M=%d, K=%lld, N=%lld x 2)", M, (long long)K,
                      (long long)N);
     }
-    return ok;
+    return record_dense_if_(ok, ab_ids, 2, DensePath::F16_NARROW);
 }
 
 // Mirrors the M=1, beta=0 NVFP4 cases of gemm_via_handle_ (executor_gemm_dispatch.cu).
@@ -152,9 +153,9 @@ static bool gdn_ab_rows(const TransformerLayer& ly, const Registry& reg, int64_t
 }
 
 bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
-                                            Tensor& gate_out, int n_heads, cudaStream_t stream,
-                                            const NvFP4NormFoldIn& fold) {
-    if (cur_mode_.spec_verify || calib_ || n_heads <= 0)
+                                            Tensor& gate_out, int n_heads, const GemmMode& mode,
+                                            cudaStream_t stream, const NvFP4NormFoldIn& fold) {
+    if (!m1_fusion_mode_ok(mode) || calib_ || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -182,7 +183,8 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
         IMP_LOG_INFO("gdn M=1 fused input GEMV ACTIVE (K=%lld, rows %lld + %lld + 2 x %lld)", (long long)K,
                      (long long)w_in.N, (long long)w_gate.N, (long long)N);
     }
-    return ok;
+    const TensorID ids[4] = {ly.ssm_in_id, ly.gdn_gate_id, ly.gdn_alpha_id, ly.gdn_beta_id};
+    return record_dense_if_(ok, ids, 4, DensePath::GDN_INPUT_GEMV_NVFP4);
 }
 
 int GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor& h, Tensor& no, Tensor& proj,
@@ -197,10 +199,11 @@ int GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor&
     Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
     // M=1: in_proj, gate, alpha and beta in one GEMV
     // launch; alpha/beta land in the 4-call layout of step 4 of run_gdn.
-    if (try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
+    if (try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, ctx.mode, stream, in_fold))
         return kGdnM1Fused | kGdnGateDone;
     // FP8 in/gate (mixed NVFP4 + FP8 checkpoints): the same four projections on the folded row.
-    if (in_fold.ssq && try_gdn_input_fp8_fold_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
+    if (in_fold.ssq &&
+        try_gdn_input_fp8_fold_m1_(ly, no, proj, gate_early, n_heads, ctx.mode, stream, in_fold))
         return kGdnM1Fused | kGdnGateDone;
     if (in_fold.ssq)
         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
@@ -247,10 +250,12 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
         return 0;
     Dp4aGemvSeg segs[kDp4aMultiMaxSegs];
     int n = 0;
+    TensorID seg_ids[kDp4aMultiMaxSegs];
     int done = 0;
     auto add = [&](TensorID id, int64_t N, half* y, int bit) {
         QType qt = QType::NONE;
         if (const void* w = dp4a_m1_source_(id, N, K, qt)) {
+            seg_ids[n] = id;
             segs[n++] = {w, qt, y, static_cast<int>(N)};
             done |= bit;
         }
@@ -280,6 +285,7 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
         IMP_LOG_INFO("gdn M=1 dp4a multi input GEMV ACTIVE (K=%lld, %d weights, mask %d)", (long long)K, n,
                      done);
     }
+    (void)record_dense_if_(true, seg_ids, n, DensePath::DP4A_MULTI_M1);
     return done;
 }
 
@@ -311,13 +317,14 @@ bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int
         IMP_LOG_INFO("M=1 dp4a multi GEMV ACTIVE (K=%lld, %d weights, rows %d + %d)", (long long)K, n,
                      segs[0].rows, segs[1].rows);
     }
-    return true;
+    return record_dense_if_(true, ids, n, DensePath::DP4A_MULTI_M1);
 }
 
-bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const {
+bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h,
+                                            const GemmMode& mode) const {
     if (n != 1 || h.qtype != QType::F16)
         return false;
-    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr)
+    if (!m1_fusion_mode_ok(mode) || calib_ || lora_ != nullptr)
         return false;
     NvFP4QuantResult w;
     if (nvfp4_decode_weight_(ly.ssm_out_id, w))
@@ -346,9 +353,9 @@ bool GraphExecutor::fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const {
 }
 
 bool GraphExecutor::try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
-                                               Tensor& gate_out, int n_heads, cudaStream_t stream,
-                                               const NvFP4NormFoldIn& fold) {
-    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr || n_heads <= 0)
+                                               Tensor& gate_out, int n_heads, const GemmMode& mode,
+                                               cudaStream_t stream, const NvFP4NormFoldIn& fold) {
+    if (!m1_fusion_mode_ok(mode) || calib_ || lora_ != nullptr || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -392,6 +399,8 @@ bool GraphExecutor::try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const
             "%lld)",
             (long long)K, (long long)w_in.N, (long long)w_gate.N, (long long)N);
     }
+    record_dense_({ly.ssm_in_id, ly.gdn_gate_id, ly.gdn_alpha_id, ly.gdn_beta_id},
+                  DensePath::GDN_INPUT_GEMV_FP8);
     return true;
 }
 
@@ -410,6 +419,7 @@ void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, 
             IMP_LOG_INFO("gdn M=1 FP8 out-projection with residual epilogue ACTIVE (N=%lld, K=%lld)",
                          (long long)w8.N, (long long)w8.K);
         }
+        record_dense_({ly.ssm_out_id}, DensePath::GEMV_FP8_RESIDUAL);
         return;
     }
     if (!nvfp4_decode_weight_(ly.ssm_out_id, w) || w.K != y.shape[1] || w.N != h.shape[1] ||
@@ -425,12 +435,13 @@ void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, 
         IMP_LOG_INFO("gdn M=1 out-projection with residual epilogue ACTIVE (N=%lld, K=%lld)", (long long)w.N,
                      (long long)w.K);
     }
+    record_dense_({ly.ssm_out_id}, DensePath::GEMV_NVFP4_RESIDUAL);
 }
 
 bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out,
-                                           Tensor& k_out, Tensor& v_out, cudaStream_t stream,
-                                           const NvFP4NormFoldIn& fold) {
-    if (cur_mode_.spec_verify || calib_)
+                                           Tensor& k_out, Tensor& v_out, const GemmMode& mode,
+                                           cudaStream_t stream, const NvFP4NormFoldIn& fold) {
+    if (!m1_fusion_mode_ok(mode) || calib_)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || q_out.qtype != QType::F16 ||
         k_out.qtype != QType::F16 || v_out.qtype != QType::F16)
@@ -451,6 +462,7 @@ bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Ten
         IMP_LOG_INFO("attention M=1 fused q|k|v NVFP4 GEMV ACTIVE (K=%lld, rows %lld + %lld + %lld)",
                      (long long)K, (long long)wq.N, (long long)wk.N, (long long)wv.N);
     }
+    record_dense_({ly.wq_id, ly.wk_id, ly.wv_id}, DensePath::QKV_GEMV_NVFP4);
     return true;
 }
 

@@ -58,6 +58,34 @@ TEST(GemmMode, MakeCarriesTheModeAndGatesVerifySmallMPerSite) {
     EXPECT_FALSE(GemmContext::make(nullptr, wc, qs, GemmMode{.decode_rows = true}).spec_verify_small_m);
 }
 
+// The decision helpers the executor's non-GEMM sites call with their caller's ctx.mode (audit D-7
+// slice 2): each answer follows the mode argument, nothing else.
+TEST(GemmMode, FusionRowRulesFollowTheModeArgument) {
+    using imp::fp32_resid_mode_rows;
+    using imp::fp8_smallm_mode_rows;
+    using imp::m1_fusion_mode_ok;
+    const GemmMode prompt{};
+    const GemmMode decode{.decode_rows = true};
+    const GemmMode verify{.spec_verify = true, .decode_rows = true};
+
+    // FP8 x FP8 small-M: decode / verify rows, prompt rows only under the M=1 floor.
+    EXPECT_FALSE(fp8_smallm_mode_rows(prompt, 2));
+    EXPECT_TRUE(fp8_smallm_mode_rows(decode, 2));
+    EXPECT_TRUE(fp8_smallm_mode_rows(verify, 2));
+    EXPECT_TRUE(fp8_smallm_mode_rows(prompt, 1));
+
+    // FP32-residual fusion: one row always, more rows only as decode / verify rows.
+    EXPECT_TRUE(fp32_resid_mode_rows(prompt, 1));
+    EXPECT_FALSE(fp32_resid_mode_rows(prompt, 8));
+    EXPECT_TRUE(fp32_resid_mode_rows(decode, 8));
+    EXPECT_FALSE(fp32_resid_mode_rows(decode, 0));
+
+    // M=1 launch fusions: off in a verify chunk only.
+    EXPECT_TRUE(m1_fusion_mode_ok(prompt));
+    EXPECT_TRUE(m1_fusion_mode_ok(decode));
+    EXPECT_FALSE(m1_fusion_mode_ok(verify));
+}
+
 TEST(GemmMode, DerivedContextsKeepTheMode) {
     imp::WeightCaches wc;
     imp::QuantScratch qs;

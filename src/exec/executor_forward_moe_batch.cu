@@ -1141,7 +1141,7 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
         // Decode rows, GeGLU: the down input's small-M NVFP4 quantize inside the activation kernel
         // (fused GeGLU quant); declines to geglu() + the down GEMM's own quantize.
         if (cfg.ffn_activation == FFNActivation::GEGLU && n <= 32)
-            (void)swiglu_for_smallm_(sh_gate, sh_up, sh_swiglu, ly.w_down_shared_id, n, stream,
+            (void)swiglu_for_smallm_(sh_gate, sh_up, sh_swiglu, ly.w_down_shared_id, n, ctx.mode, stream,
                                      /*gelu=*/true);
         else if (cfg.ffn_activation == FFNActivation::GEGLU)
             geglu(sh_gate, sh_up, sh_swiglu, stream);

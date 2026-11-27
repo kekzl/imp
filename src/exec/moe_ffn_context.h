@@ -4,6 +4,7 @@
 #include "core/qtype.h"          // QType
 #include "compute/moe_routing.h"         // MoeRoutingOwned
 #include "exec/expert_cache.h"           // kExpertProjCount
+#include "exec/gemm_mode.h"              // GemmMode
 #include "exec/nvfp4_expert_offload.h"  // StagedProj
 #include <cstddef>
 
@@ -22,6 +23,7 @@ struct MoeFfnContext {
     int expanded = 0;
     float eps = 0.f;
     size_t es = 0;
+    GemmMode mode;  // this forward's mode, from run_moe_ffn's GemmContext (audit D-7)
 
     // Tensor views (point at hidden_, residual_, norm_out_ for the current step)
     Tensor h{};

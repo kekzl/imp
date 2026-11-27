@@ -210,11 +210,17 @@ void Engine::promote_graphs_() {
 // Read back from compute/dispatch_record.h (the branches that ran, not a
 // prediction), so it cannot drift from the routing rules. The prefill chain
 // has six tiers and the MoE chain five; every one declines by returning
-// `false` with no log otherwise.
+// `false` with no log otherwise. The dense GEMM line repeats whenever a step
+// recorded a new exit: the first line runs after one prefill step, before the
+// decode GEMMs (or their graph capture) ran.
 void Engine::log_resolved_dispatch_once_() {
-    if (dispatch_dump_done_)
+    auto& r = dispatch_record::current();
+    if (dispatch_dump_done_) {
+        const std::string grown = dispatch_record::dense_log_line(r, /*first=*/false);
+        if (!grown.empty())
+            IMP_LOG_INFO("%s", grown.c_str());
         return;
-    const auto& r = dispatch_record::current();
+    }
     if (!r.has_prefill() || !r.has_decode())
         return;
     dispatch_dump_done_ = true;
@@ -249,6 +255,7 @@ void Engine::log_resolved_dispatch_once_() {
 
     IMP_LOG_INFO("Resolved dispatch: attn_prefill=%s attn_decode=%s moe_prefill=%s graphs=%s", prefill,
                  attn_decode_path_name(r.attn_decode), moe, graphs);
+    IMP_LOG_INFO("%s", dispatch_record::dense_log_line(r, /*first=*/true).c_str());
 }
 
 // =====================================================================

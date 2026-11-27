@@ -29,8 +29,24 @@ constexpr int kBS = 16;  // kKVBlockSize
 static void sparse_update_key_minmax(QType t, const void* k, void* mm, const int* pos, const int* bt, int nkv,
                                      int hd, int bs, int n, int mbps, int nseq, cudaStream_t stream,
                                      const int* seq_offsets = nullptr, const void* k_scales = nullptr) {
-    sparse_update_key_minmax_all_layers(t, k, 0, k_scales, 0, mm, 0, pos, bt, seq_offsets, /*n_layers=*/1,
-                                        nkv, hd, bs, n, mbps, nseq, stream);
+    sparse_update_key_minmax_all_layers({.cache_dtype = t,
+                                         .k_base = k,
+                                         .k_layer_stride_bytes = 0,
+                                         .k_scale_base = k_scales,
+                                         .sc_layer_stride_bytes = 0,
+                                         .minmax_base = mm,
+                                         .mm_layer_stride_bytes = 0,
+                                         .positions = pos,
+                                         .block_tables = bt,
+                                         .seq_offsets = seq_offsets,
+                                         .n_layers = 1,
+                                         .n_kv_heads = nkv,
+                                         .head_dim = hd,
+                                         .block_size = bs,
+                                         .n_tokens = n,
+                                         .max_blocks_per_seq = mbps,
+                                         .n_sequences = nseq,
+                                         .stream = stream});
 }
 
 // Deterministic value fill: distinct, sign-mixed, exactly f16-representable.

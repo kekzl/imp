@@ -53,6 +53,46 @@ TEST(WeightTierEntries, BindTakesTheMapNodesOfTheSource) {
     EXPECT_EQ(h.entries.nvfp4, nullptr);
 }
 
+// Slice 2: the CUTLASS / prefill-copy maps and the Phase 4b / 4c release maps bind too; a bind
+// taken before 4b / 4c keyed the released source sees none of them until the rebind.
+TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
+    WeightCaches wc;
+    wc.cutlass_nvfp4.emplace(&g_src_a, imp::CutlassNvFP4CacheEntry{});
+    wc.cutlass_nvfp4_prefill.emplace(&g_src_a, imp::CutlassNvFP4CacheEntry{});
+    wc.cutlass_mxfp8_prefill.emplace(&g_src_a, imp::CutlassMxFP8CacheEntry{});
+    wc.cutlass_mxfp4.emplace(&g_src_a, imp::CutlassMxFP4CacheEntry{});
+    WeightHandle h = handle(&g_src_a, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
+    imp::bind_cache_entries(h, wc);
+    EXPECT_EQ(h.entries.cutlass_nvfp4, &wc.cutlass_nvfp4.at(&g_src_a));
+    EXPECT_EQ(h.entries.nvfp4_prefill, &wc.cutlass_nvfp4_prefill.at(&g_src_a));
+    EXPECT_EQ(h.entries.mxfp8_prefill, &wc.cutlass_mxfp8_prefill.at(&g_src_a));
+    EXPECT_EQ(h.entries.cutlass_mxfp4, &wc.cutlass_mxfp4.at(&g_src_a));
+    EXPECT_EQ(h.entries.released_fp8, nullptr);
+    EXPECT_FALSE(h.entries.q8_planes_only);
+
+    wc.released_fp8_view.emplace(&g_src_a, imp::FP8CacheEntry{});
+    wc.q8_planes_only.insert(&g_src_a);
+    EXPECT_EQ(h.entries.released_fp8, nullptr);  // stale until the rebind after Phase 4c
+    imp::bind_cache_entries(h, wc);
+    EXPECT_EQ(h.entries.released_fp8, &wc.released_fp8_view.at(&g_src_a));
+    EXPECT_TRUE(h.entries.q8_planes_only);
+
+    // Another source sees none of them.
+    WeightHandle other = handle(&g_src_b, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
+    imp::bind_cache_entries(other, wc);
+    EXPECT_EQ(other.entries.cutlass_nvfp4, nullptr);
+    EXPECT_EQ(other.entries.mxfp8_prefill, nullptr);
+    EXPECT_EQ(other.entries.released_fp8, nullptr);
+    EXPECT_FALSE(other.entries.q8_planes_only);
+
+    // The attention / FFN probes: an absent handle has no nvfp4 entry.
+    const WeightCaches nv = caches();
+    WeightHandle hb = handle(&g_src_b, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
+    imp::bind_cache_entries(hb, nv);
+    EXPECT_EQ(imp::nvfp4_entry_of(&hb), &nv.nvfp4.at(&g_src_b));
+    EXPECT_EQ(imp::nvfp4_entry_of(nullptr), nullptr);
+}
+
 TEST(WeightTierEntries, EveryReadTierNeedsItsEntry) {
     const WeightCaches wc = caches();
     auto bound = [&](const void* src, StorageTier p, StorageTier d, StorageTier f) {
