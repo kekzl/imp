@@ -95,7 +95,8 @@ jobs:
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           code=true
           # `cpp` gates the clang-tidy steps below, which lint changed src|tools|tests
-          # *.cpp and the host side of changed src/*.cu, tests/*.cu (#2210): no apt install
+          # *.cpp, the host side of changed src/*.cu, tests/*.cu (#2210) and up to 3 TUs per changed
+          # src|tools|tests|include header (scripts/tidy_lane.sh): no apt install
           # when there is nothing to lint. Same FAIL-OPEN rule as `code`: any
           # uncertainty runs them.
           cpp=true
@@ -123,12 +124,12 @@ jobs:
             # check (ruleset 14716423): a syntax error here fails every PR.
             # `grep -c` reads all of stdin, so nothing ever takes EPIPE, and it
             # is POSIX. `|| true` because grep exits 1 when the count is 0.
-            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$' || true)"
+            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$|^(src|tools|tests|include)/.*\.(h|hpp|cuh)$' || true)"
             [ "${n_cpp:-0}" -gt 0 ] || cpp=false
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "cpp=$cpp" >> "$GITHUB_OUTPUT"
-          printf 'non-docs changes: code=%s (src|tools|tests .cpp or src|tests .cu: %s)\nchanged files:\n%s\n' \
+          printf 'non-docs changes: code=%s (src|tools|tests .cpp, src|tests .cu or header: %s)\nchanged files:\n%s\n' \
             "$code" "$cpp" "${files:-<none>}"
 
       # The blocking static gates, FIRST, before the compile. Ruleset 14716423
@@ -328,7 +329,7 @@ jobs:
       # and concurrency-* checks) over its pin in
       # tools/tidy_baseline.toml. Other checks print only. Full lane locally: `make tidy`;
       # changed files only: `make preflight`.
-      - name: clang-tidy (blocking, changed .cpp + .cu host side)
+      - name: clang-tidy (blocking, changed .cpp + .cu host side + TUs of changed headers)
         if: steps.changes.outputs.cpp == 'true' && steps.changes.outputs.code == 'true'
         # This job's default is `sh -e`: `mapfile` and `< <(...)` fail there (#2187).
         shell: bash
@@ -345,9 +346,9 @@ jobs:
             echo "::error::git diff failed against base $base: the lint list would be empty"
             exit 1
           fi
-          mapfile -t files < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$' || true)
-          if [ "${#files[@]}" -eq 0 ]; then echo "no src/tools/tests .cpp or src/tests .cu changed: nothing to lint"; exit 0; fi
-          echo "linting ${#files[@]} changed file(s) (a fragment lints its includer):"; printf '  %s\n' "${files[@]}"
+          mapfile -t files < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$|^(src|tools|tests|include)/.*\.(h|hpp|cuh)$' || true)
+          if [ "${#files[@]}" -eq 0 ]; then echo "no src/tools/tests .cpp, src/tests .cu or header changed: nothing to lint"; exit 0; fi
+          echo "linting ${#files[@]} changed file(s) (a fragment lints its includer, a header <= 3 TUs including it):"; printf '  %s\n' "${files[@]}"
           bash scripts/tidy_lane.sh "${files[@]}"
 
       # Joins the background gate run; its exit code is this step's. Runs after a

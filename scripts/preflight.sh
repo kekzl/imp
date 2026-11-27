@@ -35,12 +35,13 @@ inner() {
         grep -q '^  FAIL  ' "$OUT/static-gates.log" || row "static gates" FAIL $((SECONDS - t0)) "exit $rc"
     fi
 
-    echo "== clang-tidy (changed .cpp + src/tests .cu host side) =="
+    echo "== clang-tidy (changed .cpp + src/tests .cu host side + TUs of changed headers) =="
     t0=$SECONDS
     mapfile -t cpp < <(printf '%s\n' "${files[@]}" | grep -E '^(src|tools|tests)/.*\.cpp$')
     mapfile -t cu < <(printf '%s\n' "${files[@]}" | grep -E '^(src|tests)/.*\.cu$')
-    if [ $(( ${#cpp[@]} + ${#cu[@]} )) -eq 0 ]; then
-        row "clang-tidy" skip 0 "no changed src/tools/tests .cpp or src/tests .cu"
+    mapfile -t hdr < <(printf '%s\n' "${files[@]}" | grep -E '^(src|tools|tests|include)/.*\.(h|hpp|cuh)$')
+    if [ $(( ${#cpp[@]} + ${#cu[@]} + ${#hdr[@]} )) -eq 0 ]; then
+        row "clang-tidy" skip 0 "no changed src/tools/tests .cpp, src/tests .cu or header"
     else
         # Same configure as CI's tidy job (cmake --preset ci); a reconfigure costs ~3 s.
         if cmake --preset ci -B "$OUT/build" \
@@ -50,9 +51,9 @@ inner() {
                 -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2 > "$OUT/configure.log" 2>&1 \
            && cmake -DIN=tools/imp-server/webui/index.html -DOUT="$OUT/build/generated/webui_asset.h" \
                 -P cmake/embed_webui.cmake >> "$OUT/configure.log" 2>&1; then
-            TIDY_BUILD="$OUT/build" bash scripts/tidy_lane.sh "${cpp[@]}" "${cu[@]}" > "$OUT/tidy.log" 2>&1; rc=$?
+            TIDY_BUILD="$OUT/build" bash scripts/tidy_lane.sh "${cpp[@]}" "${cu[@]}" "${hdr[@]}" > "$OUT/tidy.log" 2>&1; rc=$?
             if [ "$rc" -eq 0 ]; then
-                row "clang-tidy" ok $((SECONDS - t0)) "$(( ${#cpp[@]} + ${#cu[@]} )) changed file(s)"
+                row "clang-tidy" ok $((SECONDS - t0)) "$(( ${#cpp[@]} + ${#cu[@]} + ${#hdr[@]} )) changed file(s)"
             else
                 cat "$OUT/tidy.log"
                 row "clang-tidy" FAIL $((SECONDS - t0)) "see $OUT/tidy.log"

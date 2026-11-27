@@ -157,7 +157,9 @@ __device__ __forceinline__ void block_reduce_topk(float* local_vals, int* local_
             }
 
     // each warp produces a sorted top_k list via repeated warp-max extraction
+    // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): smem, <= 8 warps x MAX_TOP_K
     float* my_warp_vals = s_warp_vals + warp_id * top_k;
+    // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): smem, <= 8 warps x MAX_TOP_K
     int* my_warp_idxs = s_warp_idxs + warp_id * top_k;
     int my_ptr = 0;
     for (int ki = 0; ki < top_k; ++ki) {

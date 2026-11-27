@@ -82,6 +82,16 @@
 #       (device register-state structs, fp8/half locals written next), 2 KVCache ctors
 #       (n_kv_heads_, head_dim_, block_bytes_ set by layout_layers_ before any read), 2 device
 #       POD parameter structs (apa Problem, GdnInputArgs).
+#
+# HeaderFilterRegex (2026-11-27): src, include/imp, tools, tests headers (.h .hpp .cuh) and #include'd
+# .cu/.cpp body fragments (tests/.clang-tidy inherits it). '(src|include/imp)/.*\.(h|hpp)$' hid 1297
+# unique findings in 60 files (52 .cuh, 5 tools .h, 3 .cpp fragments), 127 of them in error checks:
+#   bugprone-implicit-widening-of-multiplication-result  104: 98 device NOLINT (lane/tile/smem/register
+#       offsets; NOLINTBEGIN per file in apa, ra2, gemv_dp4a*), 6 host fixed (size_t byte counts)
+#   bugprone-assignment-in-if-condition                   19: fixed (apa.cuh, ra2.cuh host launchers)
+#   cppcoreguidelines-slicing                              3: NOLINT, the view base of a cache entry
+#   bugprone-undefined-memory-manipulation                 1: fixed, memcpy into half2 -> __ldcs(half2*)
+# Advisory, unchanged: readability-math-missing-parentheses 607, misc-use-internal-linkage 500, 14 more 63.
 
 Checks: >
   clang-analyzer-*,
@@ -152,5 +162,5 @@ Checks: >
   -clang-analyzer-optin.core.EnumCastOutOfRange
 
 WarningsAsErrors: 'bugprone-*,clang-analyzer-*,cppcoreguidelines-slicing,cppcoreguidelines-rvalue-reference-param-not-moved,cppcoreguidelines-missing-std-forward,concurrency-mt-unsafe'
-HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'
+HeaderFilterRegex: '(src|include/imp|tools|tests)/.*\.(h|hpp|cuh|cu|cpp)$'
 FormatStyle: file

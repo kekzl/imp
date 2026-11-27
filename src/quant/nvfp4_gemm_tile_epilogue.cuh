@@ -252,6 +252,7 @@ __device__ __forceinline__ void store_beta_staged(const float (&acc)[4][C::kNF][
                 for (int h = 0; h < 2; ++h) {
                     const int row = g.wm + mf * 16 + T1 + h * 8;
                     const float2 s = row_scale<C>(p, sc, g.m0 + row);
+                    // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): smem < 64 KB
                     *reinterpret_cast<float2*>(buf + (row * CW) + ((col - c0) ^ ((row & 7) << 3))) =
                         make_float2(acc[mf][nf][h * 2] * s.x, acc[mf][nf][(h * 2) + 1] * s.y);
                 }
@@ -264,6 +265,7 @@ __device__ __forceinline__ void store_beta_staged(const float (&acc)[4][C::kNF][
             const int col = g.n0 + c0 + c;
             if (row >= p.M || col >= p.N)  // N % 8 == 0: col + 3 < N too
                 continue;
+            // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): smem < 64 KB
             const float4 v = *reinterpret_cast<const float4*>(buf + (r * CW) + (c ^ ((r & 7) << 3)));
             uint2* dst = reinterpret_cast<uint2*>(p.d + (static_cast<size_t>(row) * p.ldd) + col);
             uint2 d = *dst;

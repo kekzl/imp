@@ -128,10 +128,12 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
         return e;
     const dim3 gkv(dm.ntkv, p.Hkv, p.B);
     stats_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.amax, w.ksum);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.amax, w.ksum, w.KV, w.hs);
-    if ((e = cudaPeekAtLastError()) != cudaSuccess)
+    e = cudaPeekAtLastError();
+    if (e != cudaSuccess)
         return e;
     quant_q_kernel<D, T>
         <<<dim3((dm.R + BKV - 1) / BKV, p.Hkv, p.B), 256, 0, st>>>(Q, dm, p.scale * LOG2E, w.Qq, w.Qr);

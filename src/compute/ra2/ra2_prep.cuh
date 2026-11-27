@@ -237,6 +237,7 @@ __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, D
         const size_t row = (size_t)bhk * dm.R + r;
         if (g == 0)
             Qr[row] = qr;
+        // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result): g * 16 < D, row is size_t
         *reinterpret_cast<uint4*>(Qq + row * D + g * 16) = w;
     }
 }

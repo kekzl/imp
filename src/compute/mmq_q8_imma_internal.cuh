@@ -92,7 +92,8 @@ __global__ void mmq_imma_q6k_k256_kernel(const int8_t* __restrict__ X_s8, const 
 constexpr int kQ6kK256ARow = 256 + 16;
 constexpr int kQ6kK256BRowW = 60;  // 60 % 32 = 28: rl-lane word reads conflict-free
 constexpr size_t q6k_k256_stage_bytes() {
-    return (32 * kQ6kK256ARow) + (32 * 8 * sizeof(__half)) + (static_cast<size_t>(kBN) * kQ6kK256BRowW * 4);
+    return (size_t{32} * kQ6kK256ARow) + (sizeof(__half) * 32 * 8) +
+           (static_cast<size_t>(kBN) * kQ6kK256BRowW * 4);
 }
 constexpr size_t q6k_k256_smem_bytes() { return kStages * q6k_k256_stage_bytes(); }
 
