@@ -125,6 +125,59 @@ TEST(EndToEndTest, StubWarmCacheStaysInStubDir) {
     EXPECT_FALSE(std::filesystem::exists(dir)) << dir << " survived remove_gguf_stub";
 }
 
+// --- Model-dependent tests (require IMP_TEST_MODEL env var) ---
+
+// Sole catcher of M-E2E2 (imp_prefill dropping the last token: a 1-token prompt prefills 0).
+TEST(EndToEndModelTest, PrefillDecodeStep) {
+    const std::string path = test_model_path();
+    if (path.empty())
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
+
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 256;
+    config.max_batch_size = 1;
+    config.enable_cuda_graphs = 0;
+
+    ImpContext ctx = nullptr;
+    ASSERT_EQ(imp_context_create(model, &config, &ctx), IMP_SUCCESS);
+
+    // Tokenize a prompt
+    int32_t tokens[128];
+    int n_tokens = 0;
+    ASSERT_EQ(imp_tokenize(model, "Hello", tokens, &n_tokens, 128), IMP_SUCCESS);
+    ASSERT_GT(n_tokens, 0);
+
+    // Prefill
+    ASSERT_EQ(imp_prefill(ctx, tokens, n_tokens), IMP_SUCCESS);
+
+    // Decode a few tokens
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 8;
+    params.temperature = 0.0f;
+
+    // Id 0 is a real token (Qwen3: "!"), so a valid id is 0 <= token < vocab size.
+    const int vocab = imp_model_vocab_size(model);
+    ASSERT_GT(vocab, 0);
+    for (int i = 0; i < 4; i++) {
+        int32_t token = -1;
+        ImpError err = imp_decode_step(ctx, &params, &token);
+        if (err != IMP_SUCCESS)
+            break;  // Request may finish early (EOS)
+        EXPECT_GE(token, 0);
+        EXPECT_LT(token, vocab);
+    }
+
+    // Reset and verify we can reuse the context
+    ASSERT_EQ(imp_context_reset(ctx), IMP_SUCCESS);
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
 // --- Long-context tests (real model required) ---
 
 TEST(EndToEndModelTest, LongContext8k) {
