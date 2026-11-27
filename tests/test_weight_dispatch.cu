@@ -376,7 +376,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     // Build handle: payload.nvfp4.tensor_scale = nullptr (phase-2 shim)
     WeightHandle h;
     h.kind = TensorKind::WQ;
-    h.primary_tier = StorageTier::NVFP4;
+    h.primary_tier = StorageTier::NVFP4_LINEAR;
     h.shape[0] = N_OUT;
     h.shape[1] = K;
     h.payload.nvfp4.data = static_cast<uint8_t*>(qr.packed_data);
@@ -444,7 +444,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmPackedShapeMatchesDirect) {
 
     WeightHandle h;
     h.kind = TensorKind::WQ;
-    h.primary_tier = StorageTier::NVFP4;
+    h.primary_tier = StorageTier::NVFP4_LINEAR;
     h.shape[0] = N_OUT;
     h.shape[1] = K / 2;  // PACKED — mirrors the prequant loader (logical K = shape[1]*2)
     h.payload.nvfp4.data = static_cast<uint8_t*>(qr.packed_data);
@@ -508,7 +508,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
 
     WeightHandle h;
     h.kind = TensorKind::WQ;
-    h.primary_tier = StorageTier::NVFP4;
+    h.primary_tier = StorageTier::NVFP4_LINEAR;
     h.shape[0] = M;
     h.shape[1] = K;
     h.payload.nvfp4.data = static_cast<uint8_t*>(qr.packed_data);
@@ -536,10 +536,10 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
 }
 
 // ===========================================================================
-// CUTLASS_NVFP4 tier
+// NVFP4_SFATOM tier
 // ===========================================================================
 
-// gemm_dispatch CUTLASS_NVFP4 tier (M>1): dispatch reconstructs CutlassNvFP4Weight from the
+// gemm_dispatch NVFP4_SFATOM tier (M>1): dispatch reconstructs CutlassNvFP4Weight from the
 // payload and calls gemm_nvfp4_tile (auto variant, stream-K workspace), same as the direct call.
 TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     // Own tile: K % 64 == 0, N % 8 == 0.
@@ -593,7 +593,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     // Build handle: workspace holds act_data + act_sf + stream-K partials
     WeightHandle h;
     h.kind = TensorKind::WQ;
-    h.primary_tier = StorageTier::CUTLASS_NVFP4;
+    h.primary_tier = StorageTier::NVFP4_SFATOM;
     h.shape[0] = N;
     h.shape[1] = K;
     h.payload.cutlass_nvfp4.weight = const_cast<void*>(cw.data);
@@ -619,7 +619,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
         // Same kernel path (both call gemm_nvfp4_tile with identical
         // FP4-quantized activation) — outputs should be byte-identical.
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
-            << "CUTLASS_NVFP4 GEMM mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
+            << "NVFP4_SFATOM GEMM mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
 
     cudaFree(d_w);
@@ -631,7 +631,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     cudaFree(d_y_disp);
 }
 
-// CUTLASS_NVFP4 is prefill-only; the decode path uses the NVFP4 tier directly, so reaching
+// NVFP4_SFATOM is prefill-only; the decode path uses the NVFP4 tier directly, so reaching
 // this case in gemv_dispatch is a routing bug in the caller. Used to assert the OPPOSITE
 // (EXPECT_NO_THROW, stub returns early leaving stale output) - the #654 shape SETTLED S-22
 // removed from attention_prefill_dispatch: "no tier accepted" must be an error, not a
@@ -647,7 +647,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleM
 
     WeightHandle h;
     h.kind = TensorKind::WQ;
-    h.primary_tier = StorageTier::CUTLASS_NVFP4;
+    h.primary_tier = StorageTier::NVFP4_SFATOM;
     h.shape[0] = M;
     h.shape[1] = K;
     h.payload.cutlass_nvfp4.weight = dummy_data;

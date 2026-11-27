@@ -43,7 +43,7 @@ enum class G3 { SfAtom, SkipQ8, SfLess };
 // G3: no SfAtom for a dense GGUF source: its M>1 GEMM reads the source (IMMA or dequant,
 // gemm_via_handle_ returns before the CUTLASS block). Decode keeps the plain wcache.nvfp4 GEMV.
 // Q8_0 (IMMA) takes no entry (tier NVFP4); every other qtype gets an SfAtom-less entry here
-// so its handle keeps the CUTLASS_NVFP4 tier and routes. Qwen3-14B-Q6_K: 788 MiB.
+// so its handle keeps the NVFP4_SFATOM tier and routes. Qwen3-14B-Q6_K: 788 MiB.
 G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const NvFP4QuantResult& nvfp4) {
     const auto* pe = plan.entry_of(ptr);
     if (!pe)

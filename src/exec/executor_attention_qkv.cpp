@@ -125,11 +125,11 @@
         const bool nv_q_secondary = (nv_q_e != nullptr);
         const bool nv_k_secondary = (nv_k_e != nullptr);
         const bool nv_v_secondary = (nv_v_e != nullptr);
-        const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4) ||
+        const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4_LINEAR) ||
                                  nv_q_secondary;
-        const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4) ||
+        const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4_LINEAR) ||
                                  nv_k_secondary;
-        const bool wv_is_nvfp4 = (mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::NVFP4) ||
+        const bool wv_is_nvfp4 = (mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::NVFP4_LINEAR) ||
                                  nv_v_secondary;
         bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && wq_is_nvfp4 && wk_is_nvfp4 && wv_is_nvfp4);
         // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
@@ -224,7 +224,7 @@
             } else {
                 // Producer fusion: quantize into the small-M scratch inside
                 // the norm kernel when Q will take that route (batched
-                // decode, CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
+                // decode, NVFP4_SFATOM tier); falls back to plain rmsnorm.
                 m1_fold = norm_fold_or_norm_(attn_norm_fold_rows(n, fp8_qkv_rows) && !qsa_layer_(layer) &&
                                                  ly.wv.data != nullptr,
                                              h, ly.attn_norm, no, ly.wq_id, n, eps, ctx.mode, stream);

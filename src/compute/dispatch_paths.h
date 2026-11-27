@@ -88,11 +88,11 @@ enum class DensePath : unsigned char {
     IMMA_SOURCE,            // imma_source_prefill on a GGUF source with an NVFP4 overlay
     GGUF_SOURCE_DEQUANT,    // gguf_source_fallback on a GGUF source with an NVFP4 overlay
     NVFP4_PROMPT_A16,       // gemm_nvfp4_f16_tile (gemm.nvfp4_prompt_a16_attn)
-    NVFP4_TILE,             // CUTLASS_NVFP4 tier own tile GEMM via the kernel registry
-    NVFP4_TIER_FP8,         // CUTLASS_NVFP4 tier FP8 cache entry via gemm_cublaslt
+    NVFP4_TILE,             // NVFP4_SFATOM tier own tile GEMM via the kernel registry
+    NVFP4_TIER_FP8,         // NVFP4_SFATOM tier FP8 cache entry via gemm_cublaslt
     NVFP4_DEQUANT,          // gemm_nvfp4 dequant safety net (native NVFP4 source)
     MXFP4_PREFILL,          // mxfp4_prefill_gemm
-    GGUF_SOURCE_NO_SFATOM,  // last route: SfAtom-less CUTLASS_NVFP4 entry, gguf_source_fallback
+    GGUF_SOURCE_NO_SFATOM,  // last route: SfAtom-less NVFP4_SFATOM entry, gguf_source_fallback
     GENERIC_DISPATCH,       // last route: gemm_dispatch
     // Fused / sibling exits outside the ladder, recorded per weight at their call site.
     QKV_GEMV_MXFP4,           // gemv_mxfp4_qkv_fused, M=1

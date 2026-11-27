@@ -42,7 +42,8 @@ inline void bind_cache_entries(WeightHandle& h, const WeightCaches& wc) {
 [[nodiscard]] inline const char* missing_tier_entry(const WeightHandle& h) {
     const StorageTier decode = h.decode_tier != StorageTier::Undefined ? h.decode_tier : h.primary_tier;
     const StorageTier prefill = h.prefill_tier != StorageTier::Undefined ? h.prefill_tier : h.primary_tier;
-    if ((h.primary_tier == StorageTier::NVFP4 || decode == StorageTier::NVFP4) && h.entries.nvfp4 == nullptr)
+    if ((h.primary_tier == StorageTier::NVFP4_LINEAR || decode == StorageTier::NVFP4_LINEAR) &&
+        h.entries.nvfp4 == nullptr)
         return "nvfp4";
     if ((decode == StorageTier::FP8 || prefill == StorageTier::FP8) && h.entries.fp8 == nullptr)
         return "fp8";

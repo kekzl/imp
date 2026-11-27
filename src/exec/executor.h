@@ -319,7 +319,7 @@ public:
                                  int k_align = 256);
     [[nodiscard]] float act_scale_of_(TensorID id) const;  // WeightHandle::act_scale, 1.0 for an invalid id
     // The plain-NVFP4 weight the small-M GEMM reads for `h`: the native
-    // CUTLASS_NVFP4 source, or on decode rows (#1897) the NVFP4 decode overlay
+    // NVFP4_SFATOM source, or on decode rows (#1897) the NVFP4 decode overlay
     // of a dequantable GGUF source. False when neither exists; prompt rows on
     // a GGUF source keep the full-precision dequant route. Single gate shared
     // by the dispatch block, sibling-pair dispatch and producer fusion.
@@ -1211,7 +1211,7 @@ private:
                                     Tensor& beta_out, cudaStream_t stream);
     GemmContext gdn_q8_reuse_ctx_(int layer, const Tensor& no, const GemmContext& ctx) const;
     // The NVFP4 view gemm_via_handle_ would hand the M=1 decode GEMV for this
-    // weight (decode tier NVFP4 in wcache_.nvfp4, or native CUTLASS_NVFP4 via
+    // weight (decode tier NVFP4_LINEAR in wcache_.nvfp4, or native NVFP4_SFATOM via
     // its source bytes). false = that dispatch would not take the GEMV.
     [[nodiscard]] bool nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) const;
     // FP8 bytes gemm_via_handle_ would hand gemv_fp8 at M=1 (decode tier FP8 in wcache_.fp8).

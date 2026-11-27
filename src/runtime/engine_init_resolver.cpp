@@ -719,7 +719,7 @@ void Engine::init_resolve_quant_flags_() {
         }
     }
 
-    // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS_NVFP4-tier paths, and CUDA graphs all
+    // Gemma 4: FP8 prefill, NVFP4 prefill, NVFP4_SFATOM-tier paths, and CUDA graphs all
     // have incompatibilities with the per-layer head_dim + split MoE tensor
     // layout; force plain FP16 until proper kernels land. GDN models can't
     // use FP8 prefill either: recurrent state accumulates error per token,

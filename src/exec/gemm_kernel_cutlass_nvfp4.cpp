@@ -80,7 +80,7 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
 
 // Only the (M>1) prefill slot: (M==1) decode always picks the gemv_nvfp4_kpar fast path.
 void register_cutlass_nvfp4_gemm_kernels(GemmKernelRegistry& reg) {
-    reg.register_kernel(GemmStrategy{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false},
+    reg.register_kernel(GemmStrategy{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false},
                         &cutlass_nvfp4_gemm_kernel);
 }
 

@@ -100,11 +100,11 @@ struct WeightHandle {
     // Can the original GGUF source bytes (source_data) be safely freed once
     // this handle is populated? Safe only when primary_tier has BOTH a
     // decode-fast kernel AND a prefill kernel that consume the overlay payload:
-    // NVFP4, CUTLASS_NVFP4, FP8, MXFP4. NOT safe: FP16 (decode prefers dp4a on
+    // NVFP4_LINEAR, NVFP4_SFATOM, FP8, MXFP4. NOT safe: FP16 (decode prefers dp4a on
     // the original), FP32 (LM-head policy keeps original), Undefined.
     // Conservative: true only when source_data is present AND the tier covers
     // both M=1 and M>1 paths; actual freeing needs a dispatch-site audit too.
-    // W4A4 GEMM alpha of a CUTLASS_NVFP4 payload: weight tensor scale (1.0 when absent) x `act_scale`.
+    // W4A4 GEMM alpha of an NVFP4_SFATOM payload: weight tensor scale (1.0 when absent) x `act_scale`.
     [[nodiscard]] float cutlass_nvfp4_alpha(float act) const {
         return (payload.cutlass_nvfp4.global_scale ? *payload.cutlass_nvfp4.global_scale : 1.0f) * act;
     }
@@ -113,8 +113,8 @@ struct WeightHandle {
         if (source_data == nullptr)
             return false;
         switch (primary_tier) {
-            case StorageTier::NVFP4:
-            case StorageTier::CUTLASS_NVFP4:
+            case StorageTier::NVFP4_LINEAR:
+            case StorageTier::NVFP4_SFATOM:
             case StorageTier::FP8:
             case StorageTier::MXFP4:
                 return true;

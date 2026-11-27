@@ -1638,7 +1638,7 @@ bool GraphExecutor::chunk_capture_supported() const {
             for (int e = 0; e < ne; ++e) {
                 if (ids[e] == kInvalidTensorID)
                     return false;
-                if (registry_.handle(ids[e]).primary_tier != StorageTier::CUTLASS_NVFP4)
+                if (registry_.handle(ids[e]).primary_tier != StorageTier::NVFP4_SFATOM)
                     return false;
             }
             return true;

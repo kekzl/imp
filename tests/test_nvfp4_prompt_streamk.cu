@@ -1,4 +1,4 @@
-// gemm.nvfp4_prompt_streamk off (auto = off): prompt rows (chunks >= 33) of the CUTLASS_NVFP4 registry
+// gemm.nvfp4_prompt_streamk off (auto = off): prompt rows (chunks >= 33) of the NVFP4_SFATOM registry
 // kernel never take stream-K, whose K split follows M (Gemma-4-26B global q_proj N 8192 K 2816: 218 rows
 // data-parallel, 42 rows split in 2; prefix resend 0.179 nats).
 
@@ -98,7 +98,7 @@ struct PromptRowsRig {
         args.cutlass_act_sf = d_act_sf;
         args.cutlass_workspace = d_ws;
         args.cutlass_workspace_size = ws_bytes;
-        GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+        GemmStrategy strat{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false};
         EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok) << "M=" << m;
         return to_host(d_y, m);
     }

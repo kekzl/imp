@@ -290,7 +290,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         for (int e = 0; e < ctx.ne; ++e) {
             if (ids[e] == kInvalidTensorID)
                 return false;
-            if (registry_.handle(ids[e]).primary_tier != StorageTier::CUTLASS_NVFP4)
+            if (registry_.handle(ids[e]).primary_tier != StorageTier::NVFP4_SFATOM)
                 return false;
         }
         return true;

@@ -126,7 +126,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     const bool wd_nvfp4_secondary = (wd_nv_e != nullptr);
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_mxfp4 && n == 1 &&
                                  h.qtype == QType::F16 &&
-                                 (wd_tier == StorageTier::NVFP4 || wd_nvfp4_secondary));
+                                 (wd_tier == StorageTier::NVFP4_LINEAR || wd_nvfp4_secondary));
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 && n == 1 &&
                                     qscratch_.q8_1_buf.data() != nullptr &&
                                     qscratch_.d8_buf.data() != nullptr && h.qtype == QType::F16 &&
@@ -167,8 +167,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         const NvFP4CacheEntry* nv_u_e = nvfp4_entry_of(hwu);
         const bool nv_g_secondary = (nv_g_e != nullptr);
         const bool nv_u_secondary = (nv_u_e != nullptr);
-        const bool wg_is_nvfp4 = (hwg && hwg->primary_tier == StorageTier::NVFP4) || nv_g_secondary;
-        const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4) || nv_u_secondary;
+        const bool wg_is_nvfp4 = (hwg && hwg->primary_tier == StorageTier::NVFP4_LINEAR) || nv_g_secondary;
+        const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4_LINEAR) || nv_u_secondary;
         bool nvfp4_ffn = (n == 1 && wg_is_nvfp4 && wu_is_nvfp4);
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf.data() != nullptr &&
                                h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate.qtype) &&
@@ -246,7 +246,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         } else {
             // Producer fusion: quantize into the small-M scratch inside the
             // norm kernel when gate will take that route (batched decode,
-            // CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
+            // NVFP4_SFATOM tier); falls back to plain rmsnorm.
             rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, ctx.mode, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
@@ -408,7 +408,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(h.data), residual_ptr, M_d, K_d, stream);
             record_dense_({ly.w_down_id}, DensePath::DP4A_RESIDUAL);
-        } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && wd_tier == StorageTier::NVFP4 &&
+        } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && wd_tier == StorageTier::NVFP4_LINEAR &&
                    h.qtype == QType::F16) {
             // NVFP4 post-norm FP32 accum decode: activation → NVFP4 GEMV → post-norm.
             // ~40% less weight traffic than dp4a Q8_0 path.

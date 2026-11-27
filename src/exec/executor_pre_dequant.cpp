@@ -322,7 +322,7 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
         out = *h.entries.nvfp4;
         return true;
     }
-    if (h.primary_tier != StorageTier::NVFP4 || h.payload.nvfp4.data == nullptr)
+    if (h.primary_tier != StorageTier::NVFP4_LINEAR || h.payload.nvfp4.data == nullptr)
         return false;
     out.packed_data  = h.payload.nvfp4.data;
     out.micro_scales = h.payload.nvfp4.block_scales;
@@ -371,7 +371,7 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
         if (!is_gdn || dispatch_policy().gemm.nvfp4_lm_head_gdn) {
             for (auto& e : plan.entries)
                 if (e.kind == TensorKind::LM_HEAD)
-                    e.tier = StorageTier::NVFP4;
+                    e.tier = StorageTier::NVFP4_LINEAR;
         }
     }
 
@@ -380,7 +380,7 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // from-scratch <pad>/IMA corruption no longer reproduces (degen_suite 33/0, 2026-10-14).
     if (model_->profile().is_gemma3) {
         for (auto& e : plan.entries) {
-            if (e.tier == StorageTier::NVFP4)
+            if (e.tier == StorageTier::NVFP4_LINEAR)
                 e.fp16_companion = true;
         }
     }

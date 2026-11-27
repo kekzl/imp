@@ -21,7 +21,7 @@
 using namespace imp;
 
 // GemmKernel registry: the three live producers (generic dequant catch-all, GGUF small-M,
-// CUTLASS_NVFP4 prefill) against their direct paths, plus the pin that the table holds
+// NVFP4_SFATOM prefill) against their direct paths, plus the pin that the table holds
 // exactly the produced keys (AUDIT_ARCH_2026 A1-1, dispatch #8).
 
 namespace {
@@ -56,15 +56,15 @@ TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
 // is dead code, a producer without a registration falls through to gemm_via_handle_ silently.
 TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
     const auto& reg = GemmKernelRegistry::instance();
-    EXPECT_EQ(reg.size(), 13u) << "1 generic dequant + 11 GGUF small-M qtypes + 1 CUTLASS_NVFP4";
+    EXPECT_EQ(reg.size(), 13u) << "1 generic dequant + 11 GGUF small-M qtypes + 1 NVFP4_SFATOM";
     GemmKernelArgs args{};
     args.stream = stream_;
     // The 9 keys retired with the stalled R5 migration stay unreachable.
     const GemmStrategy retired[] = {
-        {StorageTier::FP16, QType::F16, false},  {StorageTier::FP16, QType::F16, true},
-        {StorageTier::FP16, QType::Q4_K, false}, {StorageTier::FP8, QType::F16, false},
-        {StorageTier::FP8, QType::NONE, false},  {StorageTier::NVFP4, QType::F16, false},
-        {StorageTier::NVFP4, QType::F16, true},  {StorageTier::MXFP4, QType::F16, false},
+        {StorageTier::FP16, QType::F16, false},        {StorageTier::FP16, QType::F16, true},
+        {StorageTier::FP16, QType::Q4_K, false},       {StorageTier::FP8, QType::F16, false},
+        {StorageTier::FP8, QType::NONE, false},        {StorageTier::NVFP4_LINEAR, QType::F16, false},
+        {StorageTier::NVFP4_LINEAR, QType::F16, true}, {StorageTier::MXFP4, QType::F16, false},
         {StorageTier::MXFP4, QType::F16, true},
     };
     for (const auto& s : retired)
@@ -73,7 +73,7 @@ TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
             << " m_is_one=" << s.m_is_one;
 }
 
-// CUTLASS_NVFP4 adapter must refuse loud (PreconditionFail) when activation scratch is
+// NVFP4_SFATOM adapter must refuse loud (PreconditionFail) when activation scratch is
 // missing, not fall through to legacy silently (mirrors the FP8 missing-scratch test, Slice
 // 2 pattern). Note: the GEMM workspace is NOT a precondition since
 // gemm_nvfp4_tile runs data-parallel without one - this exercises only the
@@ -108,14 +108,14 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     // Intentionally leave cutlass_act_data / cutlass_act_sf / cutlass_workspace
     // null. Kernel must return PreconditionFail.
 
-    GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+    GemmStrategy strat{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
 
     cudaFree(d_input);
     cudaFree(d_out);
 }
 
-// End-to-end smoke: registry CUTLASS_NVFP4 dispatch runs Ok with non-zero output. The adapter
+// End-to-end smoke: registry NVFP4_SFATOM dispatch runs Ok with non-zero output. The adapter
 // wraps quantize_fp16_to_nvfp4_cutlass + gemm_nvfp4_tile (cuBLASLt on refusal); bitwise
 // direct-vs-dispatch parity lives in test_weight_dispatch.cu (CUTLASS_NVFP4_GemmMatchesDirect),
 // dispatch-site coverage in verify-fast's engine smoke tests.
@@ -178,7 +178,7 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     args.cutlass_act_sf = d_act_sf;
     args.cutlass_workspace = d_ws;
     args.cutlass_workspace_size = ws_bytes;
-    GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+    GemmStrategy strat{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
 
     cudaStreamSynchronize(stream_);
@@ -192,7 +192,7 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     for (int i = 0; i < M * N; ++i) {
         if (__half_as_ushort(h_out[i]) != 0) ++nonzero_count;
     }
-    EXPECT_GT(nonzero_count, 0) << "Registry CUTLASS_NVFP4 dispatch wrote all-zero output";
+    EXPECT_GT(nonzero_count, 0) << "Registry NVFP4_SFATOM dispatch wrote all-zero output";
 
     cudaFree(d_act_data);
     cudaFree(d_act_sf);

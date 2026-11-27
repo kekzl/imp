@@ -59,14 +59,14 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out,
         if (!decode_rows)
             return false;
         const StorageTier decode = (h.decode_tier != StorageTier::Undefined) ? h.decode_tier : h.primary_tier;
-        if (decode != StorageTier::NVFP4)
+        if (decode != StorageTier::NVFP4_LINEAR)
             return false;
         if (h.entries.nvfp4 == nullptr || (h.entries.nvfp4->K % 64) != 0)
             return false;
         out = *h.entries.nvfp4;
         return true;
     }
-    if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_scales == nullptr ||
+    if (h.primary_tier != StorageTier::NVFP4_SFATOM || h.source_scales == nullptr ||
         ((h.shape[1] * 2) % 64) != 0)
         return false;
     out.packed_data = const_cast<void*>(h.source_data);
@@ -265,7 +265,7 @@ static size_t swiglu_epi_sf_offset(int n, int N) {
     return ((static_cast<size_t>(n) * (N / 2)) + 127) & ~size_t(127);
 }
 
-// Eligible: SwiGLU prompt rows, gate / up / down on the CUTLASS_NVFP4 tile (not cuBLASLt) at this M (so the
+// Eligible: SwiGLU prompt rows, gate / up / down on the NVFP4_SFATOM tile (not cuBLASLt) at this M (so the
 // down takes run_ffn's plain branch), one act scale for gate and up, the down input fits uo's buffer, and
 // nothing reads uo / so after the activation (LoRA, calibration, debug dumps).
 bool GraphExecutor::swiglu_epi_eligible_(const TransformerLayer& ly, const Tensor& no, const Tensor& go,
@@ -278,7 +278,7 @@ bool GraphExecutor::swiglu_epi_eligible_(const TransformerLayer& ly, const Tenso
         if (id == kInvalidTensorID || !prefill_routes_cutlass_nvfp4_(id, n, mode))
             return false;
         const auto& h = registry_.handle(id);
-        if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.payload.cutlass_nvfp4.sf == nullptr ||
+        if (h.primary_tier != StorageTier::NVFP4_SFATOM || h.payload.cutlass_nvfp4.sf == nullptr ||
             h.entries.mxfp8_prefill != nullptr)
             return false;
     }

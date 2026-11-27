@@ -158,7 +158,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         // gpt_oss_convert_experts_to_nvfp4 allocates with raw cudaMalloc: no tag names these bytes.
         wcache_->nvfp4_moe_bytes += moe_result_bytes(g) + moe_result_bytes(u) + moe_result_bytes(d);
 
-        // Per-expert CUTLASS_NVFP4 registration (#547 prefill): without it, covers_ids() rejects
+        // Per-expert NVFP4_SFATOM registration (#547 prefill): without it, covers_ids() rejects
         // the grouped NVFP4 path and prefill falls to the dequant->FP16->cuBLASLt batch
         // fallback. Mirrors cache_moe_native_nvfp4's re-stamp block: shared SfAtom buffer per
         // projection + per-expert Tensor slices so Phase 4's register_tensor() sees CUTLASS-tier
@@ -546,7 +546,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                     (int)shapes_ok, (int)data_contig);
             }
             // Non-contiguous data or alloc failed: leave experts on the
-            // grouped GEMM path (Phase-0 already registered per-expert NVFP4+CUTLASS_NVFP4).
+            // grouped GEMM path (Phase-0 already registered per-expert NVFP4_LINEAR+NVFP4_SFATOM).
             return true;
         }
         if (moe_budget_exhausted)
@@ -694,7 +694,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         moe_logical_avail += freed_bytes;
 
         // Re-stamp per-expert Tensors to slice into the contiguous packed + micro-scale buffers
-        // and register CUTLASS_NVFP4 entries so the MoE prefill fast path can fire instead of
+        // and register NVFP4_SFATOM entries so the MoE prefill fast path can fire instead of
         // dequant->FP16->cuBLASLt. The cleanup loop above nulled experts[e].data (per-expert
         // source freed); the executor needs valid slice pointers for register_tensor() and the
         // wcache_->cutlass_nvfp4 lookup. Without this, expert_*_ids[e] = kInvalidTensorID and

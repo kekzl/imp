@@ -221,7 +221,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                     : nullptr;
     const bool wo_nvfp4_secondary = (wo_nv_e != nullptr);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
-                              (wo_tier == StorageTier::NVFP4 || wo_nvfp4_secondary));
+                              (wo_tier == StorageTier::NVFP4_LINEAR || wo_nvfp4_secondary));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
                                  qscratch_.q8_1_buf.data() != nullptr && qscratch_.d8_buf.data() != nullptr &&
                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));

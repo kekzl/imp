@@ -113,21 +113,21 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         bind_cache_entries(h, *wcache_);
 
         // Dual-tier dispatch: pick the best tier per operation type.
-        //   Prefill (M>1): FP16 > FP8 > CUTLASS_NVFP4 tier (own tile GEMM) > source dequant
+        //   Prefill (M>1): FP16 > FP8 > NVFP4_SFATOM tier (own tile GEMM) > source dequant
         //   Decode (M=1):  NVFP4 GEMV > FP8 GEMV > source dp4a GEMV
         // Native NVFP4: all dense weights get FP16 prefill (dequanted at load) to avoid FP8
         // precision loss compounding across layers; decode uses source NVFP4 (single-token, no
         // compounding).
         h.prefill_tier = tier;
         h.decode_tier = tier;
-        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp16.contains(t.data)) {
+        if (tier == StorageTier::NVFP4_SFATOM && wcache_->fp16.contains(t.data)) {
             h.prefill_tier = StorageTier::FP16;
             // Decode: use source NVFP4 data for GEMV (not the FP16 cache)
-        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp8.contains(t.data)) {
+        } else if (tier == StorageTier::NVFP4_SFATOM && wcache_->fp8.contains(t.data)) {
             h.prefill_tier = StorageTier::FP8;
             h.decode_tier = StorageTier::FP8;
-        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->nvfp4.contains(t.data)) {
-            h.decode_tier = StorageTier::NVFP4;
+        } else if (tier == StorageTier::NVFP4_SFATOM && wcache_->nvfp4.contains(t.data)) {
+            h.decode_tier = StorageTier::NVFP4_LINEAR;
         } else if (fp8_decode_sidecar) {
             h.decode_tier = StorageTier::FP8;
         }
@@ -266,11 +266,11 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                     ++plan_fp8;
                     ++plan_overlay;
                     break;
-                case StorageTier::NVFP4:
+                case StorageTier::NVFP4_LINEAR:
                     ++plan_nvfp4;
                     ++plan_overlay;
                     break;
-                case StorageTier::CUTLASS_NVFP4:
+                case StorageTier::NVFP4_SFATOM:
                     ++plan_cutlass_nvfp4;
                     ++plan_overlay;
                     break;
@@ -299,7 +299,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             int registry_per_kind[std::to_underlying(TensorKind::COUNT)] = {0};
             for (const auto& e : ideal_plan.entries) {
                 bool overlay = (e.tier == StorageTier::FP16 || e.tier == StorageTier::FP8 ||
-                                e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4 ||
+                                e.tier == StorageTier::NVFP4_LINEAR || e.tier == StorageTier::NVFP4_SFATOM ||
                                 e.tier == StorageTier::MXFP4);
                 if (overlay)
                     ++plan_per_kind[std::to_underlying(e.kind)];
@@ -344,9 +344,9 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                         return wcache_->fp16.contains(src);
                     case StorageTier::FP8:
                         return wcache_->fp8.contains(src);
-                    case StorageTier::NVFP4:
+                    case StorageTier::NVFP4_LINEAR:
                         return wcache_->nvfp4.contains(src);
-                    case StorageTier::CUTLASS_NVFP4:
+                    case StorageTier::NVFP4_SFATOM:
                         return wcache_->cutlass_nvfp4.contains(src);
                     case StorageTier::MXFP4:
                         return wcache_->cutlass_mxfp4.contains(src);
@@ -360,10 +360,10 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             };
             int mismatch = 0, evicted = 0, matched = 0;
             for (const auto& e : ideal_plan.entries) {
-                const bool plan_overlay_e =
-                    (e.tier == StorageTier::FP16 || e.tier == StorageTier::FP8 ||
-                     e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4 ||
-                     e.tier == StorageTier::MXFP4);
+                const bool plan_overlay_e = (e.tier == StorageTier::FP16 || e.tier == StorageTier::FP8 ||
+                                             e.tier == StorageTier::NVFP4_LINEAR ||
+                                             e.tier == StorageTier::NVFP4_SFATOM ||
+                                             e.tier == StorageTier::MXFP4);
                 if (!plan_overlay_e)
                     continue;
                 if (present_in(e.tier, e.source_data)) {
@@ -396,7 +396,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             model_->gpu_allocations_.size());
 
         // Decode-redundancy diagnostic: how many bytes of original GGUF the overlay tier
-        // (NVFP4/CUTLASS_NVFP4/FP8/MXFP4) covers for DECODE. An UPPER BOUND, not freeable VRAM:
+        // (NVFP4_LINEAR/NVFP4_SFATOM/FP8/MXFP4) covers for DECODE. An UPPER BOUND, not freeable VRAM:
         // M>1 prefill still reads the GGUF source for these weights under the current
         // strict-quality-neutral prefill paths (IMMA raw-read, on-the-fly dequant, or the NVFP4 tile GEMM).
         // FP16-cached weights keep the original for dp4a decode and are not counted.

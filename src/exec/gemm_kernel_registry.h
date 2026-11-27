@@ -3,7 +3,7 @@
 // GemmKernel registry, the (Strategy -> handler) table behind the 3 dispatch sites:
 //   {FP16, NONE, false}          generic dequant catch-all (M>1, uncached weight)
 //   {FP16, <gguf qtype>, true}   GGUF small-M (mmvq/dp4a/fused gemv), 8 qtypes
-//   {CUTLASS_NVFP4, F16, false}  NVFP4 prefill GEMM (own tile, cuBLASLt on refusal)
+//   {NVFP4_SFATOM, F16, false}  NVFP4 prefill GEMM (own tile, cuBLASLt on refusal)
 // Every key has one producer and vice versa; GemmKernelRegistryLink.HoldsExactlyTheProducedKeys
 // (test-core) pins the 10 keys. A new tier registers here only together with its dispatch site.
 // Registration is explicit: instance() calls the register_*_gemm_kernels functions below once.
@@ -49,7 +49,7 @@ struct GemmKernelArgs {
 
     // Tier-specific weight handle. Casts:
     //   FP16            -> const Tensor* (F16 weight or GGUF source tensor)
-    //   CUTLASS_NVFP4   -> const CutlassNvFP4Weight*
+    //   NVFP4_SFATOM   -> const CutlassNvFP4Weight*
     const void* weight_payload = nullptr;
 
     // Workspace pointers — only some tiers consume them. nullptr means the
@@ -70,7 +70,7 @@ struct GemmKernelArgs {
     void* q8_1_buf = nullptr;
     float* d8_buf = nullptr;
 
-    // Act-quant dedupe (CUTLASS_NVFP4 prefill): cutlass_act_data/_sf already hold the
+    // Act-quant dedupe (NVFP4_SFATOM prefill): cutlass_act_data/_sf already hold the
     // quantized form of input (a prior dispatch on the same input quantized it); the handler
     // skips quantize_fp16_to_nvfp4_cutlass. Set when the GemmContext act-quant hint matches
     // (input.data, M, K).

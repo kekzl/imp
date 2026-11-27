@@ -355,7 +355,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                                        static_cast<size_t>(eidx) < fallback_ids.size() &&
                                        fallback_ids[eidx] != kInvalidTensorID &&
                                        registry_.handle(fallback_ids[eidx]).primary_tier ==
-                                           StorageTier::NVFP4);
+                                           StorageTier::NVFP4_LINEAR);
             if (has_nvfp4_id) {
                 const auto& wh = registry_.handle(fallback_ids[eidx]);
                 NvFP4QuantResult nw;

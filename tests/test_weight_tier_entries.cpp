@@ -103,18 +103,18 @@ TEST(WeightTierEntries, EveryReadTierNeedsItsEntry) {
     constexpr auto U = StorageTier::Undefined;
     // All entries present.
     EXPECT_EQ(imp::missing_tier_entry(
-                  bound(&g_src_a, StorageTier::CUTLASS_NVFP4, StorageTier::FP8, StorageTier::FP8)),
+                  bound(&g_src_a, StorageTier::NVFP4_SFATOM, StorageTier::FP8, StorageTier::FP8)),
               nullptr);
-    EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::NVFP4, U, U)), nullptr);
+    EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::NVFP4_LINEAR, U, U)), nullptr);
     // NVFP4 decode (explicit or through the primary tier) without an nvfp4 entry.
     EXPECT_STREQ(imp::missing_tier_entry(
-                     bound(&g_src_none, StorageTier::CUTLASS_NVFP4, StorageTier::NVFP4, U)),
+                     bound(&g_src_none, StorageTier::NVFP4_SFATOM, StorageTier::NVFP4_LINEAR, U)),
                  "nvfp4");
-    EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::NVFP4, U, U)), "nvfp4");
+    EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::NVFP4_LINEAR, U, U)), "nvfp4");
     // FP8 decode or FP8 prefill without an fp8 entry.
     EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::FP16, StorageTier::FP8, U)), "fp8");
     EXPECT_STREQ(imp::missing_tier_entry(
-                     bound(&g_src_b, StorageTier::CUTLASS_NVFP4, StorageTier::NVFP4, StorageTier::FP8)),
+                     bound(&g_src_b, StorageTier::NVFP4_SFATOM, StorageTier::NVFP4_LINEAR, StorageTier::FP8)),
                  "fp8");
     // FP16 prefill without an fp16 entry: the source is the weight, a designed state.
     EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::FP16, U, U)), nullptr);

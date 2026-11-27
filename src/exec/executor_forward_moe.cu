@@ -396,7 +396,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
         return false;
     if (!moe_.cutlass3x_sfa_ptrs.data() || moe_.cutlass3x_sfa_ptrs_count < ctx.ne)
         return false;
-    // All expert tensors must be CUTLASS_NVFP4 — covers_ids() in the inner
+    // All expert tensors must be NVFP4_SFATOM — covers_ids() in the inner
     // function. Mirrored here to avoid the upstream skip-gather firing when
     // the inner path would refuse to take this layer.
     const auto& ly = model_->layer(layer);
@@ -406,7 +406,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
         for (int e = 0; e < ctx.ne; ++e) {
             if (ids[e] == kInvalidTensorID)
                 return false;
-            if (registry_.handle(ids[e]).primary_tier != StorageTier::CUTLASS_NVFP4)
+            if (registry_.handle(ids[e]).primary_tier != StorageTier::NVFP4_SFATOM)
                 return false;
         }
         return true;
