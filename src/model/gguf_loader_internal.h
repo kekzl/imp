@@ -139,7 +139,7 @@ std::string gguf_nextn_mtp_name(const std::string& name, int nextn_layer);
 // The first nextn block of a GGUF, collected under MtpHead keys; the file mmap backs the tensors.
 struct GgufNextnHead {
     std::unordered_map<std::string, Tensor> tensors;
-    size_t bytes = 0;
+    size_t bytes = 0;  // its FP16 device size, the MTP upload pre-check input
 };
 
 // assign_tensor, else a nextn tensor into `head`; false = neither (a skipped tensor).

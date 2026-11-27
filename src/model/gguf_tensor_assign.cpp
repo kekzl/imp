@@ -83,7 +83,9 @@ bool assign_or_collect_tensor(Model& model, GgufNextnHead& head, const std::stri
     std::string key = gguf_nextn_mtp_name(name, model.n_layers());
     if (key.empty())
         return false;
-    head.bytes += tensor.nbytes();
+    // Device FP16 bytes (upload_mtp_tensor dequantizes block quants): nbytes() is 0 for Q8_0, so the
+    // Qwen3.8-27B-Q8_0 nextn head read 0 MiB in the VRAM pre-check (B-140).
+    head.bytes += static_cast<size_t>(tensor.numel()) * 2;
     head.tensors.emplace(std::move(key), tensor);
     return true;
 }
