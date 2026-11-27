@@ -94,8 +94,8 @@ struct GEMM {
     // "auto" = on for gpt-oss and Qwen4Exp (dense BF16 weights get no NVFP4 decode
     // cache). Other arches off pending a decode-path PPL gate (--prefill-chunk-size 1).
     std::string fp8_attn_proj = "auto";
-    // Same FP8 decode sidecar for the dense full-precision FFN weights (w_gate/w_up/w_down), M=1 only.
-    // Off: Gemma-4-26B-A4B decode-quality gate result in docs/ROADMAP.md B-141.
+    // Same FP8 decode sidecar for the dense full-precision FFN trio (incl. shared-expert slots), M=1 only.
+    // Gemma-4-26B-A4B: decode +6.2 %, +514 MiB, top-1 99.06 % (docs/ROADMAP.md B-141); off by default.
     bool fp8_ffn_proj = false;
 };
 
