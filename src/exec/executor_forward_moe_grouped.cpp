@@ -333,7 +333,7 @@ bool GraphExecutor::try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t s
             static LogOnce s_da_logged;
             if (layer == 0 && s_da_logged.first())
                 IMP_LOG_INFO(
-                    "MoE prefill: CUTLASS 3.x device-args full path "
+                    "MoE prefill: grouped NVFP4 device-args full path "
                     "(default)");
             // Populate device-resident d_M_per (no D2H).
             imp::compute_M_per_from_offsets_device(static_cast<const int32_t*>(routing.expert_offsets.data),
@@ -531,7 +531,7 @@ bool GraphExecutor::try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t s
         moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                                                   static_cast<size_t>(ne + 1) * sizeof(int32_t),
                                                   cudaMemcpyDeviceToHost, stream),
-                                  "cutlass3x legacy prefill");
+                                  "grouped NVFP4 legacy prefill");
         // Populate device-resident d_M_per in parallel with the D2H copy.
         // Phase 1 of MoE-prefill-graphs lever: foundation for graph-safe
         // dispatch (Phase 2+ migrates host M_per[] uses to this buffer).
@@ -539,7 +539,7 @@ bool GraphExecutor::try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t s
             imp::compute_M_per_from_offsets_device(static_cast<const int32_t*>(routing.expert_offsets.data),
                                                    moe_.d_M_per.data(), ne, stream);
         }
-        moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "cutlass3x legacy prefill");
+        moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "grouped NVFP4 legacy prefill");
 
         std::vector<int> M_per(ne);
         for (int e = 0; e < ne; ++e)
@@ -572,7 +572,7 @@ bool GraphExecutor::try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t s
             }
             const size_t total_sfa = sfa_offsets[ne];
             if (total_packed > moe_.grouped_packed_size || total_sfa > moe_.grouped_sf_size) {
-                IMP_LOG_ERROR("CUTLASS 3.x MoE staging too small: need packed=%zu sf=%zu, have %zu/%zu",
+                IMP_LOG_ERROR("grouped NVFP4 MoE staging too small: need packed=%zu sf=%zu, have %zu/%zu",
                               total_packed, total_sfa, moe_.grouped_packed_size, moe_.grouped_sf_size);
                 return false;
             }

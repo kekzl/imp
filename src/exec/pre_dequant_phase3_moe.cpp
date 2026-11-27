@@ -161,7 +161,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         // Per-expert NVFP4_SFATOM registration (#547 prefill): without it, covers_ids() rejects
         // the grouped NVFP4 path and prefill falls to the dequant->FP16->cuBLASLt batch
         // fallback. Mirrors cache_moe_native_nvfp4's re-stamp block: shared SfAtom buffer per
-        // projection + per-expert Tensor slices so Phase 4's register_tensor() sees CUTLASS-tier
+        // projection + per-expert Tensor slices so Phase 4's register_tensor() sees NVFP4_SFATOM-tier
         // wcache entries.
         auto register_sfatom = [&](NvFP4MoEQuantResult& r, std::vector<Tensor>& experts,
                                    const std::vector<float>& h_ts) -> bool {
@@ -218,7 +218,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         bool ct_ok = register_sfatom(g, L.expert_w_gate, g_ts) && register_sfatom(u, L.expert_w_up, u_ts) &&
                      register_sfatom(d, L.expert_w_down, d_ts);
         if (i == 0)
-            IMP_LOG_INFO("gpt-oss: CUTLASS grouped prefill %s", ct_ok ? "registered" : "UNAVAILABLE");
+            IMP_LOG_INFO("gpt-oss: grouped NVFP4 prefill %s", ct_ok ? "registered" : "UNAVAILABLE");
 
         dctx.nvfp4_moe_count += 3;
         converted++;
@@ -437,7 +437,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 }
                 // Per-expert uploads land contiguous only while the async pool hands out adjacent
                 // blocks; a pool shaped by an earlier engine splits them (#2180). Restack into one
-                // slab; the originals stay for the CUTLASS prefill entries keyed on them.
+                // slab; the originals stay for the SfAtom prefill entries keyed on them.
                 void* data_base = experts[0].data;
                 auto slab_own = (shapes_ok && !data_contig)
                                     ? DeviceOwned<void>::allocate(vram_alloc_, ne_z * e_packed,
@@ -499,7 +499,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         dctx.nvfp4_moe_count++;
                         // The contiguous micro-scale copy becomes the single source for every consumer
                         // (decode
-                        // cache via r.micro_scales; CUTLASS prefill reads its own Phase-0 SfAtom buffers,
+                        // cache via r.micro_scales; SfAtom prefill reads its own Phase-0 SfAtom buffers,
                         // never the raw scales). Free the scattered per-expert source scales (they were
                         // resident TWICE) and re-stamp the layer tensors + per-expert nvfp4 wcache
                         // entries onto the copy slices. Mirrors the non-borrow branch's free-after-copy
@@ -540,7 +540,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 }
                 IMP_LOG_INFO(
                     "NVFP4 MoE native: zero-copy decode declined (shapes_ok=%d data_contig=%d) — "
-                    "leaving on CUTLASS path",
+                    "leaving on the SfAtom path",
                     (int)shapes_ok, (int)data_contig);
             }
             // Non-contiguous data or alloc failed: leave experts on the

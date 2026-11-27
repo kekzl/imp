@@ -205,7 +205,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // (body extracted to pre_dequant_phase0_promote_nvfp4_sidecars_)
     pre_dequant_phase0_promote_nvfp4_sidecars_(cfg, stream);
 
-    // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
+    // --- Phase 0b: register prequant-promoted NVFP4 weights in the decode cache ---
     // (body extracted to pre_dequant_phase0b_register_prequant_nvfp4_)
     pre_dequant_phase0b_register_prequant_nvfp4_(cfg, stream);
 
@@ -248,7 +248,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     fp8_lm_head_cache_(stream);
     mtp_draft_lm_head_nvfp4_(stream);  // MTP draft copy of an FP8-served 16-bit head
 
-    // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
+    // --- Phase 3: NVFP4 decode weight cache + 3b SfAtom + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);
 
     // --- Phase 3d: NVFP4 prefill copies of the F16 GDN projections (gemm.nvfp4_gdn_proj_prefill) ---

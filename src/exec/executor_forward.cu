@@ -192,9 +192,8 @@ void GraphExecutor::build_lm_head_sfatom_(cudaStream_t stream) {
         NvFP4SfAtomWeight view = *ct;  // a sliced copy of an entry is a view
         lm_head_sfatom_ = NvFP4SfAtomCacheEntry(std::move(view));
         lm_head_sfatom_ready_ = lm_head_sfatom_.data != nullptr;
-        IMP_LOG_INFO(
-            "LM head: batched-decode CUTLASS GEMM borrows the prefill SfAtom (%zu KiB not duplicated)",
-            lm_head_sfatom_.sf_bytes / 1024);
+        IMP_LOG_INFO("LM head: batched-decode W4A4 GEMM borrows the prefill SfAtom (%zu KiB not duplicated)",
+                     lm_head_sfatom_.sf_bytes / 1024);
         return;
     }
     // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
@@ -202,15 +201,14 @@ void GraphExecutor::build_lm_head_sfatom_(cudaStream_t stream) {
     convert_nvfp4_to_sfatom(*lm_e.nvfp4, built, stream);
     lm_head_sfatom_ = NvFP4SfAtomCacheEntry(std::move(built));  // owns the SfAtom scales
     if (const cudaError_t err = cudaStreamSynchronize(stream); err != cudaSuccess) {
-        IMP_LOG_WARN("LM head: CUTLASS NVFP4 conversion failed (%s), GEMV path stays",
-                     cudaGetErrorString(err));
+        IMP_LOG_WARN("LM head: SfAtom conversion failed (%s), GEMV path stays", cudaGetErrorString(err));
         lm_head_sfatom_ = NvFP4SfAtomCacheEntry{};
         return;
     }
     lm_head_sfatom_ready_ = (lm_head_sfatom_.data != nullptr && lm_head_sfatom_.scale_factors != nullptr);
     if (lm_head_sfatom_ready_)
         IMP_LOG_INFO(
-            "LM head: CUTLASS NVFP4 tensor-core GEMM enabled for batched decode "
+            "LM head: NVFP4 tile GEMM enabled for batched decode "
             "(N=%lld K=%lld, +%zu KiB SfAtom scales)",
             static_cast<long long>(lm_head_sfatom_.N), static_cast<long long>(lm_head_sfatom_.K),
             lm_head_sfatom_.sf_bytes / 1024);

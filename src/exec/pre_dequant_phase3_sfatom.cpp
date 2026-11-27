@@ -1,4 +1,4 @@
-// Pre-dequant Phase 3 (CUTLASS/MXFP4): NVFP4->CUTLASS sm_120 conversion, native MXFP4
+// Pre-dequant Phase 3 (SfAtom/MXFP4): NVFP4 -> SfAtom conversion, native MXFP4
 // registration, and the MXFP4->FP16 decode fallback. Split out to keep each .cu under
 // the kernel file-size threshold.
 
@@ -41,7 +41,7 @@ FallbackSite s_fb_nvfp4_sf_slab{"nvfp4_sf_slab"};
 enum class G3 { SfAtom, SkipQ8, SfLess };
 
 // G3: no SfAtom for a dense GGUF source: its M>1 GEMM reads the source (IMMA or dequant,
-// gemm_via_handle_ returns before the CUTLASS block). Decode keeps the plain wcache.nvfp4 GEMV.
+// gemm_via_handle_ returns before the SfAtom block). Decode keeps the plain wcache.nvfp4 GEMV.
 // Q8_0 (IMMA) takes no entry (tier NVFP4); every other qtype gets an SfAtom-less entry here
 // so its handle keeps the NVFP4_SFATOM tier and routes. Qwen3-14B-Q6_K: 788 MiB.
 G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const NvFP4QuantResult& nvfp4) {
@@ -65,8 +65,8 @@ G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const
 
 }  // namespace
 
-// Phase 3b: convert NVFP4 weights into CUTLASS sm_120 block-scaled format. Must run
-// after FP16-free; the CUTLASS cache approximately doubles NVFP4 VRAM (repacked data +
+// Phase 3b: convert NVFP4 weights into the SfAtom block-scaled layout. Must run
+// after FP16-free; the SfAtom cache approximately doubles NVFP4 VRAM (repacked data +
 // SfAtom scales). Budget-aware: stops if VRAM runs out and logs an info line.
 void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const VRAMBudget& budget,
                                                  size_t& remaining_budget, cudaStream_t stream) {
@@ -80,7 +80,7 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
         vram_i4_probe("nvfp4_sfatom_budget");
         // Intentionally NOT using dctx.safety_reserve here: populating nvfp4_sfatom in mode 2
         // destabilised CUDA-graph capture on some models. The dense in-loop safety relaxation
-        // already delivers its decode win; the CUTLASS path stays conservative until the
+        // already delivers its decode win; the SfAtom path stays conservative until the
         // capture-failure root cause is understood.
         size_t kCtReserve = vram_reserve_floor(total_mem);
         // GGUF with a plan: also leave the planned KV pool and later claims (975 MiB of SF took
@@ -92,7 +92,7 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
         // this driver). Floor, don't trust live-free below the guarantee (AUDIT B62).
         if (budget.mandatory_sf_bytes > ct_budget) {
             IMP_LOG_INFO(
-                "CUTLASS NVFP4 cache: budget floored at guaranteed %.1f MiB "
+                "SfAtom NVFP4 cache: budget floored at guaranteed %.1f MiB "
                 "(live-free-derived %.1f MiB under-reports)",
                 budget.mandatory_sf_bytes / (1024.0 * 1024.0), ct_budget / (1024.0 * 1024.0));
             ct_budget = budget.mandatory_sf_bytes;
@@ -105,7 +105,7 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
     // batched launch per (layer,projection) group instead of one per expert. Pass 1 sizes
     // the slab (contiguous MoE groups first, then per-tensor entries); pass 2 converts each
     // into its slab offset.
-    constexpr size_t kSfAlign = 256;  // keep each entry's SF base CUTLASS-aligned
+    constexpr size_t kSfAlign = 256;  // keep each entry's SF base 256-B aligned
     auto align_up = [](size_t x, size_t a) { return (x + a - 1) / a * a; };
 
     // Identify contiguous MoE expert groups from the model (wcache_->nvfp4_moe isn't
@@ -138,7 +138,7 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
                 static_cast<const char*>(experts[0].scales) + (static_cast<size_t>(e) * e_ms))
                 return;  // micro-scales not contiguous → per-tensor fallback
             if (!wcache_->nvfp4.contains(w.data))
-                return;  // not a registered CUTLASS candidate
+                return;  // not a registered SfAtom candidate
         }
         MoeGroup g;
         g.base_ms = experts[0].scales;
@@ -200,7 +200,7 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
         }
     }
     if (ct_exhausted)
-        IMP_LOG_INFO("CUTLASS NVFP4 cache: VRAM budget reached (%.1f / %.1f MiB)",
+        IMP_LOG_INFO("SfAtom NVFP4 cache: VRAM budget reached (%.1f / %.1f MiB)",
                      ct_total / (1024.0 * 1024.0), ct_budget / (1024.0 * 1024.0));
 
     int ct_count = 0;
@@ -269,7 +269,7 @@ void QuantPipeline::nvfp4_decode_convert_sfatom_(const ModelConfig& cfg, const V
 }
 
 // Native MXFP4 GGUF: the W4A16 GEMM scratch (one dense MXFP4 weight as FP16, largest non-LM-head N x K, plus
-// the LM-head slice output of the same size), and the NVFP4 activation buffer the CUTLASS NVFP4 prefill
+// the LM-head slice output of the same size), and the NVFP4 activation buffer the SfAtom NVFP4 prefill
 // quantizes into when no NVFP4 weight allocated it. Phase 3 and the standalone phase 3c both call this.
 void QuantPipeline::alloc_mxfp4_gemm_scratch_(const ModelConfig& cfg) {
     if (!model_has_dense_mxfp4(*model_, cfg.n_layers))
@@ -305,7 +305,7 @@ void QuantPipeline::alloc_mxfp4_gemm_scratch_(const ModelConfig& cfg) {
 }
 
 // Native MXFP4 GGUF unpack + FP16 fallback dequant. Registers MXFP4 weights directly in
-// the CUTLASS cache, then for GDN/forced-fallback models dequants them into a bulk FP16
+// the SfAtom cache, then for GDN/forced-fallback models dequants them into a bulk FP16
 // buffer and rewrites model weight pointers so dispatch sees FP16 instead of raw MXFP4.
 void QuantPipeline::nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream) {
     int mx_native = 0;
@@ -356,7 +356,7 @@ void QuantPipeline::nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cu
         // Also suspend-unsupported: a weight snapshot would capture the compacted
         // bytes and the resume replay would compact them again.
         const_cast<Model*>(model_)->mark_device_sources_mutated();
-        IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)", mx_native,
+        IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → SfAtom)", mx_native,
                      mx_native_bytes / (1024.0 * 1024.0));
 
         // Sync and check for errors from unpack kernels

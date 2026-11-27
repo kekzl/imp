@@ -53,7 +53,7 @@ TEST(WeightTierEntries, BindTakesTheMapNodesOfTheSource) {
     EXPECT_EQ(h.entries.nvfp4, nullptr);
 }
 
-// Slice 2: the CUTLASS / prefill-copy maps and the Phase 4b / 4c release maps bind too; a bind
+// Slice 2: the SfAtom / prefill-copy maps and the Phase 4b / 4c release maps bind too; a bind
 // taken before 4b / 4c keyed the released source sees none of them until the rebind.
 TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
     WeightCaches wc;

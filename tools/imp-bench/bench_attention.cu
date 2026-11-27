@@ -125,7 +125,7 @@ bool bench_attention() {
         return false;  // measured nothing (#1584)
     }
 
-    printf("=== Attention Prefill: CUTLASS FMHA vs WMMA Blackwell ===\n");
+    printf("=== Attention Prefill: runtime dispatch vs WMMA Blackwell ===\n");
     printf("Causal, FP16, batch=1, warmup=10, iters=30\n\n");
 
     cudaStream_t stream = nullptr;
@@ -141,10 +141,10 @@ bool bench_attention() {
     for (const auto& cfg : configs) {
         printf("%-24s  nh=%2d nkv=%2d hd=%3d (GQA %dx)\n", cfg.name, cfg.n_heads, cfg.n_kv_heads,
                cfg.head_dim, cfg.n_heads / cfg.n_kv_heads);
-        printf("  %8s  %10s  %10s  %10s  %7s\n", "seq", "CUTLASS", "WMMA", "TFLOPS C/W", "speedup");
+        printf("  %8s  %10s  %10s  %10s  %7s\n", "seq", "dispatch", "WMMA", "TFLOPS D/W", "speedup");
 
         for (int seq_len : seq_lens) {
-            // Run CUTLASS first, then WMMA, then CUTLASS again — take best of two CUTLASS runs
+            // Run dispatch first, then WMMA, then dispatch again: take best of two dispatch runs
             float ms_dispatch1 = bench_kernel(cfg, seq_len, true, stream);
             float ms_wmma = bench_kernel(cfg, seq_len, false, stream);
             float ms_dispatch2 = bench_kernel(cfg, seq_len, true, stream);

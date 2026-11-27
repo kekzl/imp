@@ -6,7 +6,7 @@
 
 namespace imp {
 
-// Own NVFP4 x NVFP4 prefill GEMM on the CUTLASS operand bytes: D[M,N] fp16 = alpha * A W^T.
+// Own NVFP4 x NVFP4 prefill GEMM on the SfAtom operand bytes: D[M,N] fp16 = alpha * A W^T.
 // A [M,K/2] / W [N,K/2] packed E2M1 row-major, scales UE4M3 in SfAtom layout
 // (nvfp4_sfatom_size, rows padded to 128). K % 64 == 0 (K % 128 = 64: partial last stage), N % 8 == 0;
 // false = refused. variant -1 = auto; 0 128x128, 1 128x256, 2 sync, 3 stream-K 128x128, 4 hybrid stream-K

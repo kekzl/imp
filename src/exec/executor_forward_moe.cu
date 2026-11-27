@@ -611,7 +611,7 @@ moe_after_experts:
 
 // Reads the expert-sorted buffers after the expert GEMMs and before the shared MLP reuses
 // moe_.expert_gate as scratch. The down input is recomputed into moe_.expert_swiglu (dead after
-// the down GEMM) because the fused CUTLASS act+quantize never materializes it.
+// the down GEMM) because the fused SfAtom act+quantize never materializes it.
 void GraphExecutor::calibrate_moe_experts_(int layer, cudaStream_t stream, const MoeFfnContext& ctx) {
     if (!calib_)
         return;

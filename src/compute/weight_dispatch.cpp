@@ -25,8 +25,8 @@ namespace imp {
 // reconstructing a per-tier descriptor from handle.payload; no consumers yet (Phase 3).
 // FP8/NVFP4_SFATOM/MXFP4 need the activation pre-quantized before the weight GEMM. The
 // dispatch proxy carves the workspace into: [0..M*K/2) packed FP4 activation
-// (CUTLASS/MXFP4); [M*K/2..+sf) SfAtom scales (CUTLASS/MXFP4); [aligned past sf..)
-// cuBLAS/CUTLASS workspace. FP8: [0..M*K) FP8 activation, [M*K..+sizeof(float)) d_act_scale.
+// (NVFP4_SFATOM/MXFP4); [M*K/2..+sf) SfAtom scales (NVFP4_SFATOM/MXFP4); [aligned past sf..)
+// GEMM workspace. FP8: [0..M*K) FP8 activation, [M*K..+sizeof(float)) d_act_scale.
 // Too-small workspace falls back to gemm_nvfp4 / plain gemm.
 
 // NVFP4 M=1 on the own tile: zero the SfAtom slice (padding the kernel does not touch), quantize, GEMM.
@@ -139,8 +139,8 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             return;
         }
 
-        // CUTLASS NVFP4: weight is NvFP4SfAtomWeight (SfAtom layout). M=1 decode: same NVFP4 GEMV
-        // path. M>1 prefill: quantize activation to NVFP4 CUTLASS format via workspace, call
+        // NVFP4_SFATOM: weight is NvFP4SfAtomWeight (SfAtom layout). M=1 decode: same NVFP4 GEMV
+        // path. M>1 prefill: quantize activation to NVFP4 SfAtom via workspace, call
         // the own tile GEMM (gemm_nvfp4_tile); falls back to gemm_nvfp4 (dequant) if workspace too small.
         case StorageTier::NVFP4_SFATOM: {
             int M = static_cast<int>(x.shape[0]);
@@ -187,7 +187,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                     total_needed, workspace_bytes, N, K);
             }
 
-            // M>1 prefill: activate → NVFP4 cutlass, then GEMM.
+            // M>1 prefill: activation -> NVFP4 SfAtom, then GEMM.
             size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
             size_t act_sf_bytes = nvfp4_sfatom_size(M, K);
             size_t total_needed = act_data_bytes + act_sf_bytes;  // the rest: optional stream-K partials

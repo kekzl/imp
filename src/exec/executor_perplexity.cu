@@ -222,7 +222,7 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
         return;
     }
     const int V = model_->config().vocab_size;
-    // Lazy-builds the CUTLASS LM head: engine init only builds it when serving
+    // Lazy-builds the SfAtom LM head: engine init only builds it when serving
     // (max_batch_size>1), but the harness must measure the batched-decode
     // quality trade from a batch=1 CLI run too. No-op if the flag is off or the LM head isn't in the NVFP4
     // decode cache.

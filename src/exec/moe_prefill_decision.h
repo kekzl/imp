@@ -22,7 +22,7 @@ struct MoePrefillWorkspace {
     // tier coverage are all present. Collapses gemm_grouped_nvfp4_moe_supports() +
     // grouped_packed/sf + covers_ids(), checked before device-args, gating it too.
     bool grouped_available = false;
-    bool device_args_ready = false;  // cutlass3x device-args buffers all populated
+    bool device_args_ready = false;  // grouped NVFP4 device-args buffers all populated
     bool grouped_ready = false;      // host-args grouped path can run this layer
     bool staged_blocks = false;      // host-expert staged prefill (ctx.staged_blocks)
 };

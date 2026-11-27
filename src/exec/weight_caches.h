@@ -127,7 +127,7 @@ struct WeightCaches {
     // the WEIGHT_CACHE_NVFP4 note excludes it.
     size_t nvfp4_moe_noted_bytes = 0;
 
-    // --- CUTLASS sm_120 block-scaled NVFP4 ---
+    // --- NVFP4, SfAtom block scales (tile GEMM) ---
     std::unordered_map<const void*, NvFP4SfAtomCacheEntry> nvfp4_sfatom;
     size_t nvfp4_sfatom_bytes = 0;
     // Part of nvfp4_sfatom_bytes VRAMAllocator already noted (MoE SfAtom slabs): the
@@ -154,7 +154,7 @@ struct WeightCaches {
     // Model::gpu_allocations_ (stream-ordered release, #834).
     std::vector<DeviceOwned<void>> owned_sf_slabs;
 
-    // --- CUTLASS sm_120 MXFP4 ---
+    // --- MXFP4, SfAtom block scales ---
     std::unordered_map<const void*, MxFP4SfAtomCacheEntry> mxfp4_sfatom;
     size_t mxfp4_sfatom_bytes = 0;
     // Native MXFP4 GGUF: packed data compacted in place in the source buffers (already WEIGHTS).

@@ -217,7 +217,7 @@ struct MoEWorkspace {
     // std::vector is a staged pageable copy: 245 us of copy-engine time per layer on WSL2.
     PinnedBuffer h_routing_readback;
 
-    // Grouped NVFP4 GEMM staging (cutlass3x_* names historical):
+    // Grouped NVFP4 GEMM staging:
     //   packed: [max_expanded, max_K/2] contiguous FP4 activations
     //   sf: per-expert SfAtom slabs, worst-case padded to 128 rows per expert
     //   sfa_ptrs: device array of [ne] pointers into sf slab (fused-quantize kernel input)

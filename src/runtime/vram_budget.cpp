@@ -414,7 +414,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             nvfp4_estimate / (1024.0 * 1024.0), nvfp4_sfatom_estimate / (1024.0 * 1024.0));
 
         // Native NVFP4 checkpoints: the GGUF-oriented count above yields 0, but phase 3 still needs
-        // post-KV headroom for (a) the persistent CUTLASS SfAtom SF cache (~elems/16 across ALL
+        // post-KV headroom for (a) the persistent SfAtom SF cache (~elems/16 across ALL
         // NVFP4 weights incl. experts, summed from the source-aware PLAN), (b) the transient
         // per-(layer,proj) MoE contiguous-copy slab, and (c) free-VRAM reserves phases 0-3
         // re-derive (vram_reserve_floor: the 4 % allocator headroom) plus executor workspaces between KV init
@@ -557,7 +557,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // The VRAM-aware auto max_batch_size (#736) can size needed_blocks (= max_batch_size ×
     // max_seq_len) past real headroom on small-weight/large-card configs, overflowing cudaMalloc.
     // Clamping bounds concurrency via scheduler admission (Scheduler::can_allocate); no single
-    // sequence is under-served. Subtract NVFP4 decode + CUTLASS-SF caches sharing this headroom.
+    // sequence is under-served. Subtract NVFP4 decode + SfAtom caches sharing this headroom.
     if (per_block_total > 0) {
         size_t weight_caches = nvfp4_estimate + nvfp4_sfatom_estimate;
         size_t kv_room = (available > weight_caches) ? (available - weight_caches) : available;

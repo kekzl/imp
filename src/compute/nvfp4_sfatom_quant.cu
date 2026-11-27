@@ -386,7 +386,7 @@ void quantize_fp16_to_nvfp4_sfatom_moe_gather(const void* src_fp16, const int32_
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Fused activation + NVFP4 CUTLASS quantize (phase-5 review section 2.2, #604): reads gate+up
+// Fused activation + NVFP4 SfAtom quantize (phase-5 review section 2.2, #604): reads gate+up
 // from HBM, computes SwiGLU/GeGLU/ReLU^2 in registers, writes only packed FP4 + SFA. Replaces
 // apply_expert_activation + quantize_..._moe, saving one HBM round-trip of the swiglu
 // intermediate (never materialized in HBM).
@@ -500,7 +500,7 @@ void fused_act_quantize_fp16_to_nvfp4_sfatom_moe(const void* gate_fp16, const vo
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Dense SwiGLU + CUTLASS NVFP4 quantize: one thread per 16-value micro-block, FP16 math of
+// Dense SwiGLU + SfAtom NVFP4 quantize: one thread per 16-value micro-block, FP16 math of
 // swiglu_fp16_kernel, quantized from the stored FP16 values (= quantize_fp16_nvfp4_sfatom_kernel).
 __global__ void swiglu_quantize_fp16_nvfp4_sfatom_kernel(const half* __restrict__ gate,
                                                          const half* __restrict__ up, half* __restrict__ out,

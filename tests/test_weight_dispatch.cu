@@ -407,7 +407,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
 // Prequant-loaded NVFP4 weight handles carry PACKED K/2 in shape[1] (two nibbles/byte), not
 // logical K, inconsistent with handles built elsewhere (logical K). The phase-2 shim must
 // derive K from the activation, never the handle, or the M>1 dequant fallback aborts - the
-// native-NVFP4 server crash that surfaced when a large KV budget starved the CUTLASS prefill
+// native-NVFP4 server crash that surfaced when a large KV budget starved the SfAtom prefill
 // workspace and forced the dequant fallback.
 TEST_F(WeightDispatchTest, NVFP4_GemmPackedShapeMatchesDirect) {
     const int N_OUT = 16, M_BATCH = 8, K = 64;

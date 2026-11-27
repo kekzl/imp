@@ -1,4 +1,4 @@
-// Dense prefill SwiGLU + CUTLASS NVFP4 quantize (#2470): FP16 output, packed FP4 and SfAtom
+// Dense prefill SwiGLU + SfAtom NVFP4 quantize (#2470): FP16 output, packed FP4 and SfAtom
 // scales byte-identical to swiglu() followed by quantize_fp16_to_nvfp4_sfatom().
 
 #include <gtest/gtest.h>

@@ -141,7 +141,7 @@ TEST_F(GemmKernelRegistryTest, NvFP4SfAtomRegistryDispatchRunsToCompletion) {
     Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
     Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
 
-    // Quantize weight to NVFP4, then convert to CUTLASS block-scaled layout
+    // Quantize weight to NVFP4, then convert to the SfAtom block-scaled layout
     // (SfAtom). The adapter consumes the NvFP4SfAtomWeight verbatim.
     NvFP4Owned nv4{};
     quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);

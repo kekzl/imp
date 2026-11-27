@@ -1,7 +1,7 @@
 // Phase 3c: standalone MXFP4, for MXFP4-source GGUF models when the NVFP4 decode
 // pipeline (Phase 3) is disabled. Dequantizes small alpha/beta tensors to FP16 BEFORE
 // the in-place unpack (which compacts raw blocks), then registers + in-place unpacks
-// the bulk MXFP4 weights into the CUTLASS sm_120 MXFP4 cache.
+// the bulk MXFP4 weights into the SfAtom MXFP4 cache.
 // Maintenance mode: MXFP4 is supported but not the dev priority (NVFP4 + SafeTensors is
 // where the hero models live). Ship cleanup fixes (load errors, missing pointer
 // replaces, resource leaks); don't chase residual output-quality bugs on community MXFP4

@@ -108,8 +108,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // expert per projection. Only the experts the routing touched move (the gather
         // kernel reads expert_offsets); the whole-layer memcpy is the fallback.
         // Decode is excluded: it wants only top_k experts, and staging all of them
-        // would be strictly more traffic than the slot cache it already uses. Reuses a CUTLASS-staged layer
-        // rather than transferring twice.
+        // would be strictly more traffic than the slot cache it already uses. Reuses a grouped-NVFP4-staged
+        // layer rather than transferring twice.
         if (!ctx.staged_done && n > 1)
             ctx.staged_done = stage_nvfp4_layer_(
                 layer, stream, static_cast<const int32_t*>(routing.expert_offsets.data),

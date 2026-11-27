@@ -231,7 +231,7 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     if (swiglu_epi_.act != nullptr)  // the up GEMM's epilogue did it (swiglu_epi_eligible_)
         return false;
     const int K = static_cast<int>(so.shape[1]);
-    // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
+    // Prefill (#2470): the SfAtom down GEMM's activation quantize rides in the SwiGLU kernel;
     // so is still written, so a declining dispatch falls back on the same bytes.
     if (!gelu && n > 32 && K % 16 == 0 && so.qtype == QType::F16 &&
         prefill_routes_nvfp4_sfatom_(consumer_id, n, mode)) {

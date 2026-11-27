@@ -45,7 +45,7 @@ struct Nvfp4DecodeContext {
     size_t nvfp4_moe_total = 0;
     size_t nvfp4_moe_ms_freed = 0;      // duplicated per-expert micro-scales freed (borrow path)
     int nvfp4_moe_partial_skipped = 0;  // GGUF MoE layers left uncached: not all projections eligible
-    // Shared VRAM safety reserve for mode 2 paths (dense incremental, CUTLASS NVFP4, MoE
+    // Shared VRAM safety reserve for mode 2 paths (dense incremental, SfAtom NVFP4, MoE
     // expert caching), computed once from the model's actual attention layout. Replaces the
     // previous total_mem/10 heuristic, which over-reserved and starved the dense NVFP4
     // cache.

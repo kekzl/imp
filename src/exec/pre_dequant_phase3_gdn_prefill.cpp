@@ -235,7 +235,7 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
     if (n_nv > 0)
         IMP_LOG_INFO(
             "GDN NVFP4 prefill: %d F16 in/gate/out projections -> NVFP4 (%.1f MiB), M>32 rows on "
-            "the CUTLASS GEMM",
+            "the NVFP4 tile GEMM",
             n_nv, nv_bytes / (1024.0 * 1024.0));
     else if (nv.any())
         IMP_LOG_INFO("GDN NVFP4 prefill: no eligible F16 GDN projection (flag on, model has none)");

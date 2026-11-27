@@ -632,7 +632,7 @@ void QuantPipeline::pre_dequant_phase0b_register_prequant_nvfp4_(const ModelConf
     Model* mut_model = const_cast<Model*>(model_);
 
     // Phase 0b: register prequant-promoted NVFP4 weights in wcache_->nvfp4 (Phase 0 set
-    // qtype=NVFP4 on the Tensor sidecars but didn't build the CUTLASS cache Phase 3b needs).
+    // qtype=NVFP4 on the Tensor sidecars but didn't build the SfAtom cache Phase 3b needs).
     // Without this, prefill falls to gemm_nvfp4 dequant->FP16 gemm() (cuBLASLt) instead of the
     // native NVFP4xNVFP4 tile GEMM, amplifying per-block quant noise on long context.
     // Applies uniformly to all NVFP4-prequant models: the CUTLASS non-determinism that once
@@ -659,7 +659,7 @@ void QuantPipeline::pre_dequant_phase0b_register_prequant_nvfp4_(const ModelConf
         tmp.N = w.shape[0];
         tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
         // Register in NVFP4 cache for decode GEMV (gemv_nvfp4_kpar needs per-16 FP8
-        // micro_scales, not SfAtom). Do NOT build the CUTLASS SfAtom buffer here: Phase 3b
+        // micro_scales, not SfAtom). Do NOT build the SfAtom buffer here: Phase 3b
         // (nvfp4_decode_convert_sfatom_) iterates this same map and unconditionally rebuilds
         // nvfp4_sfatom[ptr] for every entry, so a SfAtom built here is immediately orphaned
         // (leaked, never freed) rather than reused. Phase 3b is the authoritative, budget-aware
@@ -694,11 +694,11 @@ void QuantPipeline::pre_dequant_phase0b_register_prequant_nvfp4_(const ModelConf
     register_prequant(mut_model->out_proj_);
 
     if (ct_count > 0) {
-        // Decode-cache registration only; Phase 3b builds the CUTLASS SfAtom
+        // Decode-cache registration only; Phase 3b builds the SfAtom
         // for these entries (see register_prequant note above).
         IMP_LOG_INFO(
             "NVFP4 prequant: registered %d weights in decode cache "
-            "(CUTLASS SfAtom built once in Phase 3b)",
+            "(SfAtom built once in Phase 3b)",
             ct_count);
     }
     {

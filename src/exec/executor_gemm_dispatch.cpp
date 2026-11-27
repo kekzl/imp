@@ -94,7 +94,7 @@ static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tens
 }
 
 // Last route of gemm_via_handle_. A GGUF source with an SfAtom-less NVFP4_SFATOM entry (Phase 3 G3)
-// has no CUTLASS form for the M=1 beta != 0 call that lands here: the source serves it.
+// has no SfAtom form for the M=1 beta != 0 call that lands here: the source serves it.
 // M=1 GEMV on the quantized source (dp4a/MMVQ via the kernel registry). False when the source is
 // 16-bit, absent, or the registry declines.
 static bool source_gemv(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx) {
@@ -352,7 +352,7 @@ bool GraphExecutor::prefill_routes_nvfp4_sfatom_(TensorID id, int M, const GemmM
     if (NvFP4QuantResult nv; prompt_a16_view(h, M, dispatch_policy().gemm.nvfp4_prompt_a16_attn, nv))
         return false;
     // #1055: small-M verify chunks divert to the batched NVFP4 GEMV overlay
-    // (native branch in gemm_via_handle_) — no CUTLASS activation quant.
+    // (native branch in gemm_via_handle_) — no SfAtom activation quant.
     if (mode.spec_verify && M <= 4 && h.source_data != nullptr && h.source_scales != nullptr)
         return false;
     StorageTier prefill =

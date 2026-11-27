@@ -39,7 +39,7 @@ int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
 
 // The plan must budget the INCREMENTAL cost of reaching a tier, not its full footprint.
 // A native-NVFP4 source already holds the packed nibbles + micro-scales on device (Phase
-// 0b registers zero-copy); only the Phase 3b CUTLASS SfAtom repack (~n/16) allocates.
+// 0b registers zero-copy); only the Phase 3b SfAtom repack (~n/16) allocates.
 // Pricing the full tier bytes projected phantom demand on native checkpoints, making a
 // real insufficiency indistinguishable from the normal case (#1765).
 int64_t incremental_bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier, QType source) {

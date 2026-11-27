@@ -457,7 +457,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             IMP_CUDA_CHECK_LAUNCH();
         } else {
             // Non-dp4a paths: activation must produce FP16 intermediate in so.
-            bool down_prequant = false;  // scratch holds quantize(so) for the CUTLASS down (#2470)
+            bool down_prequant = false;  // scratch holds quantize(so) for the SfAtom down (#2470)
             switch (cfg.ffn_activation) {
                 case FFNActivation::GEGLU:
                     geglu(go, uo, so, stream);

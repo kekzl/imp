@@ -42,7 +42,7 @@ struct QuantScratch {
     DeviceOwned<void> fp8_tile_ws;  // stream-K partials of the own FP8 tile GEMM (SMs x 64 KiB)
     size_t fp8_tile_ws_size = 0;
 
-    // --- CUTLASS NVFP4 prefill activation buffers ---
+    // --- NVFP4 tile-GEMM activation buffers (SfAtom) ---
     DeviceOwned<void> tile_act_data;  // [max_tokens, max_K/2] packed FP4
     DeviceOwned<void> tile_act_sf;    // SfAtom scale factors (NVFP4: UE4M3)
     size_t tile_act_data_size = 0;
@@ -50,7 +50,7 @@ struct QuantScratch {
     // Act tensor scale the bytes in tile_act_data were quantized with: a hinted dedupe reuses
     // them only at the same scale (mutable: GemmContext holds the scratch const).
     mutable float tile_act_scale = 1.0f;
-    DeviceOwned<void> tile_workspace;  // CUTLASS GEMM workspace
+    DeviceOwned<void> tile_workspace;  // tile GEMM workspace
     size_t tile_workspace_size = 0;
 
     // --- Native MXFP4 W4A16 GEMM (M > 1): one dense weight dequantized to FP16 (largest non-LM-head N x K)

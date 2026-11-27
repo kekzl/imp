@@ -270,7 +270,7 @@
                     gemm_kv_batched(no, *fused_kv, kk, vv, stream);
                     record_dense_({ly.wk_id, ly.wv_id}, DensePath::FP16_PAIR_BATCHED);
                 } else {
-                    // NVFP4-CUTLASS prefill QKV reads the SAME normed input three times:
+                    // NVFP4 SfAtom prefill QKV reads the SAME normed input three times:
                     // quantize once (Q's dispatch) into the activation scratch, K/V skip the
                     // re-quantize via the act-quant hint. Bit-identical reuse.
                     GemmContext kv_ctx = ctx;

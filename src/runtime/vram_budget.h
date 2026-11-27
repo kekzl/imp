@@ -12,7 +12,7 @@ struct EngineConfig;
 // All-or-nothing for CUDA-graph decode: one MoE layer missing its nvfp4_moe entry falls
 // to the host-args legacy path, which aborts capture (26-40 tok/s vs ~250 captured).
 struct NativeCacheDemand {
-    // Persistent CUTLASS SfAtom SF slab (phase 3b) across ALL registered NVFP4 weights
+    // Persistent SfAtom SF slab (phase 3b) across ALL registered NVFP4 weights
     // (dense projections, experts, GDN/SSM projections, LM head). Sized with
     // nvfp4_sfatom_size() plus 256-byte per-entry alignment (pre_dequant_phase3_sfatom.cpp).
     size_t sf_bytes = 0;

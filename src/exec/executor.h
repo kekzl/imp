@@ -303,7 +303,7 @@ public:
     size_t smallm_xq_bytes_ = 0;
     // What smallm_xq_ holds: a matching tag skips the re-quantize with an act-quant hint (gate/up,
     // q/k/v, GDN in/z) or while a producer stamp is live (view_tokens retires it). Never read by
-    // the CUTLASS prefill consumer.
+    // the SfAtom prefill consumer.
     SmallMXqTag smallm_xq_tag_;
 
     // Grow the small-M xq scratch (no-op while capturing; resize
@@ -440,7 +440,7 @@ public:
     bool norm_fold_on_ = false;       // this forward: n == 1, flag on, not deterministic
     BufferStamp<unsigned long long*> norm_fold_;  // armed: out = no, key = gamma, payload = ssq slot
     // Fused swiglu+quantize when the down projection takes the small-M
-    // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu(). gelu: GeGLU,
+    // route (true: tile act scratch holds quantize(so), M > 32); else plain swiglu(). gelu: GeGLU,
     // small-M rows only (K % 64: Gemma-4 shared down K 2112), else plain geglu().
     [[nodiscard]] bool swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
                                           TensorID consumer_id, int n, const GemmMode& mode,
@@ -1004,7 +1004,7 @@ private:
     // StoragePlan; fills the long-lived caches below by reference in build().
     QuantPipeline quant_pipeline_;
 
-    // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
+    // Weight caches (FP16, FP8, NVFP4, SfAtom NVFP4/MXFP4, fused KV/gate+up)
     WeightCaches wcache_;
 
     // Mode flags mirrored from wcache_ for PlanHints (hints_ is the Phase 5 source of truth).
@@ -1016,7 +1016,7 @@ private:
     // WeightRegistry: parallel handle store (Phase 2+ shim, populated alongside wcache_)
     WeightRegistry registry_;
 
-    // Quantization scratch buffers (FP8 act, CUTLASS act, dp4a, dequant, split-K)
+    // Quantization scratch buffers (FP8 act, tile act, dp4a, dequant, split-K)
     QuantScratch qscratch_;
 
     // SfAtom NVFP4 LM head for the batched-decode (n>1) tile GEMM (#2937). Borrows
@@ -1290,8 +1290,8 @@ private:
     // pre-cached-FP16 dispatch). Unconditional — caller selects when no
     // other path matched.
     void run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
-    // Own grouped NVFP4 GEMM MoE prefill, "cutlass3x" name historical (device-args
-    // / smallM / legacy host-args sub-variants). Predicate is checked
+    // Own grouped NVFP4 GEMM MoE prefill (device-args / smallM / legacy host-args
+    // sub-variants). Predicate is checked
     // internally; returns true if the path ran.
     [[nodiscard]] bool try_run_moe_grouped_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Cheap precondition mirror for the device-args fast path, read upstream

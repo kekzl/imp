@@ -189,8 +189,8 @@ TEST(DispatchRecord, DenseKeepsLastAndEverySeenExitPerKind) {
 }
 
 // The two-level paths (outer → tier) must report the tier only once it was
-// really recorded, otherwise the summary would claim a CUTLASS tier for a
-// model that never reached the CUTLASS branch.
+// really recorded, otherwise the summary would claim a grouped NVFP4 tier for a
+// model that never reached the grouped NVFP4 branch.
 TEST(DispatchRecord, TierFlagsTrackTheirSetters) {
     dispatch_record::reset();
     const auto& r = dispatch_record::current();

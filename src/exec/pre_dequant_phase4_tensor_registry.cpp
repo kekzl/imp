@@ -426,7 +426,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     // as device-resident arrays; per-call host iteration + cudaMemcpyAsync was the residual
     // overhead blocking full CUDA-graph capture of the MoE prefill. Build the caches once
     // here while handle payloads are populated; the forward path then uses device pointers
-    // directly. Requires the model be MoE and at least one layer fully CUTLASS-NVFP4-backed.
+    // directly. Requires the model be MoE and at least one layer fully NVFP4_SFATOM-backed.
     {
         const int ne = cfg.n_experts;
         const int n_layers = cfg.n_layers;
@@ -508,7 +508,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 // without counting against the must-populate gate.
                 continue;
             }
-            // Host-resident layers (host-offload / force_host_experts) by design have no CUTLASS
+            // Host-resident layers (host-offload / force_host_experts) by design have no SfAtom
             // NVFP4 weight payload; the per-layer fallback dispatch is the intended path, not a QW8
             // build failure. Detect via either packed-tensor (GGUF Path A) or per-expert tensor
             // (SafeTensors Path B) staying on host.
@@ -813,7 +813,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
 // An FP8 head (gemm.nvfp4_lm_head=fp8) or an NVFP4 decode-cache head serves every LM-head path:
 // forward_logits, for_each_lm_head_batch_, perplexity, prompt logprobs and the MTP draft read it,
 // none reads the source. The source's bytes go to the expert cache minus the served head built
-// after the cache was sized. Kept when tied or keyed by another cache (a CUTLASS entry with SfAtom).
+// after the cache was sized. Kept when tied or keyed by another cache (an NVFP4_SFATOM entry with SfAtom).
 void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
                                             const std::function<void(Tensor&)>& free_source) {
     auto* mut_model = const_cast<Model*>(model_);

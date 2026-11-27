@@ -12,7 +12,7 @@ namespace imp {
 
 struct NvFP4QuantResult;  // forward
 
-// Weight for the block-scaled NVFP4 GEMMs (own tile, cuBLASLt on refusal; "Cutlass" names historical, #2938).
+// Weight for the block-scaled NVFP4 GEMMs (own tile, cuBLASLt on refusal).
 // Packed FP4 borrowed from the NVFP4 cache (RowMajor K-contiguous); scale_factors = micro_scale only (UE4M3
 // SfAtom); tensor_scale is deferred to the GEMM epilogue alpha (avoids UE4M3 denormal range).
 struct NvFP4SfAtomWeight {
@@ -26,7 +26,7 @@ struct NvFP4SfAtomWeight {
 
 struct NvFP4SfAtomOwned;  // compute/nvfp4_sfatom_owned.h: owns the SfAtom buffer (I5)
 
-// Convert imp NvFP4QuantResult to CUTLASS block-scaled format.
+// Convert imp NvFP4QuantResult to the SfAtom block-scaled layout.
 // Borrows packed_data pointer (RowMajor). tensor_scale is stored for GEMM alpha.
 void convert_nvfp4_to_sfatom(const NvFP4QuantResult& src, NvFP4SfAtomOwned& dst, cudaStream_t stream);
 
@@ -48,7 +48,7 @@ size_t nvfp4_sfatom_size(int rows, int K);
 void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N, int K,
                                         cudaStream_t stream, const int32_t* expert_offsets = nullptr);
 
-// Quantizes FP16 activation [M,K] to NVFP4 CUTLASS block-scaled format. dst_data: [M,K/2]
+// Quantizes FP16 activation [M,K] to the NVFP4 SfAtom block-scaled layout. dst_data: [M,K/2]
 // packed FP4; dst_sf: SfAtom UE4M3 scales. Warns once at shutdown if any micro-block clipped
 // the UE4M3 scale ceiling during the run (#1544); called from gemm_cleanup(). Includes the MoE
 // decode act-quantize flag (gemm_grouped_nvfp4_decode_scale_clipped, gemm_grouped_nvfp4_decode.h).
@@ -68,18 +68,18 @@ void quantize_fp16_to_nvfp4_sfatom_moe(const void* src_fp16, void* dst_packed, u
                                        const int* d_offsets, int expanded, int K, int ne, cudaStream_t stream,
                                        float act_scale = 1.0f);
 
-// MoE fused gather + NVFP4 CUTLASS quantize. Same packing/scale layout as
+// MoE fused gather + NVFP4 SfAtom quantize. Same packing/scale layout as
 // quantize_fp16_to_nvfp4_sfatom_moe, but reads input in token order (pre-permute
 // norm_out[n_tokens,K]); output row r reads src_fp16[sorted_token_ids[r]*K+...]. Bit-identical
 // to (moe_gather -> quantize_fp16_to_nvfp4_sfatom_moe) since sorted_token_ids is a
 // permutation. Enables a future skip-gather optimization gated on a lazy-gather addition in
-// the legacy fallback (docs/plans/moe_prefill_cudagraph_via_cutlass_moe_scheduler_*.md).
+// the legacy fallback (docs/plans/moe_prefill_cudagraph_*.md).
 void quantize_fp16_to_nvfp4_sfatom_moe_gather(const void* src_fp16, const int32_t* sorted_token_ids,
                                               void* dst_packed, uint8_t* const* d_sfa_bases,
                                               const int* d_offsets, int expanded, int K, int ne,
                                               cudaStream_t stream, float act_scale = 1.0f);
 
-// Fused activation + NVFP4 CUTLASS quantize for the MoE down-projection input. Replaces
+// Fused activation + NVFP4 SfAtom quantize for the MoE down-projection input. Replaces
 // apply_expert_activation(gate,up->swiglu) + quantize_fp16_to_nvfp4_sfatom_moe(swiglu): reads
 // gate+up from HBM, computes the activation in registers, writes only packed FP4 + SFA, saving
 // one HBM round-trip of the swiglu intermediate per MoE layer prefill call.
@@ -96,7 +96,7 @@ void fused_act_quantize_fp16_to_nvfp4_sfatom_moe(const void* gate_fp16, const vo
                                                  cudaStream_t stream, const void* gate_bias_fp16 = nullptr,
                                                  const void* up_bias_fp16 = nullptr, float act_scale = 1.0f);
 
-// Dense prefill SwiGLU into out_fp16 [M,K] plus its CUTLASS NVFP4 quantize (dst_data [M,K/2],
+// Dense prefill SwiGLU into out_fp16 [M,K] plus its SfAtom NVFP4 quantize (dst_data [M,K/2],
 // dst_sf SfAtom): bit-identical to swiglu() + quantize_fp16_to_nvfp4_sfatom(out_fp16), #2470.
 void swiglu_quantize_fp16_to_nvfp4_sfatom(const void* gate_fp16, const void* up_fp16, void* out_fp16,
                                           void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream,

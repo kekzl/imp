@@ -63,13 +63,13 @@ __device__ __forceinline__ uint8_t float_to_ue8m0(float val) {
     return (uint8_t)f_exp;
 }
 
-// Unpacks native MXFP4 GGUF blocks into CUTLASS format. GGUF block: [16 bytes E2M1
+// Unpacks native MXFP4 GGUF blocks into the SfAtom layout. GGUF block: [16 bytes E2M1
 // data | 1 byte UE8M0 scale] x N_blocks. Output: separate contiguous data array +
 // SfAtom scale array.
 
 // Build SfAtom + linear scale layouts from pre-split scale bytes.
 // Input: linear_scales at gpu_buf + data_bytes (already [N, K/32] row-major)
-// Output: SfAtom layout for CUTLASS + copy to separate linear buffer
+// Output: SfAtom layout for the MXFP4 tile GEMM + copy to separate linear buffer
 __global__ void build_mxfp4_scales_kernel(
     const uint8_t* __restrict__ linear_src,  // [total_blocks] row-major scales
     uint8_t* __restrict__ sf_out,            // SfAtom layout
