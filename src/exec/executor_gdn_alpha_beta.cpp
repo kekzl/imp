@@ -117,6 +117,7 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
     if (decode == StorageTier::NVFP4_LINEAR) {
         if (h.entries.nvfp4 == nullptr)
             return false;
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
         out = *h.entries.nvfp4;
         return true;
     }

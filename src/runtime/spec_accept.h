@@ -19,8 +19,8 @@ struct SpecAccept {
 // think_left = think_logic::think_tokens_left before the chunk: emitted never exceeds it (B-69.1).
 template <class Emit, class Extends>
 SpecAccept spec_accept_rows(const int32_t* argmax, const int32_t* draft, int n_draft, int n_rows,
-                            bool stop_at_think_edge, const bool& in_think, int think_left, Emit&& emit,
-                            Extends&& extends) {
+                            bool stop_at_think_edge, const bool& in_think, int think_left, const Emit& emit,
+                            const Extends& extends) {
     SpecAccept r;
     const bool think_at_start = in_think;
     for (int j = 0; j < n_rows; ++j) {

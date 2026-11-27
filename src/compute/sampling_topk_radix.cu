@@ -443,11 +443,11 @@ template <typename F>
 void with_finalize_slots(int top_k, F&& f) {
     const int per = ((SAMPLE_NBLOCKS * top_k) + BLOCK_SIZE - 1) / BLOCK_SIZE;
     if (per <= 8)
-        f(std::integral_constant<int, 8>{});
+        std::forward<F>(f)(std::integral_constant<int, 8>{});
     else if (per <= 16)
-        f(std::integral_constant<int, 16>{});
+        std::forward<F>(f)(std::integral_constant<int, 16>{});
     else
-        f(std::integral_constant<int, 32>{});
+        std::forward<F>(f)(std::integral_constant<int, 32>{});
 }
 
 }  // namespace

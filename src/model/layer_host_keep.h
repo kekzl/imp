@@ -17,7 +17,7 @@ namespace imp {
 
 // Weights Pass 1 may leave on host. Norms, biases and everything else upload as usual.
 template <class Layer, class Fn>
-void for_each_streamable_matmul(Layer& L, Fn&& fn) {
+void for_each_streamable_matmul(Layer& L, const Fn& fn) {
     for (auto* t : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
         fn(*t);
 }
@@ -25,7 +25,7 @@ void for_each_streamable_matmul(Layer& L, Fn&& fn) {
 // Dense per-layer weights pre_dequant caches (phases 2 and 3). Host-streamed ones are skipped:
 // their data is a host pointer outside ensure_layer, and a slot pointer inside it.
 template <class ModelT, class Fn>
-void for_each_device_dense_weight(const ModelT& model, int n_layers, Fn&& fn) {
+void for_each_device_dense_weight(const ModelT& model, int n_layers, const Fn& fn) {
     auto visit = [&](const Tensor& w) {
         if (w.data && !w.on_device)
             return;
@@ -124,7 +124,7 @@ struct HostKeptLayer {
 // Detaches layer L's verbatim matmuls. pin(bytes) -> pinned host pointer or nullptr; a pinned
 // copy makes the manager's H2D async, nullptr keeps the checkpoint pointer.
 template <class Layer, class Pin>
-void detach_host_matmuls(Layer& L, bool (*dequant_supported)(QType), Pin&& pin, HostKeptLayer& out) {
+void detach_host_matmuls(Layer& L, bool (*dequant_supported)(QType), const Pin& pin, HostKeptLayer& out) {
     for_each_streamable_matmul(L, [&](Tensor& w) {
         if (!upload_keeps_bytes_verbatim(w, dequant_supported(w.qtype)))
             return;
@@ -144,8 +144,8 @@ void detach_host_matmuls(Layer& L, bool (*dequant_supported)(QType), Pin&& pin, 
 // Pass 1 driver: per layer, detach the upload_host_layers_ matmuls (layer_host_keep plan), run
 // upload(L, i) on the rest, restore. pin(bytes) as in detach_host_matmuls.
 template <class Pin, class Upload>
-[[nodiscard]] bool upload_pass1_keeping_host(Model& m, bool (*dequant_supported)(QType), Pin&& pin,
-                                             Upload&& upload) {
+[[nodiscard]] bool upload_pass1_keeping_host(Model& m, bool (*dequant_supported)(QType), const Pin& pin,
+                                             const Upload& upload) {
     int n_kept = 0, n_pinned = 0;
     size_t bytes = 0;
     for (int i = 0; i < m.n_layers(); ++i) {

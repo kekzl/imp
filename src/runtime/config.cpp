@@ -381,11 +381,20 @@ bool file_exists(const std::string& path) {
     return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
+// RuntimeConfig is the sanctioned env reader (CLAUDE.md): it runs at tool start and at Engine creation.
+const char* config_env(const char* name) {
+    return std::getenv(name);  // NOLINT(concurrency-mt-unsafe): tool start, Engine creation
+}
+
 std::string home_dir() {
-    if (const char* h = std::getenv("HOME"))
+    if (const char* h = config_env("HOME"))
         return h;
-    if (struct passwd* pw = getpwuid(getuid()))
-        return pw->pw_dir;
+    // getpwuid_r: getpwuid returns a static record another thread may overwrite.
+    struct passwd pw{};
+    struct passwd* found = nullptr;
+    std::string buf(16384, '\0');
+    if (getpwuid_r(getuid(), &pw, buf.data(), buf.size(), &found) == 0 && found != nullptr && pw.pw_dir)
+        return pw.pw_dir;
     return {};
 }
 
@@ -399,7 +408,7 @@ std::string home_dir() {
 void seed_from_env(RuntimeConfig& cfg) {
     // runtime.deterministic: IMP_DETERMINISTIC '1'/'true' enables full
     // reproducibility (also implies deterministic_gemm).
-    if (const char* e = std::getenv("IMP_DETERMINISTIC")) {
+    if (const char* e = config_env("IMP_DETERMINISTIC")) {
         cfg.runtime.deterministic = parse_bool(e, cfg.runtime.deterministic);
         if (cfg.runtime.deterministic)
             cfg.runtime.deterministic_gemm = true;
@@ -407,7 +416,7 @@ void seed_from_env(RuntimeConfig& cfg) {
 
     // attention.fmha_fa2: IMP_FMHA_FA2 '1' enables the register-resident FA2
     // prefill kernel (A/B vs the legacy FP8 FMHA), '0' forces it off.
-    if (const char* e = std::getenv("IMP_FMHA_FA2")) {
+    if (const char* e = config_env("IMP_FMHA_FA2")) {
         bool ok = true;
         const bool on = parse_bool(e, false, &ok);
         if (ok)
@@ -418,12 +427,12 @@ void seed_from_env(RuntimeConfig& cfg) {
 
     // diagnostics.spec_trace / ppl_dump: presence-is-truth
     // (empty value counts as ON) to match old shell/getenv() habits.
-    if (std::getenv("IMP_SPEC_TRACE"))
+    if (config_env("IMP_SPEC_TRACE"))
         cfg.diagnostics.spec_trace = true;
-    if (const char* e = std::getenv("IMP_PPL_DUMP"))
+    if (const char* e = config_env("IMP_PPL_DUMP"))
         cfg.diagnostics.ppl_dump = e;
     // diagnostics.worker_timing: IMP_WORKER_TIMING '1' (AUDIT_ARCH_2026 J-10).
-    if (const char* e = std::getenv("IMP_WORKER_TIMING"))
+    if (const char* e = config_env("IMP_WORKER_TIMING"))
         cfg.diagnostics.worker_timing = parse_bool(e, cfg.diagnostics.worker_timing);
 }
 
@@ -432,7 +441,7 @@ void seed_from_env(RuntimeConfig& cfg) {
 // -----------------------------------------------------------------------
 
 std::string RuntimeConfig::find_default_path() {
-    if (const char* p = std::getenv("IMP_CONFIG")) {
+    if (const char* p = config_env("IMP_CONFIG")) {
         if (file_exists(p))
             return p;
     }

@@ -309,6 +309,7 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
     if (!model_)
         return false;
     if (wcache_.mtp_lm_head_nvfp4.packed_data != nullptr) {
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
         out = wcache_.mtp_lm_head_nvfp4;
         return true;
     }
@@ -319,6 +320,7 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
     if (h.entries.fp8 != nullptr)
         return false;
     if (h.entries.nvfp4 != nullptr) {
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
         out = *h.entries.nvfp4;
         return true;
     }

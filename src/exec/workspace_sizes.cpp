@@ -47,7 +47,7 @@ Dims weight_dims(const Tensor& t) {
 // list compute_native_cache_demand() scans (runtime/vram_budget.cpp), so the
 // two cannot drift apart on a model where one of them matters.
 template <class F>
-void for_each_weight(const Model& model, F&& f) {
+void for_each_weight(const Model& model, const F& f) {
     f(model.output_proj());
     const int n = model.n_layers();
     for (int i = 0; i < n; ++i) {

@@ -350,6 +350,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         // RuntimeConfig.
         runtime_config_.runtime.deterministic_gemm = true;
         process_diag_set_deterministic_gemm(true);
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): cuBLAS reads this knob from the env only
         setenv("CUBLAS_WORKSPACE_CONFIG", kCublasDeterministicWorkspace, 0);
         IMP_LOG_INFO(
             "FP8 KV cache: forcing runtime.deterministic_gemm=true "
@@ -784,7 +785,9 @@ void Engine::init_resolve_quant_flags_() {
             IMP_LOG_INFO(
                 "Gemma 4: enabling runtime.deterministic_gemm (output_norm outliers amplify algo jitter)");
         }
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): cuBLAS reads this knob from the env only
         if (!getenv("CUBLAS_WORKSPACE_CONFIG")) {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): cuBLAS reads this knob from the env only
             setenv("CUBLAS_WORKSPACE_CONFIG", kCublasDeterministicWorkspace, 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=%s for deterministic grouped GEMM",
                          kCublasDeterministicWorkspace);

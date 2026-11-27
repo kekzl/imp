@@ -7,6 +7,10 @@
 #include <cstring>
 #include <limits>
 
+void cli_exit(int code) {
+    std::exit(code);  // NOLINT(concurrency-mt-unsafe): argv parsing runs before any thread starts
+}
+
 bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
     const char* a = argv[i];
 
@@ -95,7 +99,7 @@ int cli_int(const char* flag, const char* value) {
     int v = 0;
     if (!parse_cli_int(value, v)) {
         fprintf(stderr, "%s expects an integer, got '%s'\n", flag, value);
-        std::exit(1);
+        cli_exit(1);
     }
     return v;
 }
@@ -104,7 +108,7 @@ double cli_double(const char* flag, const char* value) {
     double v = 0.0;
     if (!parse_cli_double(value, v)) {
         fprintf(stderr, "%s expects a number, got '%s'\n", flag, value);
-        std::exit(1);
+        cli_exit(1);
     }
     return v;
 }
@@ -113,7 +117,7 @@ float cli_float(const char* flag, const char* value) {
     const double v = cli_double(flag, value);
     if (std::fabs(v) > std::numeric_limits<float>::max()) {
         fprintf(stderr, "%s expects a number, got '%s'\n", flag, value);
-        std::exit(1);
+        cli_exit(1);
     }
     return static_cast<float>(v);
 }

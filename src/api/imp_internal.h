@@ -8,6 +8,7 @@
 #include <exception>
 #include <memory>
 #include <new>
+#include <utility>
 
 namespace imp {
 
@@ -19,7 +20,7 @@ struct Request;  // runtime/request.h
 template <class F>
 ImpError api_guard(const char* fn, F&& body) noexcept {
     try {
-        return body();
+        return std::forward<F>(body)();
     } catch (const std::bad_alloc&) {
         return IMP_ERROR_OUT_OF_MEMORY;
     } catch (const std::exception& e) {

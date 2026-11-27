@@ -324,7 +324,8 @@ jobs:
 
       # Hard (#2210): scripts/tidy_lane.sh fails on a clang-tidy nonzero exit, on a .cu with
       # a clang error (#2219's first run: 89 of 89, response-file includes lost) and on a
-      # WarningsAsErrors finding (.clang-tidy: bugprone-*, clang-analyzer-*) over its pin in
+      # WarningsAsErrors finding (.clang-tidy: bugprone-*, clang-analyzer-*, 4 cppcoreguidelines-*
+      # and concurrency-* checks) over its pin in
       # tools/tidy_baseline.toml. Other checks print only. Full lane locally: `make tidy`;
       # changed files only: `make preflight`.
       - name: clang-tidy (blocking, changed .cpp + .cu host side)

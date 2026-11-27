@@ -1558,7 +1558,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
                              .n_rows = m,
                              .d_row_pos = d_rope_pos != nullptr ? d_rope_pos + off : nullptr});
         }
-        kv_attn();
+        std::forward<KvAttnFn>(kv_attn)();
         if (mtp.attn_output_gate) {
             int grid = ((m * nh * hdh) + kBlock - 1) / kBlock;
             mtp_gate_attn_out_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_attn_out),

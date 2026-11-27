@@ -21,7 +21,7 @@ WHAT IT CHECKS
      b. on the right-hand side of `X = ...;` in a file where X is, by rule a or b, a
         registered name (`auto* k = some_kernel<..>; pdl::enable_kernel(k);`), or
      c. in the argument list of a call `F(...)` in a file where F is a parameter declared
-        `Name&& F` and a generic lambda in that file registers one of its `auto`
+        `Name&& F` or `const Name& F` and a generic lambda in that file registers one of its `auto`
         parameters (the by_m/by_cfg dispatch of nvfp4_gemm_smallm_ws.cu).
    A kernel name defined in several files is matched per file first (the reference must
    sit in a file that defines it or includes one that does); a unique name matches
@@ -69,7 +69,7 @@ NAME_PAREN = re.compile(r"[\s\w:*&<>,]*?\b([A-Za-z_]\w*)\s*\(")
 REGISTER_DEF = re.compile(r"\bvoid\s+(\w+_pdl_register)\s*\(\s*(?:void)?\s*\)\s*\{")
 REGISTER_CALL = re.compile(r"\b(\w+_pdl_register)\s*\(\s*\)\s*;")
 INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"', re.M)
-FORWARD_PARAM = re.compile(r"\b[A-Z]\w*\s*&&\s*(\w+)\s*[,)]")
+FORWARD_PARAM = re.compile(r"\b(?:const\s+)?[A-Z]\w*\s*(?:&&|&)\s*(\w+)\s*[,)]")
 AUTO_PARAM = re.compile(r"\bauto\s*[*&]*\s*(\w+)\s*[,)]")
 KEYWORDS = {"reinterpret_cast", "static_cast", "const", "void", "auto", "true", "false", "half", "float",
             "int", "__half", "pdl", "imp", "uint8_t", "nullptr"}

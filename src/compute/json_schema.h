@@ -185,7 +185,7 @@ struct SchemaNode {
 // Calls fn on every child schema of `node` (properties, items, prefixItems, anyOf,
 // additionalProperties, defs) until fn returns false; returns false then.
 template <typename Node, typename Fn>
-[[nodiscard]] bool for_each_schema_child(Node* node, Fn&& fn) {
+[[nodiscard]] bool for_each_schema_child(Node* node, const Fn& fn) {
     for (auto& [name, prop] : node->properties)
         if (!fn(prop.get()))
             return false;

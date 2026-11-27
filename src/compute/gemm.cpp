@@ -431,7 +431,7 @@ static bool pin_supports_m(cublasLtHandle_t lt, GemmCacheEntry& entry, int64_t M
 // fails pin_supports_m. `make` builds and selects a new entry at M. Caller holds the mutex.
 template <class Make>
 static GemmCacheEntry* entry_for_m(cublasLtHandle_t lt, GemmCacheKey key, int64_t M, cudaDataType_t dtA,
-                                   cudaDataType_t dtC, int64_t K, int64_t N, Make&& make) {
+                                   cudaDataType_t dtC, int64_t K, int64_t N, const Make& make) {
     auto it = s_gemm_cache.find(key);
     if (it == s_gemm_cache.end())
         it = s_gemm_cache.emplace(key, make()).first;
