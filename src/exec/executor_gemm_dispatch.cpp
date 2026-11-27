@@ -947,8 +947,20 @@ DensePath GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor&
     // run data-parallel only (no stream-K plan chosen by M), so a prompt row does not change with its chunk.
     void* sk_ws = (process_diag_deterministic() || a.per_row) ? nullptr : qscratch_.fp8_tile_ws.get();
     if ((a.per_row || M >= imp::cfg::kFp8TileMinM) && own_ok &&
-        gemm_fp8_tile(a8.data, w8.data, a.d, w_scale, beta, out.data, M, N, K, stream, -1, sk_ws,
-                      qscratch_.fp8_tile_ws_size, a.per_row)) {
+        gemm_fp8_tile({.a_data = a8.data,
+                       .w_data = w8.data,
+                       .a_scale = a.d,
+                       .w_scale = w_scale,
+                       .beta = beta,
+                       .d_fp16 = out.data,
+                       .M = M,
+                       .N = N,
+                       .K = K,
+                       .stream = stream,
+                       .variant = -1,
+                       .workspace = sk_ws,
+                       .workspace_bytes = qscratch_.fp8_tile_ws_size,
+                       .a_per_row = a.per_row})) {
         static LogOnce logged;  // activity proof, once
         if (logged.first()) {
             IMP_LOG_INFO("fp8_tile: own FP8 prefill GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M, N, K, beta);

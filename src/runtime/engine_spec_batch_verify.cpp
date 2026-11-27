@@ -693,10 +693,18 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const std::vector<VerifySampling> row_draw =
         engine_internal::verify_row_draws(reqs, T, model_->config().vocab_size);
     executor_->set_verify_sampling_rows(row_draw.data(), static_cast<int>(row_draw.size()));
-    executor_->greedy_argmax_all(n_rows, bv_.d_argmax.get(), stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f,
-                                 nullptr, 0, d_ban, n_ban, /*allow_cutlass=*/true, d_alt, n_alt,
-                                 any_alt ? row_alt.data() : nullptr, any_pen ? pen_hist.data() : nullptr,
-                                 any_pen ? pen_n.data() : nullptr, any_pen ? pen_v.data() : nullptr);
+    executor_->greedy_argmax_all({.n_rows = n_rows,
+                                  .d_out = bv_.d_argmax.get(),
+                                  .stream = stream,
+                                  .d_banned = d_ban,
+                                  .n_banned = n_ban,
+                                  .allow_cutlass = true,
+                                  .d_banned_alt = d_alt,
+                                  .n_banned_alt = n_alt,
+                                  .h_row_alt = any_alt ? row_alt.data() : nullptr,
+                                  .h_row_hist = any_pen ? pen_hist.data() : nullptr,
+                                  .h_row_hist_n = any_pen ? pen_n.data() : nullptr,
+                                  .h_row_pens = any_pen ? pen_v.data() : nullptr});
     executor_->set_verify_sampling(nullptr);
     int32_t* h_am = bv_.h_argmax.as<int32_t>();
     if (!check(cudaMemcpyAsync(h_am, bv_.d_argmax.get(), static_cast<size_t>(n_rows) * sizeof(int32_t),

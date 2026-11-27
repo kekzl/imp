@@ -83,8 +83,19 @@ void run_ref(const Operands& o, float beta, cudaStream_t s) {
 
 bool run_own(const Operands& o, float beta, int variant, cudaStream_t s) {
     const bool sk = variant == 3 || variant == 4 || variant == 6 || variant < 0;
-    return gemm_fp8_tile(o.a, o.w, o.a_scale, o.w_scale, beta, o.y_own, o.M, o.N, o.K, s, variant,
-                         sk ? o.ws : nullptr, sk ? o.ws_bytes : 0);
+    return gemm_fp8_tile({.a_data = o.a,
+                          .w_data = o.w,
+                          .a_scale = o.a_scale,
+                          .w_scale = o.w_scale,
+                          .beta = beta,
+                          .d_fp16 = o.y_own,
+                          .M = o.M,
+                          .N = o.N,
+                          .K = o.K,
+                          .stream = s,
+                          .variant = variant,
+                          .workspace = sk ? o.ws : nullptr,
+                          .workspace_bytes = sk ? o.ws_bytes : 0});
 }
 
 // 0 128x128, 1 128x256, 2 sync, 3 stream-K, 4 hybrid / split, 5 128x64, 6 128x64 split, -1 (auto)

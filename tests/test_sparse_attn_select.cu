@@ -518,9 +518,26 @@ protected:
         int* d_sctx = dmalloc<int>(1);
         cudaMemset(d_sbt, 0xFF, table_blocks * sizeof(int));
 
-        sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/1, nh, nkv, hd, kBS, mbps, budget_blocks,
-                             sink_blocks, recent_blocks, engage_blocks, table_blocks, d_scores, d_sbt, d_sctx,
-                             /*std_coef=*/1.0f, nullptr);
+        sparse_select_blocks({.q = d_q,
+                              .minmax_base = d_mm,
+                              .block_tables = d_bt,
+                              .context_lens = d_ctx,
+                              .n_seq = 1,
+                              .n_heads = nh,
+                              .n_kv_heads = nkv,
+                              .head_dim = hd,
+                              .block_size = kBS,
+                              .max_blocks_per_seq = mbps,
+                              .budget_blocks = budget_blocks,
+                              .sink_blocks = sink_blocks,
+                              .recent_blocks = recent_blocks,
+                              .engage_blocks = engage_blocks,
+                              .table_blocks = table_blocks,
+                              .scores_scratch = d_scores,
+                              .sparse_block_tables = d_sbt,
+                              .sparse_context_lens = d_sctx,
+                              .std_coef = 1.0f,
+                              .stream = nullptr});
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         out_bt = dread(d_sbt, table_blocks);
         out_ctx = dread(d_sctx, 1)[0];
@@ -619,9 +636,26 @@ TEST_F(SparseSelectTest, ChunkRowsSharedTablePerRowCtx) {
     int* d_sctx = dmalloc<int>(2);
     cudaMemset(d_sbt, 0xFF, 2 * budget * sizeof(int));
 
-    sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/2, nh, nkv, hd, kBS, mbps, budget, sink, recent,
-                         /*engage=*/budget, /*table=*/budget, d_scores, d_sbt, d_sctx,
-                         /*std_coef=*/1.0f, nullptr);
+    sparse_select_blocks({.q = d_q,
+                          .minmax_base = d_mm,
+                          .block_tables = d_bt,
+                          .context_lens = d_ctx,
+                          .n_seq = 2,
+                          .n_heads = nh,
+                          .n_kv_heads = nkv,
+                          .head_dim = hd,
+                          .block_size = kBS,
+                          .max_blocks_per_seq = mbps,
+                          .budget_blocks = budget,
+                          .sink_blocks = sink,
+                          .recent_blocks = recent,
+                          .engage_blocks = budget,
+                          .table_blocks = budget,
+                          .scores_scratch = d_scores,
+                          .sparse_block_tables = d_sbt,
+                          .sparse_context_lens = d_sctx,
+                          .std_coef = 1.0f,
+                          .stream = nullptr});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     auto out = dread(d_sbt, static_cast<size_t>(2) * budget);
     auto ctx = dread(d_sctx, 2);
@@ -685,9 +719,26 @@ TEST(SparseScoreMeanStd, OutlierPageLosesTheBudgetSlotToTheConsistentPage) {
     cudaMemset(d_mm, 0x7F, static_cast<size_t>(n_blocks) * row_elems * sizeof(__half2));
     cudaMemset(d_sbt, 0xFF, 3 * sizeof(int));
     sparse_update_key_minmax(QType::F16, d_k, d_mm, d_pos, d_bt, nkv, hd, kBS, ctx_len, 0, 1, nullptr);
-    sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/1, nh, nkv, hd, kBS, n_blocks, /*budget=*/3,
-                         /*sink=*/1, /*recent=*/1, /*engage=*/3, /*table=*/3, d_scores, d_sbt, d_sctx,
-                         /*std_coef=*/1.0f, nullptr);
+    sparse_select_blocks({.q = d_q,
+                          .minmax_base = d_mm,
+                          .block_tables = d_bt,
+                          .context_lens = d_ctx,
+                          .n_seq = 1,
+                          .n_heads = nh,
+                          .n_kv_heads = nkv,
+                          .head_dim = hd,
+                          .block_size = kBS,
+                          .max_blocks_per_seq = n_blocks,
+                          .budget_blocks = 3,
+                          .sink_blocks = 1,
+                          .recent_blocks = 1,
+                          .engage_blocks = 3,
+                          .table_blocks = 3,
+                          .scores_scratch = d_scores,
+                          .sparse_block_tables = d_sbt,
+                          .sparse_context_lens = d_sctx,
+                          .std_coef = 1.0f,
+                          .stream = nullptr});
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     const auto picked = dread(d_sbt, 3);
     EXPECT_EQ(picked[0], 0);
@@ -766,9 +817,26 @@ TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     float* d_scores = dmalloc<float>(8);
     int* d_sbt = dmalloc<int>(8);
     int* d_sctx = dmalloc<int>(1);
-    sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, 1, nh, nkv, hd, kBS, 6, /*budget=*/8, 1, 1,
-                         /*engage=*/8, /*table=*/8, d_scores, d_sbt, d_sctx,
-                         /*std_coef=*/1.0f, nullptr);
+    sparse_select_blocks({.q = d_q,
+                          .minmax_base = d_mm,
+                          .block_tables = d_bt,
+                          .context_lens = d_ctx,
+                          .n_seq = 1,
+                          .n_heads = nh,
+                          .n_kv_heads = nkv,
+                          .head_dim = hd,
+                          .block_size = kBS,
+                          .max_blocks_per_seq = 6,
+                          .budget_blocks = 8,
+                          .sink_blocks = 1,
+                          .recent_blocks = 1,
+                          .engage_blocks = 8,
+                          .table_blocks = 8,
+                          .scores_scratch = d_scores,
+                          .sparse_block_tables = d_sbt,
+                          .sparse_context_lens = d_sctx,
+                          .std_coef = 1.0f,
+                          .stream = nullptr});
     args.O = &O2;
     args.block_tables = d_sbt;
     args.context_lens = d_sctx;
@@ -850,9 +918,26 @@ struct MlaSparseFixture {
     // Selects with `budget` blocks, returns the compacted table and its context length.
     void select(int budget, std::vector<int>& table, int& ctx, int* d_sbt, int* d_sctx) {
         float* d_scores = dmalloc<float>(32);
-        sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, 1, nh, nkv, hd, kBS, n_blocks, budget, /*sink=*/1,
-                             /*recent=*/2, /*engage=*/budget, /*table=*/32, d_scores, d_sbt, d_sctx,
-                             /*std_coef=*/1.0f, nullptr);
+        sparse_select_blocks({.q = d_q,
+                              .minmax_base = d_mm,
+                              .block_tables = d_bt,
+                              .context_lens = d_ctx,
+                              .n_seq = 1,
+                              .n_heads = nh,
+                              .n_kv_heads = nkv,
+                              .head_dim = hd,
+                              .block_size = kBS,
+                              .max_blocks_per_seq = n_blocks,
+                              .budget_blocks = budget,
+                              .sink_blocks = 1,
+                              .recent_blocks = 2,
+                              .engage_blocks = budget,
+                              .table_blocks = 32,
+                              .scores_scratch = d_scores,
+                              .sparse_block_tables = d_sbt,
+                              .sparse_context_lens = d_sctx,
+                              .std_coef = 1.0f,
+                              .stream = nullptr});
         EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         table = dread(d_sbt, 32);
         ctx = dread(d_sctx, 1)[0];
@@ -955,9 +1040,26 @@ TEST(SparseScoreSplit, QwenShapeScoresMatchReference) {
     int* d_sbt = dmalloc<int>(static_cast<size_t>(n_seq) * n_blocks);
     int* d_sctx = dmalloc<int>(n_seq);
     const float coef = 0.5f;
-    sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, n_seq, nh, nkv, hd, kBS, n_blocks, /*budget=*/32,
-                         /*sink=*/1, /*recent=*/2, /*engage=*/32, n_blocks, d_scores, d_sbt, d_sctx, coef,
-                         nullptr);
+    sparse_select_blocks({.q = d_q,
+                          .minmax_base = d_mm,
+                          .block_tables = d_bt,
+                          .context_lens = d_ctx,
+                          .n_seq = n_seq,
+                          .n_heads = nh,
+                          .n_kv_heads = nkv,
+                          .head_dim = hd,
+                          .block_size = kBS,
+                          .max_blocks_per_seq = n_blocks,
+                          .budget_blocks = 32,
+                          .sink_blocks = 1,
+                          .recent_blocks = 2,
+                          .engage_blocks = 32,
+                          .table_blocks = n_blocks,
+                          .scores_scratch = d_scores,
+                          .sparse_block_tables = d_sbt,
+                          .sparse_context_lens = d_sctx,
+                          .std_coef = coef,
+                          .stream = nullptr});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     const auto got = dread(d_scores, static_cast<size_t>(n_seq) * n_blocks);
     double diff2 = 0.0, ref2 = 0.0;

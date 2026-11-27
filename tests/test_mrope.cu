@@ -70,8 +70,20 @@ DeviceRun run_rope(const std::vector<float>& q_in, const std::vector<float>& k_i
     const int64_t kshape[4] = {1, kTokens, kKvHeads, kHeadDim};
     Tensor Q(d_q, QType::F32, 4, qshape, true);
     Tensor K(d_k, QType::F32, 4, kshape, true);
-    rope_forward(Q, K, d_pos, kHeadDim, kTheta, 1.0f, /*rope_dim=*/0, /*neox=*/true, 0.0f, 1.0f, nullptr,
-                 nullptr, nullptr, mrope);
+    rope_forward({.Q = &Q,
+                  .K = &K,
+                  .positions = d_pos,
+                  .head_dim = kHeadDim,
+                  .theta = kTheta,
+                  .scaling = 1.0f,
+                  .rope_dim = 0,
+                  .neox = true,
+                  .ext_factor = 0.0f,
+                  .attn_factor = 1.0f,
+                  .corr_dims = nullptr,
+                  .stream = nullptr,
+                  .longrope_inv_freqs = nullptr,
+                  .mrope = mrope});
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     DeviceRun out;

@@ -49,8 +49,20 @@ TEST(MtpAttnGuard, ZeroKvHeadsWithAttentionWeightsReturnsFalse) {
     const LogLevel saved = log_get_level();
     log_set_level(LogLevel::WARN);  // both log assertions need ERROR lines emitted
     testing::internal::CaptureStderr();
-    const bool ok = mtp_draft_step(/*prev_token_id=*/0, g_byte, mtp, emb, lm_head, ws, kHidden, kVocab, &out,
-                                   /*stream=*/nullptr, nullptr, 0, nullptr, d_prev);
+    const bool ok = mtp_draft_step({.prev_token_id = 0,
+                                    .d_h_prev = g_byte,
+                                    .mtp = &mtp,
+                                    .main_tok_emb = &emb,
+                                    .main_lm_head = &lm_head,
+                                    .ws = &ws,
+                                    .hidden_dim = kHidden,
+                                    .vocab_size = kVocab,
+                                    .out_token_id = &out,
+                                    .stream = nullptr,
+                                    .lm_head_nvfp4 = nullptr,
+                                    .d_prev_token = 0,
+                                    .d_out_token = nullptr,
+                                    .lm_head_fp8 = d_prev});
     const std::string log = testing::internal::GetCapturedStderr();
     log_set_level(saved);
     EXPECT_FALSE(ok);

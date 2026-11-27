@@ -308,54 +308,39 @@ void gemv_q8_0_moe_gate_up_fused(const void* gate_weights, const void* up_weight
                                  int rows, int K, size_t gate_stride_bytes, size_t up_stride_bytes,
                                  int x_stride, int top_k, cudaStream_t stream = nullptr);
 
-// dp4a-accelerated fused gate+up MoE GEMV variants.
-void gemv_q6k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                     const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                     half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                     size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                     cudaStream_t stream = nullptr);
-void gemv_q8_0_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream = nullptr);
-void gemv_q4_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream = nullptr);
-void gemv_q5_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream = nullptr);
-void gemv_q4_0_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream = nullptr);
-void gemv_q2_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream = nullptr);
-void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream = nullptr);
-void gemv_q5_1_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
-                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
-                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
-                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
-                                      cudaStream_t stream = nullptr);
+// dp4a-accelerated fused gate+up MoE GEMV variants: one args struct, fields = the old parameter list
+// in order (B-133).
+struct MoeDp4aGateUpArgs {
+    const void* gate_weights = nullptr;
+    const void* up_weights = nullptr;
+    const int32_t* expert_indices = nullptr;
+    const block_q8_1* q8_1 = nullptr;
+    const float* d8 = nullptr;
+    half* y_gate = nullptr;
+    half* y_up = nullptr;
+    int rows = 0;
+    int K = 0;
+    size_t gate_stride_bytes = 0;
+    size_t up_stride_bytes = 0;
+    int q8_1_stride = 0;
+    int d8_stride = 0;
+    int top_k = 0;
+    cudaStream_t stream = nullptr;
+};
+void gemv_q6k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
+void gemv_q8_0_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
+void gemv_q4_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
+void gemv_q5_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
+void gemv_q4_0_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
+void gemv_q2_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
+void gemv_q3_k_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
+void gemv_q5_1_q8_1_moe_gate_up_fused(const MoeDp4aGateUpArgs& a);
 
 // MoE decode kernel selectors (#2444). supported() lists exactly the formats with an arm;
 // the kernel getters throw std::invalid_argument for any other qtype (no default arm).
 using MoeDp4aDecodeFn = void (*)(const void*, const int32_t*, const block_q8_1*, const float*, half*, int,
                                  int, size_t, int, int, int, cudaStream_t);
-using MoeDp4aGateUpFn = void (*)(const void*, const void*, const int32_t*, const block_q8_1*, const float*,
-                                 half*, half*, int, int, size_t, size_t, int, int, int, cudaStream_t);
+using MoeDp4aGateUpFn = void (*)(const MoeDp4aGateUpArgs&);
 using MoeFp16DecodeFn = void (*)(const void*, const int32_t*, const half*, half*, int, int, size_t, int, int,
                                  cudaStream_t);
 using MoeFp16GateUpFn = void (*)(const void*, const void*, const int32_t*, const half*, half*, half*, int,

@@ -15,11 +15,21 @@
                                 static_cast<size_t>(layer) * mla_absorb_layer_stride_;
             // ao is [n, nh*hd]; the absorbed kernel writes nh*v_head_dim compact
             // (same layout the paged decode kernel produces), narrowed downstream.
-            mla_absorbed_decode(static_cast<const half*>(sub_q.data),
-                                static_cast<const half*>(ly.kv_b_proj.data), cache_layer,
-                                static_cast<half*>(sub_ao.data), mla_absorb_scores_.data(), sub_state.context_lens,
-                                nh, hd, cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.kv_lora_rank,
-                                cfg.v_head_dim, mla_absorb_max_seq_, scale, stream);
+            mla_absorbed_decode({.q = static_cast<const half*>(sub_q.data),
+                                 .kv_b = static_cast<const half*>(ly.kv_b_proj.data),
+                                 .cache = cache_layer,
+                                 .out = static_cast<half*>(sub_ao.data),
+                                 .scores = mla_absorb_scores_.data(),
+                                 .context_lens = sub_state.context_lens,
+                                 .n_heads = nh,
+                                 .head_dim = hd,
+                                 .rope_dim = cfg.qk_rope_head_dim,
+                                 .nope_dim = cfg.qk_nope_head_dim,
+                                 .kv_lora_rank = cfg.kv_lora_rank,
+                                 .v_head_dim = cfg.v_head_dim,
+                                 .max_seq = mla_absorb_max_seq_,
+                                 .scale = scale,
+                                 .stream = stream});
             return;  // leaves the decode_attend lambda (executor_attention.cu)
         }
 
@@ -134,14 +144,20 @@
                 IMP_LOG_INFO("sparse decode attention ACTIVE: ctx %d > budget %d tokens",
                              sub_state.max_context_len, qscratch_.sparse_budget_blocks * kv_bs);
             }
-            sparse_select_blocks(static_cast<const half*>(q4.data),
-                                 cache->key_minmax_ptr(kv_layer, 0), sub_block_tables,
-                                 sub_state.context_lens, n_seq, nh, nkv, hd, kv_bs,
-                                 sub_state.max_blocks_per_seq, qscratch_.sparse_budget_blocks,
-                                 qscratch_.sparse_sink_blocks, qscratch_.sparse_recent_blocks,
-                                 qscratch_.sparse_engage_blocks, qscratch_.sparse_table_blocks,
-                                 qscratch_.sparse_scores.data(), qscratch_.sparse_block_tables.data(),
-                                 qscratch_.sparse_context_lens.data(), cfg::kSparseScoreStdCoef, stream);
+            sparse_select_blocks({.q = static_cast<const half*>(q4.data),
+                                  .minmax_base = cache->key_minmax_ptr(kv_layer, 0),
+                                  .block_tables = sub_block_tables, .context_lens = sub_state.context_lens,
+                                  .n_seq = n_seq, .n_heads = nh, .n_kv_heads = nkv, .head_dim = hd,
+                                  .block_size = kv_bs, .max_blocks_per_seq = sub_state.max_blocks_per_seq,
+                                  .budget_blocks = qscratch_.sparse_budget_blocks,
+                                  .sink_blocks = qscratch_.sparse_sink_blocks,
+                                  .recent_blocks = qscratch_.sparse_recent_blocks,
+                                  .engage_blocks = qscratch_.sparse_engage_blocks,
+                                  .table_blocks = qscratch_.sparse_table_blocks,
+                                  .scores_scratch = qscratch_.sparse_scores.data(),
+                                  .sparse_block_tables = qscratch_.sparse_block_tables.data(),
+                                  .sparse_context_lens = qscratch_.sparse_context_lens.data(),
+                                  .std_coef = cfg::kSparseScoreStdCoef, .stream = stream});
             attn_bt = qscratch_.sparse_block_tables.data();
             attn_ctx_lens = qscratch_.sparse_context_lens.data();
             attn_max_blocks = qscratch_.sparse_table_blocks;

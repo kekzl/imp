@@ -558,8 +558,21 @@ TEST(GgufRef, Q5_1_MoeDecodeDispatchGateUp) {
     // Fused gate+up (device-resident route).
     cudaMemset(y_gate, 0, TOP_K * N * sizeof(half));
     cudaMemset(y_up, 0, TOP_K * N * sizeof(half));
-    moe_dp4a_gate_up_kernel(qt)(gate.dev, up.dev, d_idx, q8, d8, y_gate, y_up, N, K, gate.stride, up.stride,
-                                /*q8_1_stride=*/0, /*d8_stride=*/0, TOP_K, nullptr);
+    moe_dp4a_gate_up_kernel(qt)({.gate_weights = gate.dev,
+                                 .up_weights = up.dev,
+                                 .expert_indices = d_idx,
+                                 .q8_1 = q8,
+                                 .d8 = d8,
+                                 .y_gate = y_gate,
+                                 .y_up = y_up,
+                                 .rows = N,
+                                 .K = K,
+                                 .gate_stride_bytes = gate.stride,
+                                 .up_stride_bytes = up.stride,
+                                 .q8_1_stride = 0,
+                                 .d8_stride = 0,
+                                 .top_k = TOP_K,
+                                 .stream = nullptr});
     fetch();
     for (int s = 0; s < TOP_K; ++s) {
         expect_moe_slot("fused gate", hg, s, gate, h_idx[s], qt, hx, N, K);

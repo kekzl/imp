@@ -6,6 +6,7 @@
 
 #include "compute/attention_fa2_hd512.h"
 #include "exec/attention_dispatch_rules.h"
+#include "exec/attention_prefill_args.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_gemv_helpers.h"
@@ -43,12 +44,13 @@ namespace imp {
 // numerical class as cuBLAS (f16 in, f32 accumulate), avoids the e4m3
 // quality cliff (#511/#512), no S-matrix. Declined configs (hd!=128,
 // non-F16, chunk continuation) return false.
-[[nodiscard]] static bool try_fa2_fp16qk_prefill(const DispatchPolicy& /*rcfg*/, const Tensor& q,
-                                                 const Tensor& k, const Tensor& v, Tensor& o, int n,
-                                                 int kv_len, int nh, int nkv, int hd, float scale,
-                                                 int sliding_window, float softcap, int q_offset,
-                                                 cudaStream_t stream, const int* d_kv_len = nullptr,
-                                                 const void* sinks = nullptr) {
+[[nodiscard]] static bool try_fa2_fp16qk_prefill(const Fa2PrefillArgs& a) {
+    const auto& [rcfg_unread, q_p, k_p, v_p, o_p, n, kv_len, nh, nkv, hd, scale, sliding_window, softcap,
+                 q_offset, stream, d_kv_len, sinks] = a;
+    const Tensor& q = *q_p;
+    const Tensor& k = *k_p;
+    const Tensor& v = *v_p;
+    Tensor& o = *o_p;
     // hd=256: stage-1 FA2 port (default on since #932).
     // Other head dims decline as before; the kernel wrapper re-checks the gate.
     if (hd != 64 && hd != 128 && hd != 256)
@@ -190,12 +192,14 @@ struct ApaPagedPrefillArgs {
 // sinks), runtime.deterministic (RA2: float atomics; APA: reruns are bit-identical but rows depend on the
 // chunking, which that mode pins), and shapes or scratch they reject;
 // UNSET = the caller walks its usual chain.
-[[nodiscard]] static AttnPrefillOuter try_fp4_prefill(const DispatchPolicy& rcfg, const Tensor& q,
-                                                      const Tensor& k, const Tensor& v, Tensor& o, int n,
-                                                      int kv_len, int nh, int nkv, int hd, float scale,
-                                                      int sliding_window, float softcap, int q_offset,
-                                                      cudaStream_t stream, const void* sinks) {
-    const auto& a = rcfg.attention;
+[[nodiscard]] static AttnPrefillOuter try_fp4_prefill(const AttnPrefillTierArgs& args) {
+    const auto& [rcfg_p, q_p, k_p, v_p, o_p, n, kv_len, nh, nkv, hd, scale, sliding_window, softcap, q_offset,
+                 stream, sinks] = args;
+    const Tensor& q = *q_p;
+    const Tensor& k = *k_p;
+    const Tensor& v = *v_p;
+    Tensor& o = *o_p;
+    const auto& a = rcfg_p->attention;
     if ((!a.ra2_prefill && a.apa_eps <= 0.0f) || sliding_window > 0 || softcap != 0.0f || sinks != nullptr ||
         process_diag_deterministic())
         return AttnPrefillOuter::UNSET;
@@ -210,12 +214,13 @@ struct ApaPagedPrefillArgs {
 // hd=512 prefill whose rows do not depend on n or q_offset (#2167), single-shot and chunk alike: split-D
 // FA2 (no window, no sinks), else under runtime.deterministic the WMMA FMHA with a forward KV scan, else
 // false (the caller falls through to cuBLAS / FMHA). The DispatchPolicy argument is unread.
-[[nodiscard]] static bool try_hd512_row_invariant_prefill(const DispatchPolicy& /*rcfg*/, int hd,
-                                                          const Tensor& q, const Tensor& k, const Tensor& v,
-                                                          Tensor& o, int n, int kv_len, int nh, int nkv,
-                                                          float scale, int sliding_window, float softcap,
-                                                          int q_offset, cudaStream_t stream,
-                                                          const void* sinks) {
+[[nodiscard]] static bool try_hd512_row_invariant_prefill(const AttnPrefillTierArgs& a) {
+    const auto& [rcfg_unread, q_p, k_p, v_p, o_p, n, kv_len, nh, nkv, hd, scale, sliding_window, softcap,
+                 q_offset, stream, sinks] = a;
+    const Tensor& q = *q_p;
+    const Tensor& k = *k_p;
+    const Tensor& v = *v_p;
+    Tensor& o = *o_p;
     if (hd != 512)
         return false;
     // Split-D FA2 (attention_fa2_hd512.cu), rows independent of n and q_offset as well;
@@ -239,19 +244,32 @@ struct ApaPagedPrefillArgs {
 
 // Capture-replay chunk: FA2 only (the S-matrix/FMHA fallbacks bound work from the baked ctx_len).
 // A decline means the engine-side eligibility check and the kernel disagree: throw, never fall back.
-static void fa2_prefill_for_replay(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
-                                   const Tensor& v, Tensor& o, int n, int kv_capacity, int nh, int nkv,
-                                   int hd, float scale, int sliding_window, float softcap, int q_offset,
-                                   cudaStream_t stream, const int* d_kv_len, const void* sinks) {
-    if (!try_fa2_fp16qk_prefill(rcfg, q, k, v, o, n, kv_capacity, nh, nkv, hd, scale, sliding_window, softcap,
-                                q_offset, stream, d_kv_len, sinks))
+// kv_len = the KV capacity the graph was captured with, d_kv_len the live length.
+static void fa2_prefill_for_replay(const Fa2PrefillArgs& a) {
+    if (!try_fa2_fp16qk_prefill(a))
         throw std::runtime_error("chunked_prefill: FA2 declined a capture-replay chunk");
 }
 
 // Fused QKV GEMV dispatch by quant type (all share identical signatures).
-static void dispatch_gemv_qkv_fused(QType qtype, const void* W_q, const void* W_k, const void* W_v,
-                                    const block_q8_1* q8_1, const float* d8, half* y_q, half* y_k, half* y_v,
-                                    int q_rows, int k_rows, int v_rows, int K, cudaStream_t stream) {
+// Arguments in the old parameter order (audit D-11).
+struct GemvQkvFusedArgs {
+    QType qtype{};
+    const void* W_q = nullptr;
+    const void* W_k = nullptr;
+    const void* W_v = nullptr;
+    const block_q8_1* q8_1 = nullptr;
+    const float* d8 = nullptr;
+    half* y_q = nullptr;
+    half* y_k = nullptr;
+    half* y_v = nullptr;
+    int q_rows = 0;
+    int k_rows = 0;
+    int v_rows = 0;
+    int K = 0;
+    cudaStream_t stream = nullptr;
+};
+static void dispatch_gemv_qkv_fused(const GemvQkvFusedArgs& a) {
+    const auto& [qtype, W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream] = a;
     switch (qtype) {
         case QType::Q6_K:
             gemv_qkv_fused_q6k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K,

@@ -44,10 +44,12 @@ bool router_decode_route(const Tensor& in, const Tensor& gate, int ne, int top_k
 }
 }  // namespace
 
-bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int n, int ne, int top_k,
-                        bool use_sigmoid, bool norm_weights, const void* score_bias, const RouterFusedGate& g,
-                        MoeRoutingBuffers& buf, void* ws, size_t ws_bytes, const RouterDecodeScratch& dec,
-                        cudaStream_t stream) {
+bool router_fused_route(const RouterFusedRouteArgs& ra) {
+    const auto& [in_p, gate_p, compute, n, ne, top_k, use_sigmoid, norm_weights, score_bias, g, buf_p, ws,
+                 ws_bytes, dec, stream] = ra;
+    const Tensor& in = *in_p;
+    const Tensor& gate = *gate_p;
+    MoeRoutingBuffers& buf = *buf_p;
     const int d = static_cast<int>(in.shape[1]);
     if (g.group_limit || (g.logit_bias_profile && g.logit_bias != nullptr) || debug_forward_enabled())
         return false;

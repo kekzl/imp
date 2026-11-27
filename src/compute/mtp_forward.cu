@@ -458,12 +458,12 @@ bool mtp_body_nvfp4_allocate(const MtpHead& mtp, MtpDraftWorkspace& ws, cudaStre
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
-bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
-                            int n_experts, int top_k, int expert_d_ff, int shared_d_ff,
-                            int num_heads, int num_kv_heads, int head_dim,
-                            int max_seq_len, int n_kv_slots, int hc_count, int hc_lowrank) {
+bool mtp_workspace_allocate(const MtpWorkspaceAllocateArgs& a) {
+    const auto& [ws_p, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff, num_heads,
+                 num_kv_heads, head_dim, max_seq_len, n_kv_slots_in, hc_count, hc_lowrank] = a;
+    MtpDraftWorkspace& ws = *ws_p;
     if (hidden_dim <= 0 || vocab_size <= 0) return false;
-    n_kv_slots = std::max(1, n_kv_slots);
+    const int n_kv_slots = std::max(1, n_kv_slots_in);
     auto alloc = [&ws](void** p, size_t bytes) { return mtp_dev_alloc(ws, p, bytes); };
     bool ok = true;
     // Phase 2.1 buffers (always allocated)
@@ -1041,11 +1041,14 @@ static void keep_first(cudaError_t& first, cudaError_t err) {
     if (first == cudaSuccess) first = err;
 }
 
-bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
-                    const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
-                    int* out_token_id, cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4,
-                    const int32_t* d_prev_token, int32_t* d_out_token, const void* lm_head_fp8,
-                    const float* lm_head_fp8_scales) {
+bool mtp_draft_step(const MtpDraftStepArgs& a) {
+    const auto& [prev_token_id, d_h_prev, mtp_p, main_tok_emb_p, main_lm_head_p, ws_p, hidden_dim, vocab_size,
+                 out_token_id, stream, lm_head_nvfp4, d_prev_token, d_out_token, lm_head_fp8,
+                 lm_head_fp8_scales] = a;
+    const MtpHead& mtp = *mtp_p;
+    const Tensor& main_tok_emb = *main_tok_emb_p;
+    const Tensor& main_lm_head = *main_lm_head_p;
+    MtpDraftWorkspace& ws = *ws_p;
     if (!mtp.loaded) {
         IMP_LOG_ERROR("mtp_draft_step: MTP head not loaded");
         return false;

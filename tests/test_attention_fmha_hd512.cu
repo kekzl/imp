@@ -157,8 +157,20 @@ class FmhaHd512Test : public ::testing::Test {
 
         // cuBLAS materialized reference (the legacy pre-change path).
         cudaMemset(d_o, 0, q_elems * 2);
-        attention_cublas_prefill(Q2, K2, V2, O2, S3, NH, NKV, HD, scale, causal, softcap, q_offset, stream_,
-                                 sw);
+        attention_cublas_prefill({.Q = &Q2,
+                                  .K = &K2,
+                                  .V = &V2,
+                                  .O = &O2,
+                                  .S = &S3,
+                                  .n_heads = NH,
+                                  .n_kv_heads = NKV,
+                                  .head_dim = HD,
+                                  .scale = scale,
+                                  .causal = causal,
+                                  .softcap = softcap,
+                                  .q_offset = q_offset,
+                                  .stream = stream_,
+                                  .sliding_window = sw});
         std::vector<float> o_cublas = collect();
 
         // WMMA FMHA — must actually run at hd=512 (the coverage gate).
@@ -251,13 +263,35 @@ TEST_F(FmhaHd512Test, SlicedCublasParity) {
     };
 
     cudaMemset(d_o, 0, q_elems * 2);
-    attention_cublas_prefill(Q2, K2, V2, O2, S_big, NH, NKV, HD, scale, /*causal=*/true, softcap,
-                             q_offset, stream_);
+    attention_cublas_prefill({.Q = &Q2,
+                              .K = &K2,
+                              .V = &V2,
+                              .O = &O2,
+                              .S = &S_big,
+                              .n_heads = NH,
+                              .n_kv_heads = NKV,
+                              .head_dim = HD,
+                              .scale = scale,
+                              .causal = true,
+                              .softcap = softcap,
+                              .q_offset = q_offset,
+                              .stream = stream_});
     std::vector<float> o_whole = collect();
 
     cudaMemset(d_o, 0, q_elems * 2);
-    bool ran = attention_cublas_prefill_sliced(Q2, K2, V2, O2, S_small, NH, NKV, HD, scale,
-                                               /*causal=*/true, softcap, q_offset, stream_);
+    bool ran = attention_cublas_prefill_sliced({.Q = &Q2,
+                                                .K = &K2,
+                                                .V = &V2,
+                                                .O = &O2,
+                                                .S = &S_small,
+                                                .n_heads = NH,
+                                                .n_kv_heads = NKV,
+                                                .head_dim = HD,
+                                                .scale = scale,
+                                                .causal = true,
+                                                .softcap = softcap,
+                                                .q_offset = q_offset,
+                                                .stream = stream_});
     ASSERT_TRUE(ran) << "sliced path declined although a 32-row slice fits";
     std::vector<float> o_sliced = collect();
 
