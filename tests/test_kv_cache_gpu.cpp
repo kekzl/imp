@@ -511,7 +511,7 @@ TEST(KVCacheManagerTest, SwaSnapshotRestoreExhaustionRollsBack) {
 // A growable pool below its ceiling grows before the prefix cache is
 // reclaimed. Reclaim-first emptied the cache at the planned commit while GiBs
 // sat free (Qwen3.8-27B, 8 sessions x 3 turns: 5 of 8 re-prefilled).
-TEST(KVCacheManagerGrowTest, GrowsBeforeReclaimingCachedBlocks) {
+TEST(KVCacheManagerTest, GrowsBeforeReclaimingCachedBlocks) {
     SKIP_IF_NO_CUDA();
     // 8 committed blocks, 32-block ceiling.
     auto cache = std::make_unique<KVCache>(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16,

@@ -1,6 +1,6 @@
 // LoRA hot-swap E2E (#522), C-API, real model: zero-B adapter -> bit-identical to base;
 // nonzero-B adapter -> output differs, engine stays healthy; swap back -> bit-identical to
-// original (graph re-capture path). Default Llama-3.2-3B q_proj/v_proj r=8, skips if absent.
+// original (graph re-capture path). Default Qwen3-8B NVFP4 q_proj/v_proj r=8, skips if absent.
 
 #include <gtest/gtest.h>
 
@@ -28,7 +28,7 @@ namespace {
 const char* model_path() {
     if (const char* p = getenv(imp_test::kEnvModelLlama))
         return p;
-    return "/models/Llama-3.2-3B-Instruct-Q8_0.gguf";
+    return "/models/Qwen3-8B-NVFP4-cortecs";
 }
 
 // Minimal safetensors writer: header JSON + F32 tensor blobs.
@@ -139,7 +139,7 @@ TEST(LoraHotSwap, ZeroAdapterIdentity_EffectAdapterDiffers_SwapBack) {
     ASSERT_EQ(imp_context_create(model, &config, &ctx), IMP_SUCCESS);
 
     const int d_model = imp_model_d_model(model);
-    const int kv_rows = 1024;  // Llama-3.2-3B: 8 KV heads × 128
+    const int kv_rows = 1024;  // Qwen3-8B (and Llama-3.2-3B): 8 KV heads × 128
 
     const char* corpus =
         "The three primary colors are red, blue, and yellow. Mixing two primary colors "

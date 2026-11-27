@@ -63,7 +63,8 @@ namespace imp {
     // prefill staging (h_pf_token_ids_/h_pf_positions_) was rewritten by the
     // host while earlier chunks' H2D copies were still queued; the async FA2
     // path exposed it, cuBLAS's implicit syncs hid it. Fixed via
-    // pf_staging_evt_ in engine_scheduler.cpp; q_offset parity is locked by FmhaFA2Test.FP16QK_Chunked_*.
+    // pf_staging_evt_ in engine_scheduler.cpp; q_offset parity is locked by the
+    // FmhaFA2Prefill rows FmhaFA2Test_FP16QK_Chunked_*.
     int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
     int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
     Tensor q4 = q.reshape(4, q4s);

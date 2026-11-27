@@ -19,7 +19,7 @@ namespace {
 // per B row (sub-block pair = low/high nibbles), 2 barriers per 16 MMAs per warp (#2441);
 // B-fragment fetch = one u32 load + shift/mask/vsub4.
 // alpha/beta computed from staged 16-B block headers after tile lands (alpha=d*sc6,
-// beta=8*alpha-dmin*m6; same algebra as mmq_q4k_imma_reorder, see mmq_q4k_imma_layout.h).
+// beta=8*alpha-dmin*m6).
 
 __device__ __forceinline__ void q4k_scale_min(int j, const uint8_t* q, uint32_t& sc,
                                               uint32_t& mn) {

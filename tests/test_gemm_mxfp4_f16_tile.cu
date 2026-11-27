@@ -1,6 +1,6 @@
 // gemm_mxfp4_f16_tile (fused MXFP4 W4A16 prompt GEMM, ROADMAP row 123) against dequant_mxfp4_linear_to_fp16
 // + gemm_f16_tile: same fp16 W bits, same per-element k order, so the outputs must match bit for bit.
-// Plus a repeat test and a timing table on Qwen3.5-4B shapes (informational).
+// Repeat test here. Timing cases: tests/bench/test_gemm_mxfp4_f16_tile_bench.cu.
 
 #include "compute/gemm.h"
 #include "compute/gemm_f16_tile.h"
@@ -18,56 +18,9 @@
 #include <vector>
 
 using namespace imp;
+#include "test_gemm_mxfp4_f16_tile_util.cuh"
 
 namespace {
-
-__global__ void fill_act_kernel(half* p, size_t n, uint32_t seed) {
-    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
-        uint32_t h = static_cast<uint32_t>(i) * 2654435761u ^ seed;
-        h ^= h >> 13;
-        h *= 0x5bd1e995u;
-        h ^= h >> 15;
-        p[i] = __float2half((static_cast<float>(h & 0xffff) / 32768.0f) - 1.0f);
-    }
-}
-
-struct Mx4Bufs {
-    int M = 0, N = 0, K = 0;
-    uint8_t *w = nullptr, *sc = nullptr;
-    half *a = nullptr, *w16 = nullptr, *ref = nullptr, *own = nullptr;
-    // Any E2M1 bytes; UE8M0 exponents 2^-16 .. 2^1, varied per 32-k group.
-    void alloc(int m, int n, int k, cudaStream_t s) {
-        M = m;
-        N = n;
-        K = k;
-        std::mt19937 rng(0x4u + n + k);
-        std::vector<uint8_t> hw(size_t(N) * (K / 2)), hs(size_t(N) * (K / 32));
-        for (auto& b : hw)
-            b = static_cast<uint8_t>(rng());
-        for (auto& e : hs)
-            e = static_cast<uint8_t>(111 + (rng() % 18));
-        cudaMalloc(&w, hw.size());
-        cudaMalloc(&sc, hs.size());
-        cudaMemcpy(w, hw.data(), hw.size(), cudaMemcpyHostToDevice);
-        cudaMemcpy(sc, hs.data(), hs.size(), cudaMemcpyHostToDevice);
-        cudaMalloc(&a, size_t(M) * K * 2);
-        cudaMalloc(&w16, size_t(N) * K * 2);
-        cudaMalloc(&ref, size_t(M) * N * 2);
-        cudaMalloc(&own, size_t(M) * N * 2);
-        fill_act_kernel<<<1024, 256, 0, s>>>(a, size_t(M) * K, 0x51u);
-        fill_act_kernel<<<1024, 256, 0, s>>>(ref, size_t(M) * N, 0x99u);
-        cudaMemcpyAsync(own, ref, size_t(M) * N * 2, cudaMemcpyDeviceToDevice, s);
-        dequant_mxfp4_linear_to_fp16(w, sc, N, K, w16, s);
-    }
-    void release() const {
-        cudaFree(w);
-        cudaFree(sc);
-        cudaFree(a);
-        cudaFree(w16);
-        cudaFree(ref);
-        cudaFree(own);
-    }
-};
 
 size_t count_diff(const half* x, const half* y, size_t n, size_t* nonzero) {
     std::vector<uint16_t> a(n), b(n);
@@ -142,55 +95,3 @@ TEST_P(GemmMxfp4RepeatTest, BitIdenticalAcrossRuns) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Variants, GemmMxfp4RepeatTest, ::testing::Values(1, 2));
-
-// Timing: fused vs dequant + gemm() (the W4A16 scratch path of executor_gemm_dispatch.cpp).
-TEST(GemmMxfp4TileBench, VsDequantPlusGemm) {
-    cudaStream_t s;
-    cudaStreamCreate(&s);
-    process_diag_set_cublas_fp16_acc(true);
-    const int shapes[][2] = {{9216, 2560}, {2560, 9216}, {2560, 2560}, {1024, 2560}};
-    std::fprintf(stderr, "%6s %6s %6s %10s %9s %9s %9s\n", "M", "N", "K", "dq+gemm_us", "dq_us", "128x128",
-                 "256x128");
-    for (const auto& nk : shapes)
-        for (int M : {512, 2048, 4096}) {
-            Mx4Bufs b;
-            b.alloc(M, nk[0], nk[1], s);
-            auto time_us = [&](auto&& fn) {
-                cudaEvent_t e0, e1;
-                cudaEventCreate(&e0);
-                cudaEventCreate(&e1);
-                for (int i = 0; i < 10; ++i)
-                    fn();
-                cudaEventRecord(e0, s);
-                for (int i = 0; i < 20; ++i)
-                    fn();
-                cudaEventRecord(e1, s);
-                cudaEventSynchronize(e1);
-                float ms = 0.0f;
-                cudaEventElapsedTime(&ms, e0, e1);
-                cudaEventDestroy(e0);
-                cudaEventDestroy(e1);
-                return 1000.0 * ms / 20;
-            };
-            int64_t as[2] = {M, b.K}, ws[2] = {b.N, b.K}, ds[2] = {M, b.N};
-            Tensor ta(b.a, QType::F16, 2, as, true), tw(b.w16, QType::F16, 2, ws, true),
-                td(b.ref, QType::F16, 2, ds, true);
-            const double t_dq = time_us([&] { dequant_mxfp4_linear_to_fp16(b.w, b.sc, b.N, b.K, b.w16, s); });
-            const double t_lib = time_us([&] {
-                dequant_mxfp4_linear_to_fp16(b.w, b.sc, b.N, b.K, b.w16, s);
-                gemm(ta, tw, td, 1.0f, 0.0f, s);
-            });
-            const double t_128 = time_us([&] {
-                (void)gemm_mxfp4_f16_tile(b.a, b.w, b.sc, b.own, M, b.N, b.K, 1.0f, 0.0f, true, s, 1);
-            });
-            const double t_256 = time_us([&] {
-                (void)gemm_mxfp4_f16_tile(b.a, b.w, b.sc, b.own, M, b.N, b.K, 1.0f, 0.0f, true, s, 2);
-            });
-            ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
-            std::fprintf(stderr, "%6d %6d %6d %10.1f %9.1f %9.1f %9.1f\n", M, b.N, b.K, t_lib, t_dq, t_128,
-                         t_256);
-            b.release();
-        }
-    process_diag_set_cublas_fp16_acc(false);
-    cudaStreamDestroy(s);
-}

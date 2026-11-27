@@ -13,62 +13,10 @@
 
 // Schema-FSM side of constrained decoding: RegexNfa (pattern), SchemaConstrainer
 // masking/update, $ref/$defs. The any-JSON constrainer +
-// preamble gate live in test_json_constrain.cu.
+// preamble gate live in test_json_constrain.cu; RegexNfa in test_regex_constrain.cpp.
 
 namespace imp {
 namespace {
-
-// RegexNfa direct unit tests for JSON-schema pattern, isolated from the model/preamble gate
-// to pinpoint over-masking.
-
-// Feed a whole string; return final state set ({} if it died).
-static std::vector<int> nfa_run(const RegexNfa& n, const std::string& s) {
-    std::vector<int> st = n.start_set();
-    for (char c : s) {
-        st = n.step(st, static_cast<unsigned char>(c));
-        if (st.empty())
-            return st;
-    }
-    return st;
-}
-
-TEST(RegexNfaTest, Literal) {
-    RegexNfa n;
-    ASSERT_TRUE(n.compile("abc"));
-    EXPECT_FALSE(n.start_set().empty());
-    EXPECT_TRUE(n.accepts(nfa_run(n, "abc")));
-    EXPECT_TRUE(nfa_run(n, "abx").empty());     // diverges at 3rd char
-    EXPECT_FALSE(n.accepts(nfa_run(n, "ab")));  // prefix alive but not accepting
-    EXPECT_TRUE(nfa_run(n, "x").empty());       // wrong first char dies
-}
-
-TEST(RegexNfaTest, CharClassRange) {
-    RegexNfa n;
-    ASSERT_TRUE(n.compile("[A-Z]"));
-    EXPECT_FALSE(n.start_set().empty());
-    EXPECT_TRUE(n.accepts(nfa_run(n, "D")));
-    EXPECT_TRUE(nfa_run(n, "d").empty());  // lowercase not in class
-}
-
-TEST(RegexNfaTest, CountedRepeat) {
-    RegexNfa n;
-    ASSERT_TRUE(n.compile("[A-Z]{3}"));
-    EXPECT_FALSE(n.start_set().empty());
-    EXPECT_FALSE(n.step(n.start_set(), 'D').empty());  // first char must survive
-    EXPECT_TRUE(n.accepts(nfa_run(n, "DEU")));
-    EXPECT_FALSE(n.accepts(nfa_run(n, "DE")));  // only 2 — not yet accepting
-    EXPECT_TRUE(nfa_run(n, "DEUX").empty());    // 4th char dies
-    EXPECT_TRUE(nfa_run(n, "Dx").empty());      // 2nd char wrong class
-}
-
-TEST(RegexNfaTest, Anchored) {
-    RegexNfa n;
-    ASSERT_TRUE(n.compile("^[A-Z]{3}$"));
-    EXPECT_FALSE(n.start_set().empty());
-    EXPECT_FALSE(n.step(n.start_set(), 'D').empty());
-    EXPECT_TRUE(n.accepts(nfa_run(n, "DEU")));
-    EXPECT_FALSE(n.accepts(nfa_run(n, "DE")));
-}
 
 // End-to-end SchemaConstrainer: a `pattern` value must allow pattern-valid tokens
 // and mask the rest — and crucially must NOT mask everything (the over-masking

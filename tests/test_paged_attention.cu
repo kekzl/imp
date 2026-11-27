@@ -1455,34 +1455,6 @@ TEST(PagedAttentionTest, GQA_HD256_Gemma4SWA) {
 }
 
 // =========================================================================
-// INT4 pack/unpack roundtrip
-// =========================================================================
-
-TEST(INT4QuantTest, PackUnpackRoundtrip) {
-    // INT4 signed range: [-8, 7]. Two values packed per byte: lo nibble + hi nibble.
-    auto pack_int4 = [](int lo, int hi) -> uint8_t {
-        return static_cast<uint8_t>((lo & 0xF) | ((hi & 0xF) << 4));
-    };
-    auto unpack_lo = [](uint8_t b) -> int {
-        int v = b & 0xF;
-        return (v >= 8) ? (v - 16) : v;
-    };
-    auto unpack_hi = [](uint8_t b) -> int {
-        int v = (b >> 4) & 0xF;
-        return (v >= 8) ? (v - 16) : v;
-    };
-
-    // Test all valid INT4 pairs
-    for (int lo = -8; lo <= 7; lo++) {
-        for (int hi = -8; hi <= 7; hi++) {
-            uint8_t packed = pack_int4(lo, hi);
-            EXPECT_EQ(unpack_lo(packed), lo) << "lo=" << lo << " hi=" << hi;
-            EXPECT_EQ(unpack_hi(packed), hi) << "lo=" << lo << " hi=" << hi;
-        }
-    }
-}
-
-// =========================================================================
 // INT4 paged attention decode: single head, short context
 // =========================================================================
 

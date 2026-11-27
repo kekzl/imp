@@ -28,3 +28,15 @@ TEST(GemmKernelRegistryLink, HoldsExactlyTheProducedKeys) {
                                      << " qtype=" << static_cast<int>(s.weight_qtype)
                                      << " m_is_one=" << s.m_is_one;
 }
+
+// Pin the GemmStrategy operator== contract — used by the linear-scan
+// lookup in dispatch().
+TEST(GemmStrategy, EqualityIsByValue) {
+    GemmStrategy a{StorageTier::FP16, QType::F16, /*m_is_one=*/true};
+    GemmStrategy b{StorageTier::FP16, QType::F16, /*m_is_one=*/true};
+    GemmStrategy c{StorageTier::FP16, QType::F16, /*m_is_one=*/false};
+    GemmStrategy d{StorageTier::FP8, QType::F16, /*m_is_one=*/true};
+    EXPECT_TRUE(a == b);
+    EXPECT_FALSE(a == c);
+    EXPECT_FALSE(a == d);
+}
