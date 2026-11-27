@@ -153,68 +153,14 @@ TEST(MtpMropeArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ(a.d_row_pos, nullptr);
 }
 
-// 17 fields each, the old nvfp4_quant_hw_fp16 / nvfp4_dequant_hw_fp16 parameter lists in order.
-TEST(Nvfp4QuantHwArgs, CarriesEveryFieldInDeclarationOrder) {
-    const Nvfp4QuantHwArgs a{.batch_size = 1,
-                             .n_heads = 2,
-                             .n_tokens = 3,
-                             .head_dim = 4,
-                             .stride_bz_input = 5,
-                             .stride_h_input = 6,
-                             .stride_seq_input = 7,
-                             .stride_bz_output = 8,
-                             .stride_h_output = 9,
-                             .stride_seq_output = 10,
-                             .stride_bz_output_sf = 11,
-                             .stride_h_output_sf = 12,
-                             .stride_seq_output_sf = 13};
-    const auto& [in, fp4, sf, b, nh, nt, hd, s0, s1, s2, s3, s4, s5, s6, s7, s8, st] = a;
-    EXPECT_EQ((std::array{b, nh, nt, hd}), (std::array{1, 2, 3, 4}));
-    EXPECT_EQ((std::array<int64_t, 9>{s0, s1, s2, s3, s4, s5, s6, s7, s8}),
-              (std::array<int64_t, 9>{5, 6, 7, 8, 9, 10, 11, 12, 13}));
-}
-
-TEST(Nvfp4DequantHwArgs, CarriesEveryFieldInDeclarationOrder) {
-    const Nvfp4DequantHwArgs a{.batch_size = 1,
-                               .n_heads = 2,
-                               .n_tokens = 3,
-                               .head_dim = 4,
-                               .stride_bz_input = 5,
-                               .stride_h_input = 6,
-                               .stride_seq_input = 7,
-                               .stride_bz_output = 8,
-                               .stride_h_output = 9,
-                               .stride_seq_output = 10,
-                               .stride_bz_input_sf = 11,
-                               .stride_h_input_sf = 12,
-                               .stride_seq_input_sf = 13};
-    const auto& [fp4, sf, out, b, nh, nt, hd, s0, s1, s2, s3, s4, s5, s6, s7, s8, st] = a;
-    EXPECT_EQ((std::array{b, nh, nt, hd}), (std::array{1, 2, 3, 4}));
-    EXPECT_EQ((std::array<int64_t, 9>{s0, s1, s2, s3, s4, s5, s6, s7, s8}),
-              (std::array<int64_t, 9>{5, 6, 7, 8, 9, 10, 11, 12, 13}));
-}
-
-// 16 fields, the old gdn_scan_decode_f32 parameter list in order; grouped_layout defaults to 0 (tiled).
-TEST(GdnScanDecodeArgs, CarriesEveryFieldInDeclarationOrder) {
-    const GdnScanDecodeArgs a{.n_heads = 1, .head_dim_ssm = 2, .state_size = 3, .n_groups = 4};
-    const auto& [x, B, C, al, be, alog, dtb, h, y, z, nh, hd, ss, ng, st, gl] = a;
-    EXPECT_EQ((std::array{nh, hd, ss, ng, gl}), (std::array{1, 2, 3, 4, 0}));
-    EXPECT_EQ(z, nullptr);
-}
-
-// 16 fields, the old mtp_attn_scan_slots parameter list in order.
-TEST(MtpAttnScanSlotsArgs, CarriesEveryFieldInDeclarationOrder) {
-    const MtpAttnScanSlotsArgs a{.slot_elems = 7,
-                                 .max_pos = 1,
-                                 .n_rows = 2,
-                                 .num_heads = 3,
-                                 .num_kv_heads = 4,
-                                 .head_dim = 5,
-                                 .ring = 6};
-    const auto& [q, k, v, out, slots, pos, se, mp, nr, nh, nkv, hd, st, ring, hi, part] = a;
-    EXPECT_EQ((std::array{mp, nr, nh, nkv, hd, ring}), (std::array{1, 2, 3, 4, 5, 6}));
-    EXPECT_EQ(se, 7);
-}
+// Defaults the nine deleted slice-7 field-order cases asserted (one field swap per struct fails
+// the build at the designated-initializer call sites): tiled GDN decode without z, no QSA ctx
+// table, no PLE snapshot / real-row tables, no DSpark first-row / block tables.
+static_assert(GdnScanDecodeArgs{}.grouped_layout == 0 && GdnScanDecodeArgs{}.z == nullptr);
+static_assert(QsaGatherKvArgs{}.scratch_ctx == nullptr);
+static_assert(PleConvAddArgs{}.snap_state == nullptr && PleConvAddArgs{}.d_snap_n == nullptr &&
+              PleConvAddArgs{}.d_real_n == nullptr);
+static_assert(DsparkAttentionDevArgs{}.d_first == nullptr && DsparkAttentionDevArgs{}.blocks == nullptr);
 
 // Defaults = the old trailing defaults: no ring, no slot bound, no split-K.
 TEST(MtpAttnScanSlotsArgs, OmittedFieldsTakeTheOldDefaults) {
@@ -224,18 +170,6 @@ TEST(MtpAttnScanSlotsArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ(a.split_part, nullptr);
 }
 
-// 14 / 15 fields, the old mtp_feed_rows_multislot{,_dev} parameter lists in order.
-TEST(MtpFeedRowsArgs, CarriesEveryFieldInDeclarationOrder) {
-    const MtpFeedRowsArgs a{.n_rows = 1, .hidden_dim = 2, .post_norm_eps = 3.0f, .post_norm_offset = 4.0f};
-    const auto& [tok, hid, src, nr, slots, pos, mtp, emb, ws, hd, st, pn, eps, off] = a;
-    EXPECT_EQ((std::array{nr, hd}), (std::array{1, 2}));
-    EXPECT_EQ((std::array{eps, off}), (std::array{3.0f, 4.0f}));
-    const MtpFeedRowsDevArgs d{.n_rows = 1, .max_pos = 2, .hidden_dim = 3, .post_norm_offset = 4.0f};
-    const auto& [dtok, dhid, dsrc, dnr, dslots, dpos, dmp, dmtp, demb, dws, dhd, dst, dpn, deps, doff] = d;
-    EXPECT_EQ((std::array{dnr, dmp, dhd}), (std::array{1, 2, 3}));
-    EXPECT_EQ(doff, 4.0f);
-}
-
 // Defaults = the old trailing defaults: no post norm, eps 1e-6, offset 0.
 TEST(MtpFeedRowsArgs, OmittedFieldsTakeTheOldDefaults) {
     const MtpFeedRowsArgs a{.n_rows = 1};
@@ -243,49 +177,6 @@ TEST(MtpFeedRowsArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ((std::array{a.post_norm, d.post_norm}), (std::array<const imp::Tensor*, 2>{}));
     EXPECT_EQ((std::array{a.post_norm_eps, d.post_norm_eps}), (std::array{1e-6f, 1e-6f}));
     EXPECT_EQ((std::array{a.post_norm_offset, d.post_norm_offset}), (std::array{0.0f, 0.0f}));
-}
-
-// 15 fields, the old qsa_gather_kv parameter list in order.
-TEST(QsaGatherKvArgs, CarriesEveryFieldInDeclarationOrder) {
-    const QsaGatherKvArgs a{.block_size = 1, .n_kv = 2, .hd = 3, .cap = 4, .blocks_per_row = 5, .rows = 6};
-    const auto& [k, v, bt, bs, nkv, hd, sel, cnt, cap, ks, vs, bpr, ctx, rows, st] = a;
-    EXPECT_EQ((std::array{bs, nkv, hd, cap, bpr, rows}), (std::array{1, 2, 3, 4, 5, 6}));
-    EXPECT_EQ(ctx, nullptr);
-}
-
-// 15 fields, the old ple_conv_add parameter list in order; the snapshot / real-row pointers default
-// to nullptr as before.
-TEST(PleConvAddArgs, CarriesEveryFieldInDeclarationOrder) {
-    const PleConvAddArgs a{.slot_stride = 5, .n_seq = 1, .channels = 2, .kernel = 3, .dilation = 4};
-    const auto& [gv, gvn, w, cs, stride, slots, ns, hidden, ch, kern, dil, st, snap, sn, rn] = a;
-    EXPECT_EQ((std::array{ns, ch, kern, dil}), (std::array{1, 2, 3, 4}));
-    EXPECT_EQ(stride, 5);
-    EXPECT_EQ((std::array<const void*, 3>{snap, sn, rn}), (std::array<const void*, 3>{}));
-}
-
-// 14 fields, the old dspark_attention_dev parameter list in order; d_first / blocks default to nullptr.
-TEST(DsparkAttentionDevArgs, CarriesEveryFieldInDeclarationOrder) {
-    const DsparkAttentionDevArgs a{.rows = 1, .n_heads = 2, .n_kv_heads = 3, .max_kv_len = 4, .scale = 5.0f};
-    const auto& [q, k, v, o, work, rows, nh, nkv, ctx, mkv, sc, st, first, blocks] = a;
-    EXPECT_EQ((std::array{rows, nh, nkv, mkv}), (std::array{1, 2, 3, 4}));
-    EXPECT_EQ(sc, 5.0f);
-    EXPECT_EQ((std::array{first, blocks}), (std::array<const int*, 2>{}));
-}
-
-// 14 fields, the old pli_project_combine parameter list in order.
-TEST(PliProjectCombineArgs, CarriesEveryFieldInDeclarationOrder) {
-    const PliProjectCombineArgs a{.n = 1,
-                                  .n_layers = 2,
-                                  .dim = 3,
-                                  .vocab = 4,
-                                  .mm_token_id = 5,
-                                  .pad_id = 6,
-                                  .eps = 7.0f,
-                                  .tok_scale = 8.0f,
-                                  .out_scale = 9.0f};
-    const auto& [proj, table, ids, nw, n, nl, dim, vocab, mm, pad, eps, ts, os, st] = a;
-    EXPECT_EQ((std::array{n, nl, dim, vocab, mm, pad}), (std::array{1, 2, 3, 4, 5, 6}));
-    EXPECT_EQ((std::array{eps, ts, os}), (std::array{7.0f, 8.0f, 9.0f}));
 }
 
 }  // namespace
