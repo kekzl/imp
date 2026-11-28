@@ -1,6 +1,7 @@
 // Device-driven expert cache: resolve kernel (lookup + LRU eviction + slot/scale writes)
 // and gather kernel (zero-copy from mapped pinned host memory). Design: expert_cache_device.h.
 #include "exec/expert_cache_device.h"
+#include "compute/moe_topk_block.cuh"
 #include "exec/expert_cache_device_kernels.cuh"
 #include "exec/executor_helpers.h"
 #include "exec/nvfp4_expert_offload.h"
@@ -22,10 +23,13 @@ namespace {
 
 using namespace expert_cache_kernels;  // NOLINT(google-build-using-namespace): shared resolve helpers
 
+static_assert(kResolveThreads == BLOCK_SIZE, "the resolve block runs topk_gating_kernel's block code");
+static_assert(kResolveSmemSlots >= kTopkSlotsPerThread * BLOCK_SIZE, "the router probs borrow the stamps");
+
 // First of entries [0, j) routing expert e (an earlier row routed it too), -1 if none.
-__device__ __forceinline__ int first_entry_of(const int32_t* __restrict__ expert_indices, int j, int e) {
+__device__ __forceinline__ int first_entry_of(const int* s_idx, int j, int e) {
     for (int q = 0; q < j; ++q)
-        if (expert_indices[q] == e)
+        if (s_idx[q] == e)
             return q;
     return -1;
 }
@@ -34,7 +38,7 @@ __device__ __forceinline__ int first_entry_of(const int32_t* __restrict__ expert
 __device__ __forceinline__ void resolve_finish(const DevExpertLayer& L, int n, int nmiss, int* n_miss_out,
                                                TierMailbox* mb, uint32_t* tier_seq, int layer) {
     *n_miss_out = nmiss;
-    if (mb) {  // tiered layer: misses are in mapped memory, post them to the tier thread
+    if (mb && nmiss > 0) {  // tiered: misses in mapped memory go to the tier thread; none, no round trip
         const uint32_t s = *tier_seq + 1;
         *tier_seq = s;
         mb->layer = layer;
@@ -88,11 +92,15 @@ __device__ __forceinline__ void resolve_commit_entry(const DevExpertLayer& L, in
 // that entry; hits restamp their slot. Phase 2: misses, in order, each take the least recently stamped
 // slot not used this step. Phase 3: one thread per miss updates the tables and writes its gather entry.
 // entry_miss (optional, [n_rows * top_k]): 1 where any projection of (row, k) waits for the gather.
+// rt.logits set (n_rows 1): phase 0 routes the row first (topk_gating_kernel's code, one launch less).
 __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __restrict__ expert_indices,
                                             int top_k, int n_rows, int32_t* __restrict__ slot_idx_out,
                                             DevMissEntry* __restrict__ misses, int* __restrict__ n_miss_out,
                                             TierMailbox* mb, uint32_t* tier_seq, int layer,
-                                            int32_t* __restrict__ entry_miss) {
+                                            int32_t* __restrict__ entry_miss, DevRouteTopk rt) {
+    __shared__ int s_idx[kDevExpertMaxTopK * kDevExpertMaxRows];  // routed expert ids
+    __shared__ float s_topv[kDevExpertMaxTopK];
+    __shared__ float s_warp[kResolveThreads / 32];
     __shared__ int s_key[kMaxEntries];
     __shared__ int s_miss[kMaxEntries];    // 1 miss, 0 hit, 2 / 3 prefetch copying / landed, -1 alias
     __shared__ int s_victim[kMaxEntries];  // slot of a hit or a miss
@@ -113,15 +121,26 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
     if (entry_miss)
         for (int j = tid; j < nk; j += kResolveThreads)
             entry_miss[j] = 0;
+    if (rt.logits) {  // the stamps load after phase 1: their array holds the probabilities until then
+        float* s_probs = reinterpret_cast<float*>(s_stamp);
+        gating_softmax_probs(rt.logits, L.n_experts, s_probs, s_warp);
+        __syncthreads();
+        topk_select_block(s_probs, nullptr, L.n_experts, top_k, s_idx, s_topv);
+        if (tid == 0)
+            gating_write_topk(s_idx, s_topv, top_k, rt.normalize, rt.indices, rt.weights);
+    } else {
+        for (int j = tid; j < nk; j += kResolveThreads)
+            s_idx[j] = expert_indices[j];
+    }
     __syncthreads();
 
     for (int i = tid; i < n; i += kResolveThreads) {
         const int proj = i / nk;
         const int j = i - (proj * nk);
-        const int e = expert_indices[j];
+        const int e = s_idx[j];
         const int key = (proj * L.n_experts) + e;
         s_key[i] = key;
-        const int first = first_entry_of(expert_indices, j, e);
+        const int first = first_entry_of(s_idx, j, e);
         if (first >= 0) {
             s_miss[i] = -1;
             s_ord[i] = (proj * nk) + first;
@@ -497,25 +516,29 @@ bool DeviceExpertCache::stage_touched_range(int layer, const int32_t* expert_off
 }
 
 void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indices, int top_k, int n_rows,
-                                          int32_t* slot_idx_out, cudaStream_t stream) {
-    resolve(layer, expert_indices, top_k, n_rows, slot_idx_out, nullptr, stream);
+                                          int32_t* slot_idx_out, cudaStream_t stream,
+                                          const DevRouteTopk& route) {
+    resolve(layer, expert_indices, top_k, n_rows, slot_idx_out, nullptr, stream, route);
     gather(layer, top_k, n_rows, stream);
 }
 
 void DeviceExpertCache::resolve(int layer, const int32_t* expert_indices, int top_k, int n_rows,
-                                int32_t* slot_idx_out, int32_t* entry_miss, cudaStream_t stream) {
+                                int32_t* slot_idx_out, int32_t* entry_miss, cudaStream_t stream,
+                                const DevRouteTopk& route) {
     take_over(stream);
     const DevExpertLayer& L = layers_[layer];
     const bool tier = layer_tiered(layer);
     IMP_CHECK(n_rows >= 1 && n_rows <= (tier ? 1 : kDevExpertMaxRows) && L.slots >= 3 * top_k * n_rows,
               "expert cache resolve: %d rows at top_k %d exceed layer %d (%d slots, tiered %d)", n_rows,
               top_k, layer, L.slots, static_cast<int>(tier));
+    IMP_CHECK(route.logits == nullptr || (n_rows == 1 && route.indices && route.weights),
+              "expert cache resolve: in-kernel routing needs one row and both outputs (layer %d)", layer);
     DevMissEntry* misses = tier ? tier_misses_d_ : d_misses_;
     int* n_miss = tier ? tier_n_miss_d_ : d_n_miss_;
     expert_cache_resolve_kernel<<<1, kResolveThreads, 0, stream>>>(L, expert_indices, top_k, n_rows,
                                                                    slot_idx_out, misses, n_miss,
                                                                    tier ? tier_mb_d_ : nullptr, d_tier_seq_,
-                                                                   layer, entry_miss);
+                                                                   layer, entry_miss, route);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

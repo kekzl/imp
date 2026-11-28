@@ -93,6 +93,15 @@ struct DevExpertLayer {
     int pf_blocks;      // prefetch gather blocks per key
 };
 
+// One decode row's softmax top-k, run inside the resolve kernel instead of topk_gating_kernel
+// (moe_topk_block.cuh, same bits): saves one launch per MoE layer (B-59). logits null = routed already.
+struct DevRouteTopk {
+    const float* logits = nullptr;  // [n_experts] FP32 router logits
+    int32_t* indices = nullptr;     // [top_k] out: the routing expert_indices point at
+    float* weights = nullptr;       // [top_k] out
+    bool normalize = false;
+};
+
 inline constexpr int kDevExpertMaxTopK = 32;  // 3 * top_k <= 96 entries per row
 inline constexpr int kDevExpertMaxRows = 8;   // decode rows one resolve serves (non-tiered layers)
 inline constexpr int kDevExpertPrefetchMax = 32;   // expert prefetch ceiling, keys per layer
@@ -133,12 +142,14 @@ public:
     // down blocks, row-major inside) and the per-slot scales, then copies the misses into the pool.
     // n_rows > 1 needs a non-tiered layer and slots >= 3 * top_k * n_rows. Takes the pool over from
     // the host path if that one moved since the last call.
+    // route.logits set (n_rows 1): the resolve kernel routes the row itself (softmax top-k) and writes
+    // expert_indices and route.weights first.
     void resolve_and_stage(int layer, const int32_t* expert_indices, int top_k, int n_rows,
-                           int32_t* slot_idx_out, cudaStream_t stream);
+                           int32_t* slot_idx_out, cudaStream_t stream, const DevRouteTopk& route = {});
     // The two halves, for a gather on its own stream: resolve also writes entry_miss[n_rows * top_k]
     // (optional) = 1 where (row, k) has a projection the gather still copies. gather after resolve.
     void resolve(int layer, const int32_t* expert_indices, int top_k, int n_rows, int32_t* slot_idx_out,
-                 int32_t* entry_miss, cudaStream_t stream);
+                 int32_t* entry_miss, cudaStream_t stream, const DevRouteTopk& route = {});
     void gather(int layer, int top_k, int n_rows, cudaStream_t stream);
     // Takes the pool over from the host LRU path if that one filled slots since the last
     // call (forgets every slot, on `stream`). resolve_and_stage does this itself when it

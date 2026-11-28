@@ -1,6 +1,7 @@
 #include "compute/moe_routing.h"
 #include "compute/moe_group_limit.h"
 #include "compute/moe_routing_internal.cuh"
+#include "compute/moe_topk_block.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
 #include "core/pdl_device.cuh"
@@ -36,77 +37,6 @@ __device__ void apply_group_limit(float* sel, int n_experts, MoeGroupLimit grp) 
     __syncthreads();
 }
 
-// Softmax gating (Mixtral, DeepSeek, etc.) into s_probs; s_warp holds BLOCK_SIZE / WARP_SIZE floats.
-// Moved verbatim out of topk_gating_kernel (CCN gate).
-__device__ void gating_softmax_probs(const float* __restrict__ logits, int n_experts, float* s_probs,
-                                     float* s_warp) {
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    const int tid = threadIdx.x;
-    const int warp_id = tid / WARP_SIZE;
-    const int lane_id = tid % WARP_SIZE;
-    // Step 1: Find max for numerical stability
-    float local_max = -FLT_MAX;
-    for (int i = tid; i < n_experts; i += blockDim.x) {
-        local_max = fmaxf(local_max, logits[i]);
-    }
-    local_max = warp_reduce_max(local_max);
-
-    if (lane_id == 0)
-        s_warp[warp_id] = local_max;
-    __syncthreads();
-    if (warp_id == 0) {
-        float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : -FLT_MAX;
-        val = warp_reduce_max(val);
-        if (lane_id == 0)
-            s_warp[0] = val;
-    }
-    __syncthreads();
-    float gmax = s_warp[0];
-    // Every warp must read the max before warp 0 overwrites slot 0 with its partial sum:
-    // without this barrier a late warp took a sum as the max and top-k picked wrong experts.
-    __syncthreads();
-
-    // Step 2: Compute exp and sum for softmax
-    float local_sum = 0.0f;
-    for (int i = tid; i < n_experts; i += blockDim.x) {
-        local_sum += expf(logits[i] - gmax);
-    }
-    local_sum = warp_reduce_sum(local_sum);
-
-    if (lane_id == 0)
-        s_warp[warp_id] = local_sum;
-    __syncthreads();
-    if (warp_id == 0) {
-        float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : 0.0f;
-        val = warp_reduce_sum(val);
-        if (lane_id == 0)
-            s_warp[0] = val;
-    }
-    __syncthreads();
-    float inv_sum = 1.0f / s_warp[0];
-
-    // Step 3: Compute softmax probabilities
-    for (int i = tid; i < n_experts; i += blockDim.x) {
-        s_probs[i] = expf(logits[i] - gmax) * inv_sum;
-    }
-}
-
-// Thread 0 of topk_gating_kernel: normalise the selected weights and write one token's row (moved verbatim).
-__device__ void gating_write_topk(const int32_t* s_topk_idx, const float* s_topk_val, int top_k,
-                                  bool normalize_weights, int32_t* indices_row, float* weights_row) {
-    float multiplier = 1.0f;
-    if (normalize_weights) {
-        float norm = 0.0f;
-        for (int j = 0; j < top_k; ++j)
-            norm += s_topk_val[j];
-        multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
-    }
-    for (int j = 0; j < top_k; ++j) {
-        indices_row[j] = s_topk_idx[j];
-        weights_row[j] = s_topk_val[j] * multiplier;
-    }
-}
-
 __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_experts, int top_k,
                                    int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights,
                                    bool use_sigmoid, bool normalize_weights,
@@ -118,8 +48,6 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     __shared__ float s_warp[NUM_WARPS];
-    int warp_id = tid / WARP_SIZE;
-    int lane_id = tid % WARP_SIZE;
 
     extern __shared__ char smem_raw[];
     float* s_probs = reinterpret_cast<float*>(smem_raw);
@@ -147,73 +75,13 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
     if (grp.active())
         apply_group_limit(score_bias ? s_sel_probs : s_probs, n_experts, grp);
 
-    // Parallel top-k: block-wide argmax reduction, each iteration finds global max, records,
-    // masks it out. With score_bias: select on biased scores (s_sel_probs) but weight values
-    // use UNBIASED scores (s_probs).
-    {
-        // Shared memory for argmax reduction across warps
-        __shared__ float s_warp_max[NUM_WARPS];
-        __shared__ int s_warp_argmax[NUM_WARPS];
-
-        const float* sel = score_bias ? s_sel_probs : s_probs;
-
-        // Strided ownership tid + j*BLOCK_SIZE (moe_routing_internal.cuh): one expert per thread
-        // capped the search at 255 on the 512-expert Qwen3.8-Flash-Next router.
-        float my_vals[kTopkSlotsPerThread];
-        topk_load_slots(sel, n_experts, tid, my_vals);
-
-        for (int k = 0; k < top_k; k++) {
-            float wmax;
-            int widx;
-            topk_owned_argmax(my_vals, tid, wmax, widx);
-#pragma unroll
-            for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
-                float other_val = __shfl_xor_sync(0xFFFFFFFF, wmax, off);
-                int other_idx = __shfl_xor_sync(0xFFFFFFFF, widx, off);
-                if (other_val > wmax) {
-                    wmax = other_val;
-                    widx = other_idx;
-                }
-            }
-
-            // Write per-warp results
-            if (lane_id == 0) {
-                s_warp_max[warp_id] = wmax;
-                s_warp_argmax[warp_id] = widx;
-            }
-            __syncthreads();
-
-            // First warp reduces across all warps
-            if (warp_id == 0) {
-                float v = (lane_id < NUM_WARPS) ? s_warp_max[lane_id] : -FLT_MAX;
-                int ix = (lane_id < NUM_WARPS) ? s_warp_argmax[lane_id] : -1;
-#pragma unroll
-                for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
-                    float ov = __shfl_xor_sync(0xFFFFFFFF, v, off);
-                    int oi = __shfl_xor_sync(0xFFFFFFFF, ix, off);
-                    if (ov > v) {
-                        v = ov;
-                        ix = oi;
-                    }
-                }
-                if (lane_id == 0) {
-                    s_topk_idx[k] = ix;
-                    // Store UNBIASED weight for the selected expert
-                    s_topk_val[k] = score_bias ? s_probs[ix] : v;
-                }
-            }
-            __syncthreads();
-
-            // Mask out the selected expert so it won't be picked again
-            topk_clear_slot(my_vals, s_topk_idx[k], tid);
-        }
-
-        // Thread 0: normalize weights and write output
-        const ptrdiff_t row = static_cast<ptrdiff_t>(token) * top_k;
-        if (tid == 0)
-            gating_write_topk(s_topk_idx, s_topk_val, top_k, normalize_weights, expert_indices + row,
-                              expert_weights + row);
-    }
+    // With score_bias: select on biased scores (s_sel_probs) but weight values use UNBIASED scores (s_probs).
+    topk_select_block(score_bias ? s_sel_probs : s_probs, score_bias ? s_probs : nullptr, n_experts, top_k,
+                      s_topk_idx, s_topk_val);
+    const ptrdiff_t row = static_cast<ptrdiff_t>(token) * top_k;
+    if (tid == 0)
+        gating_write_topk(s_topk_idx, s_topk_val, top_k, normalize_weights, expert_indices + row,
+                          expert_weights + row);
 }
 
 // Fused gate GEMV + softmax/sigmoid + top-k (decode M=1): avoids intermediate FP32 logits
