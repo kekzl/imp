@@ -89,9 +89,12 @@ __global__ void expert_predict_topk_kernel(const float* __restrict__ logits, int
 // One block: entries rank-major (expert k, then gate / up / down). Predicted keys that are resident
 // get restamped (no prefetch victim takes them); the first `budget` absent ones take LRU victims, are
 // committed like misses and listed as pending for the layer's resolve; pf_done restarts at 0.
+// Tiered layer (mb set, no pending list): the misses go to the tier miss list and, when there are any,
+// a mailbox request the tier thread fills like a resolve's.
 __global__ void expert_prefetch_resolve_kernel(DevExpertLayer L, const int32_t* __restrict__ pred, int top_k,
                                                int budget, DevMissEntry* __restrict__ misses,
-                                               int* __restrict__ n_miss_out) {
+                                               int* __restrict__ n_miss_out, TierMailbox* mb,
+                                               uint32_t* tier_seq, int layer) {
     constexpr int kN = 3 * kDevExpertMaxTopK;
     __shared__ int s_key[kN];
     __shared__ int s_victim[kN];
@@ -143,14 +146,27 @@ __global__ void expert_prefetch_resolve_kernel(DevExpertLayer L, const int32_t* 
         if (s_ord[i] < 0)
             continue;
         commit_miss(L, s_key[i], s_victim[i], s_ord[i], s_clock, misses);
-        L.pf_slots[s_ord[i]] = s_victim[i];
+        if (L.pf_slots)
+            L.pf_slots[s_ord[i]] = s_victim[i];
+        if (mb)
+            __threadfence_system();  // the tier thread reads this entry after the mailbox post
     }
     __syncthreads();
     if (tid == 0) {
         *n_miss_out = s_n;
-        *L.pf_count = s_n;
-        *L.pf_done = 0;  // the previous round of this layer finished: its gather precedes this fork
+        if (L.pf_count) {
+            *L.pf_count = s_n;
+            *L.pf_done = 0;  // the previous round of this layer finished: its gather precedes this fork
+        }
         atomicAdd(&L.stats[2], static_cast<unsigned long long>(s_n));
+        if (mb && s_n > 0) {
+            const uint32_t s = *tier_seq + 1;
+            *tier_seq = s;
+            mb->layer = layer;
+            __threadfence_system();
+            *reinterpret_cast<volatile uint32_t*>(&mb->req_seq) = s;
+            __threadfence_system();
+        }
     }
 }
 
@@ -223,12 +239,14 @@ bool DeviceExpertCache::enable_prefetch(int budget, int blocks_per_key) {
     pf_pred_ = reinterpret_cast<int32_t*>(base + slots_b + count_b + miss_b + 256 + logits_b);
     auto* done = reinterpret_cast<uint32_t*>(base + slots_b + count_b + miss_b + 256 + logits_b + pred_b);
     for (int l = 0; l < n_layers; ++l) {
-        if (!layer_ready(l) || layer_tiered(l))
+        if (!layer_ready(l))
             continue;
+        layers_[l].pf_blocks = std::clamp(blocks_per_key, 1, kDevExpertGatherBlocks * 4);
+        if (layer_tiered(l))
+            continue;  // no pending list: the tiered prefetch is joined before the layer resolves
         layers_[l].pf_slots = slots + (static_cast<size_t>(l) * kDevExpertPrefetchMax);
         layers_[l].pf_count = counts + l;
         layers_[l].pf_done = done + l;
-        layers_[l].pf_blocks = std::clamp(blocks_per_key, 1, kDevExpertGatherBlocks * 4);
     }
     pf_budget_ = budget;
     IMP_LOG_INFO(
@@ -261,15 +279,20 @@ void DeviceExpertCache::predict_topk(const float* logits, int ne, int top_k, int
 }
 
 void DeviceExpertCache::prefetch_resolve(int layer, int top_k, cudaStream_t stream) {
-    expert_prefetch_resolve_kernel<<<1, kResolveThreads, 0, stream>>>(layers_[layer], pf_pred_, top_k,
-                                                                      pf_budget_, pf_misses_of_(layer),
-                                                                      pf_n_miss_of_(layer));
+    const bool tier = layer_tiered(layer);
+    expert_prefetch_resolve_kernel<<<1, kResolveThreads, 0, stream>>>(
+        layers_[layer], pf_pred_, top_k, pf_budget_, tier ? tier_misses_d_ : pf_misses_of_(layer),
+        tier ? tier_n_miss_d_ : pf_n_miss_of_(layer), tier ? tier_mb_d_ : nullptr, d_tier_seq_, layer);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 void DeviceExpertCache::prefetch_gather(int layer, cudaStream_t stream) {
     const DevExpertLayer& L = layers_[layer];
     const dim3 grid(L.pf_blocks, pf_budget_);
+    if (layer_tiered(layer)) {  // the layer's own gather path: tier ack, then copies with write-back
+        gather_misses_(layer, grid, stream);
+        return;
+    }
     expert_prefetch_gather_kernel<<<grid, 256, 0, stream>>>(pf_misses_of_(layer), pf_n_miss_of_(layer),
                                                             gather_bytes_(layer), L.pf_done);
     IMP_CUDA_CHECK_LAUNCH();

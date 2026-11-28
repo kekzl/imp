@@ -103,7 +103,7 @@ bool GraphExecutor::predict_next_experts_(int layer, const void* x, cudaStream_t
     const int next = layer + 1;
     const auto& cfg = model_->config();
     if (!dev_expert_cache_.prefetch_on() || x == nullptr || cur_n_tokens_ != 1 || next >= cfg.n_layers ||
-        !layer_has_moe(next) || !dev_expert_cache_.layer_ready(next) || dev_expert_cache_.layer_tiered(next))
+        !layer_has_moe(next) || !dev_expert_cache_.layer_ready(next))
         return false;
     const Tensor& gate = model_->layer(next).moe_gate;
     if (gate.data == nullptr || gate.qtype != QType::F16 || !gate.on_device || compute_dtype_ != QType::F16 ||
@@ -134,7 +134,8 @@ bool GraphExecutor::predict_next_experts_(int layer, const void* x, cudaStream_t
                                    tr, ps);
     if (!issue)
         return false;
-    dev_expert_cache_.prefetch_resolve(next, cfg.n_experts_active, ps);
+    if (!dev_expert_cache_.layer_tiered(next))  // tiered: on the gather stream behind this layer's gather
+        dev_expert_cache_.prefetch_resolve(next, cfg.n_experts_active, ps);
     IMP_CUDA_CHECK_LOG(cudaEventRecord(g.pf_ready, ps));
     return true;
 }
@@ -224,7 +225,8 @@ bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices,
     const bool pf_here = g.pf_layer == layer && n_rows == 1;
     if (!g.stream || non_gated_experts || dev_expert_cache_.layer_tiered(layer) || !pf_here)
         join_expert_prefetch_(stream);  // no-op without a prefetch in flight
-    if (!g.stream || non_gated_experts || dev_expert_cache_.layer_tiered(layer)) {
+    // Tiered layers take the gather stream only with the prefetch on: its tier request follows their gather.
+    if (!g.stream || non_gated_experts || (dev_expert_cache_.layer_tiered(layer) && !g.pf_stream)) {
         dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, n_rows, moe_.d_slot_idx.get(),
                                             stream, route);
         return false;
@@ -244,6 +246,8 @@ bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices,
     IMP_CUDA_CHECK_LOG(cudaEventRecord(g.gathered, g.stream));
     if (pf_next) {  // behind this layer's misses on the same stream: the next layer's gather follows it
         IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(g.stream, g.pf_ready, 0));
+        if (dev_expert_cache_.layer_tiered(layer + 1))  // one mailbox: after this layer's tier request
+            dev_expert_cache_.prefetch_resolve(layer + 1, top_k, g.stream);
         dev_expert_cache_.prefetch_gather(layer + 1, g.stream);
         IMP_CUDA_CHECK_LOG(cudaEventRecord(g.pf_gathered, g.stream));
         g.pf_layer = layer + 1;
