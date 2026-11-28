@@ -34,7 +34,7 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
        path=attention_cublas_prefill_sliced cmd=`test_attention_fmha_hd512.cu` DISABLED benches
        n=unknown note=isolated kernel A/B from the #1042 PR body, not an e2e figure]
 
-Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:48 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` (gated by `attention.fmha_fa2 == "on"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill`. If both decline the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:49 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` (gated by `attention.fmha_fa2 == "on"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill`. If both decline the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
 
 Since #1205 the resolved path is **observable at runtime**: the engine logs one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after the first step that has seen both a prefill and a decode, recorded from inside the real dispatch rather than predicted.
 
@@ -64,12 +64,12 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 
 | `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
-| FP16 | `paged_attention_decode` (`attention_paged.cu:926 void paged_attention_decode(`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (up to four Q heads per CTA); GQA multitok splits by `paged_attention_f16_multitok_split_count` (one wave, unsplit at a budget <= 2 splits, e.g. 16 Qwen3-8B rows) |
+| FP16 | `paged_attention_decode` (`attention_paged.cu:905 void paged_attention_decode(`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (up to four Q heads per CTA); GQA multitok splits by `paged_attention_f16_multitok_split_count` (one wave, unsplit at a budget <= 2 splits, e.g. 16 Qwen3-8B rows) |
 | FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 GQA (four tokens per warp iteration): the Q-head-grouped `_decode_fp8_gqa_kernel<16,2,HPC,2,SPLIT>` in `attention_paged_fp8_multitok_gqa.cu`; its split-K instance when `paged_attention_f16_multitok_split_count` on its own CTAs splits with >= 8 KV blocks per split (8 splits at 4 x 1024 tokens), else unsplit without split-K (16 Qwen3-8B rows) or the tile split-K (short contexts); HD=128 MHA without split-K: `_decode_fp8_multitok_kernel<128,4>`; tile variants in `attention_paged_fp8_tile.cu` |
 | INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
 | INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |
 | NVFP4 | `paged_attention_decode_nvfp4` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu`; scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel` |
-| MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:526 void paged_attention_decode_mxfp4_kv(`) | shares the NVFP4 kernels with UE8M0 scales |
+| MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:571 void paged_attention_decode_mxfp4_kv(`) | shares the NVFP4 kernels with UE8M0 scales |
 
 **Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674).
 
