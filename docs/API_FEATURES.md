@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-01
-commit: 696ef613
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # API features

@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-31
-commit: e08db9d2
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Quant / dequant pipeline
@@ -16,9 +16,9 @@ User-facing format choices: [`QUANTIZATION.md`](../QUANTIZATION.md).
 | Layer | Where | When | What |
 |---|---|---|---|
 | **Hot-path dequant** | `src/quant/dequant_*.cu` | Per-forward-pass, per-token | In-place dequant for kernels that take FP16/FP8 inputs and need to materialize from a Q*_K block on demand. Tiny scratch buffers, no persistent state. |
-| **Init-time pre-dequant** | `src/exec/pre_dequant_phase*.cu` | Once at `Engine::init` | Multi-phase orchestration that decides which weights live in which device tier (FP16 cache, FP8 cache, NVFP4 decode cache, MXFP4 standalone) and runs the actual format conversions. |
+| **Init-time pre-dequant** | `src/exec/pre_dequant_phase*.cpp` | Once at `Engine::init` | Multi-phase orchestration that decides which weights live in which device tier (FP16 cache, FP8 cache, NVFP4 decode cache, MXFP4 standalone) and runs the actual format conversions. |
 
-Both layers ultimately call kernels from `src/quant/` and `src/compute/` (`dequant_q4k_to_fp16`, `quantize_fp16_to_nvfp4_sfatom` in `src/compute/nvfp4_sfatom_quant.cu`, the SfAtom activation quantizer, `calibrate_quantize_fp8_async`, etc.). The difference is **lifetime**: hot-path dequant is per-call ephemeral; pre-dequant produces device tensors that live as long as the engine.
+Both layers ultimately call kernels from `src/quant/` and `src/compute/` (`dequant_gpu`, `quantize_fp16_to_nvfp4_sfatom` in `src/compute/nvfp4_sfatom_quant.cu`, the SfAtom activation quantizer, `calibrate_and_quantize_fp8_async`, etc.). The difference is **lifetime**: hot-path dequant is per-call ephemeral; pre-dequant produces device tensors that live as long as the engine.
 
 ## Files
 
@@ -31,11 +31,11 @@ Both layers ultimately call kernels from `src/quant/` and `src/compute/` (`dequa
 - `quant_gemm.cu`, `quant_gemm.h`, `quant_types.h` - shared types + dispatch shims
 - `turboquant_fp4.cuh` - UE8M0/FP4 helpers, kept for MXFP4-KV after TurboQuant was retired (PR #251)
 
-### `src/exec/pre_dequant_*.cu` - init-time pipeline (Phase 3 of refactor)
+### `src/exec/pre_dequant_*.cpp` - init-time pipeline (Phase 3 of refactor)
 Pure orchestration; calls `src/quant/` kernels for the actual format work.
 
 - `executor_pre_dequant.cpp` - 76 LOC orchestrator that calls each phase in order
-- `pre_dequant_internal.h` - 6 shared helpers (`borrow_payload_from_entries`, `for_each_dense_weight`, etc.)
+- `pre_dequant_internal.h` - shared helpers (`borrow_payload_from_entries`, `for_each_dense_weight`, etc.)
 - `pre_dequant_phase0_nvfp4_loader.cpp` - Phase 0 + 0b: NVFP4 sidecar promotion + `StorageTier::NVFP4_LINEAR` decode-cache registration (Phase 3b adds the `StorageTier::NVFP4_SFATOM` entry the own tile GEMM reads; both tiers serve SafeTensors and GGUF-requantized weights, they differ in the scale layout). The fused-projection scale split is gated on provenance recorded by `weight_map.cpp` and asserted afterwards (`nvfp4_merged_scale_guard.h`, pure); the checkpoint's `quantization_config.ignore` partition is reconstructed and enforced in `safetensors_loader.cpp` via `model/nvfp4_module_policy.h` (also the role list `imp-quantize` writes against). A compressed-tensors W4A16 checkpoint (`input_activations: null`, never read) is served A16 at `n == 1` and W4A4 from M >= 2: the small-M kernel up to M = 32, the own NVFP4 x NVFP4 tile GEMM (`src/quant/nvfp4_gemm_tile.cu`) above.
 - `pre_dequant_phase1_fp16_cache.cpp` - Phase 1: GGUF Q*_K -> FP16 device cache (used by Q4_K_M, Q5_K_M, Q6_K, Q8_0, ...)
 - `pre_dequant_phase2_fp8_cache.cpp` - Phase 2: FP16 -> FP8 device tensors for the `fp8_prefill` path
@@ -133,16 +133,16 @@ pins the count at 13. Registered tiers:
 
 When adding a new quant format:
 
-- If the format needs **per-call decode** during forward pass: add the kernel to `src/quant/` and a dispatch entry to `src/exec/gemm_kernel_<format>.cu`.
-- If the format needs **per-engine setup** (allocating tiered device tensors, computing a quant cache at load time): add a new `src/exec/pre_dequant_phase<N>_<name>.cu` file and one call from `executor_pre_dequant.cpp`.
-- The boundary stays clean as long as `src/quant/` stays kernels-and-helpers and `src/exec/pre_dequant_*.cu` stays orchestration.
+- If the format needs **per-call decode** during forward pass: add the kernel to `src/quant/` and a dispatch entry to `src/exec/gemm_kernel_<format>.cpp`.
+- If the format needs **per-engine setup** (allocating tiered device tensors, computing a quant cache at load time): add a new `src/exec/pre_dequant_phase<N>_<name>.cpp` file and one call from `executor_pre_dequant.cpp`.
+- The boundary stays clean as long as `src/quant/` stays kernels-and-helpers and `src/exec/pre_dequant_*.cpp` stays orchestration.
 
 ## Where the two layers meet at runtime
 
 1. `Engine::init_kv_cache()` (`src/runtime/engine_kv_cache_init.cpp`) -> `executor_pre_dequant.cpp::pre_dequant_weights()` runs all phases sequentially, producing device tensors in the right tiers. **The call site is load-bearing, not incidental**: since #1106 the whole pipeline runs *before* the KV pool is sized, so the pool takes the measured residual instead of the caches being sized against an estimate (#1103, the reverse order left the card at 0 MiB free and cost ~7x decode).
-2. Per-forward-pass: `gemm_kernel_registry` dispatches to the right `gemm_kernel_<format>.cu`, which reads the pre-dequant tier or calls `src/quant/dequant_*.cu` for an on-demand decode.
+2. Per-forward-pass: `gemm_kernel_registry` dispatches to the right `gemm_kernel_<format>.cpp`, which reads the pre-dequant tier or calls `src/quant/dequant_*.cu` for an on-demand decode.
 
-Both paths share kernels in `src/quant/`. The split between `src/quant/` and `src/exec/pre_dequant_*.cu` is **when the work happens**, not what work it is.
+Both paths share kernels in `src/quant/`. The split between `src/quant/` and `src/exec/pre_dequant_*.cpp` is **when the work happens**, not what work it is.
 
 ## NVFP4 walkthrough
 

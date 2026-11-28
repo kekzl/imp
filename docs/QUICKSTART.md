@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-01
-commit: 216a779c
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Quickstart
@@ -54,7 +54,7 @@ Every compute capability 12.0 card runs the same `sm_120a` kernels ([NVIDIA list
 | 8 GB | RTX 5060, RTX 5060 Ti 8 GB, RTX 5050 | Qwen3-4B Q8_0 (4.0 GB), Llama-3.2-3B Q8_0 (3.2 GB) |
 
 - RTX 5090 D and 5090 D V2 (China market): the RTX 5090 die (GB202).
-- Any other card is refused at start, no fallback.
+- Any other card fails at start, no fallback: the default build carries `sm_120a` kernels only, so the first kernel launch has no image.
 - DGX Spark (GB10) is compute capability 12.1: no image in the default build ([`LIMITATIONS.md`](LIMITATIONS.md)).
 
 ## Other models
@@ -69,7 +69,7 @@ Every compute capability 12.0 card runs the same `sm_120a` kernels ([NVIDIA list
 scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4
 ```
 
-- Qwen3.8-27B: 28.8 GiB down, ~25 minutes on the card, 18.8 GiB out. It forecasts the output size first and stops in seconds if the result would not fit the card.
+- Qwen3.8-27B: 28.8 GiB down, ~25 minutes on the card, 18.8 GiB out. It prints a size forecast first (seconds) and then converts regardless: on a `does NOT fit` line, stop it.
 - Prefer an FP8 source: 28.8 GiB instead of 51.8 GiB for BF16, for 0.24 % perplexity (4.6262 against 4.6151 on `ppl_corpus_45k.txt`).
 - A BF16 or FP8-only model needs this to run at all: FP8 has no GEMM on `sm_120`.
 - Needs only `curl`, `jq` and Docker. With your own image: [`BUILD.md`](BUILD.md).
@@ -81,16 +81,12 @@ scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4
 | start fails, out of memory | `nvidia-smi`; on WSL2 also `docker ps`: a container can hold the card without showing in `nvidia-smi` |
 | slow answers | the startup line `Resolved dispatch: ...` must end in `graphs=1`; `graphs=0` decodes several times slower |
 | slow MoE model | its decode-cache line should read `FULL` |
-| Qwen3.8-27B warns that prefill graph capture is disabled | expected: its LM head exceeds the capture workspace cap; decode capture stays on |
 | anything else | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) |
 
 ## Faster single-user decode
 
-Qwen3.8-27B ships a trained MTP head that the default load leaves off. Append to the `docker run` line:
-
-```bash
-  --set speculative.mtp_k=1 --set speculative.ngram=false
-```
+- Qwen3.8-27B ships a trained MTP head: the default `speculative.mtp_k=auto` loads it and drafts with `speculative.ngram=false`, also on a concurrent server (GDN hybrid).
+- `--set speculative.mtp_k=1` pins depth 1, `--set speculative.mtp_k=0` turns it off.
 
 +17-21 % single-stream decode for 0.79 GiB of VRAM; numbers and the trade: [`LIMITATIONS.md`](LIMITATIONS.md). `GET /health` names it as `mtp_head_hint` while the head is unloaded.
 

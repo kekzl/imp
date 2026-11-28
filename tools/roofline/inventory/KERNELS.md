@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-23
-commit: 679866b6
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Kernel inventory (sm_120a, full benchmark matrix)

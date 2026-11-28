@@ -1,16 +1,15 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Gemma-4 vision (gemma4v) encoder — implementation spec
 
 Reverse-engineered from llama.cpp master (`tools/mtmd/models/gemma4v.cpp`, `clip.cpp`, `mtmd-image.cpp`).
 
-- imp implements the gemma3 SigLIP path; gemma4v is a structurally different encoder.
-- This doc is the reference for porting it.
+- imp implements both: the gemma3 SigLIP path and gemma4v, a structurally different encoder (`VisionEncoder::encode_impl_gemma4v`, `src/vision/vision_encoder.cu`).
 
 ## GGUF facts (ggml-org/gemma-4-26B-A4B-it-GGUF mmproj)
 - `clip.vision.projector_type = gemma4v`, projection_dim=2816, hidden=1152,
@@ -38,14 +37,15 @@ inp += get_rows(pos_embd[:,:,0], pos_x) + get_rows(pos_embd[:,:,1], pos_y)
 kq_scale=1.0; rope_theta=100
 for il in 0..26:                          # RMSNorm blocks (NOT LayerNorm)
     h = rms_norm(x)*ln1_w
-    Q=h·q_w+q_b; K=h·k_w+k_b; V=h·v_w+v_b      # 16 heads, d_head=72
+    Q=h·q_w; K=h·k_w; V=h·v_w                  # no bias; 16 heads, d_head=72
+    Q = rms_norm(Q)*q_norm_w; K = rms_norm(K)*k_norm_w   # per head, [head_dim] weights
     Q = concat(rope_neox(Q[:36],pos_x,θ100), rope_neox(Q[36:],pos_y,θ100))   # axial 2D RoPE
     K = concat(rope_neox(K[:36],pos_x,θ100), rope_neox(K[36:],pos_y,θ100))
     V = rms_norm(V)                            # gemma4v-only V-norm, no weight
     A = softmax(KᵀQ * kq_scale=1.0)·V          # no mask (bidirectional)
-    x = x + (A·o_w+o_b)
+    x = x + rms_norm(A·o_w)*attn_post_norm_w   # no bias; sandwich post-norm before the add
     h2 = rms_norm(x)*ln2_w
-    x = x + ffn_gelu_tanh(h2)                  # up/gate/down + biases
+    x = x + rms_norm(down(gelu_tanh(h2·gate_w) * (h2·up_w)))*ffn_post_norm_w   # GeGLU, no biases
 # NO post_ln
 # pooler
 g = avg_pool2d([n_px,n_py,1152], k=3, stride=3) → [1152, (n_px/3)*(n_py/3)]

@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-23
-commit: 679866b6
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Kernel-limits perf log
@@ -257,5 +257,7 @@ Per 64-token chunk: G = C B^T, M = G * exp(cs_t - cs_s) * dt_s (causal), Y = M X
 | e2e A/B, 3 pairs, medians (Nemotron-3-Nano) | pp4096 45141 -> 53519 tok/s (+18.6 %), pp512 28232 -> 31482 (+11.5 %), tg128 406.79 -> 406.50 |
 | e2e A/B, 3 pairs (Nemotron-3.5-Lightning) | pp4096 40581 -> 47127 (+16.1 %), tg128 380.25 -> 380.57 |
 | greedy 400 tokens, 1.5k-token retrieval prompt, both arms | needle found, coherent |
+
+[PROV: e2e rows = the section-head block: commit=52765756+branch perf/ssm-chunked-scan date=2026-10-07 hw=RTX5090 clocks=live, one imp-cli binary, `--set gdn.ssd_scan` per arm, alternating (md5 cbd3627b)]
 
 Verdict: kept, default on. Sequence-parallel state passing REFUTED by an equal-work probe (cudaEvent, 500 reps, harness md5 7dd2926f): 64 heads x 2048 tokens 167.2 us, 128 x 1024 166.8, 256 x 512 152.4, 512 x 256 141.9; that bounds pass 2 alone at -9..-15 % before any pass-1 cost. Limit = SM concurrency: 2 CTAs x 4 warps per SM (239 regs, 46.6 KB smem). Next lever = one CTA per (group, column slice) for the 8 heads that share B/C and G = C B^T (loaded and computed 8x today).

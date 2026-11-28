@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-11-25
-commit: d786a45b
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # fuzz — targets for the parsers that take untrusted bytes

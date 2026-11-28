@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-01
-commit: d8550086
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Benchmarks

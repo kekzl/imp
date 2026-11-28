@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-11
-commit: 7f3d3adb
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Determinism

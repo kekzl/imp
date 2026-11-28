@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-11-25
-commit: 4d7eebf8
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # src/runtime - engine, scheduler, config, KV

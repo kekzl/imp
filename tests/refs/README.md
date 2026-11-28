@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-11-01
-commit: 696ef613
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # tests/refs/ — independent reference goldens
