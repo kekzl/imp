@@ -247,8 +247,9 @@ TEST(MtpAuto, BoundVerifyBatchIsForAOneChatAutoHybridOnly) {
         const int k = tools::mtp_auto_request_k(cfg);
         const int b = tools::mtp_auto_engine_batch(cfg, configured, gdn_hybrid, k, head_loaded,
                                                    head_auto_k_cap);
-        if (b == configured)
+        if (b == configured) {
             EXPECT_EQ(cfg.runtime.max_batch_size, before) << "a decline writes nothing";
+        }
         return b;
     };
     EXPECT_EQ(batch({}, kSingleStream, false, true, 0), 1) << "not a GDN hybrid";

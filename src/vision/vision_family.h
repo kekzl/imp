@@ -45,7 +45,7 @@ struct VisionPromptLayout {
     bool wrap_each_image = false;
     // Non-empty: a video renders as one image block per frame behind "<label><i>: " (InternVL,
     // HF replace_video_token), its frames encoded as images.
-    std::string_view frame_label;
+    std::string_view frame_label{};
 };
 
 // None maps to the Qwen3-VL layout: a build without a tower renders no blocks.

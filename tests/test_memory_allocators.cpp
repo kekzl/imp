@@ -86,7 +86,7 @@ TEST(MemAccountRanges, ListedUntilTheirPoolDropsThem) {
     acc.note_range("range_test_a", &b, 128);
     acc.note_range("range_test_b", &c, 256);
     acc.note_range("range_test_b", nullptr, 256);  // ignored
-    acc.note_range("range_test_b", &a + 4, 0);     // ignored
+    acc.note_range("range_test_b", &b, 0);         // ignored: 0 bytes
     EXPECT_EQ(count("range_test_a"), 2);
     EXPECT_EQ(count("range_test_b"), 1);
     for (const MemAccount::Charged& r : acc.charged())
