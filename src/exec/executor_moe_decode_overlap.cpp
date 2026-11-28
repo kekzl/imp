@@ -11,10 +11,14 @@
 #include "exec/expert_batch_policy.h"
 #include "compute/gemm.h"
 #include "compute/gated_residual.h"
+#include "compute/moe_routing.h"
+#include "exec/executor_debug.h"
+#include "exec/executor_forward_moe_internal.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <utility>
 
 namespace imp {
 
@@ -175,9 +179,44 @@ bool GraphExecutor::join_shared_expert_(cudaStream_t stream, int n, int d, Tenso
     return true;
 }
 
+// Exactly the decode rows run_moe_decode_fast sends to run_moe_decode_nvfp4_host's device cache branch, and
+// no reader of the routing in between (histogram, trace, weight scales, debug dumps).
+bool GraphExecutor::defer_topk_to_resolve_(int layer, const Tensor& logits, int top_k, bool sigmoid,
+                                           const void* score_bias, MoeGroupLimit grp, bool decode_fast) {
+    const auto& ly = model_->layer(layer);
+    const auto& prof = model_->profile();
+    const auto& diag = diagnostics_section(dispatch_policy());
+    return logits.shape[0] == 1 && decode_fast && !sigmoid && score_bias == nullptr && !grp.active() &&
+           top_k <= kDevExpertMaxTopK && moe_.routing_buffers.pool != nullptr &&
+           dev_expert_cache_.layer_ready(layer) && ly.nvfp4_moe_up_ptr == nullptr &&
+           !prof.moe_expert_bias_glu && !prof.expert_out_scale &&
+           model_->config().expert_weights_scale == 1.0f &&
+           nvfp4_host_decode_ready(ly, layer, expert_cache_, moe_, top_k) && diag.moe_expert_hist.empty() &&
+           diag.moe_expert_trace.empty() && !debug_forward_enabled();
+}
+
+void GraphExecutor::run_topk_or_defer_(int layer, const Tensor& logits, int top_k, bool sigmoid,
+                                       bool normalize, const void* score_bias, MoeGroupLimit grp,
+                                       bool decode_fast, MoeRoutingOwned& routing, cudaStream_t stream) {
+    IMP_CHECK(pending_route_.logits == nullptr, "MoE layer %d: a deferred top-k was never resolved", layer);
+    if (defer_topk_to_resolve_(layer, logits, top_k, sigmoid, score_bias, grp, decode_fast)) {
+        pending_route_ = {static_cast<const float*>(logits.data), moe_.routing_buffers.expert_indices,
+                          moe_.routing_buffers.expert_weights, normalize};
+        // skip_sorting: no launch, only the result views over the routing buffers.
+        moe_topk_finish(1, static_cast<int>(logits.shape[1]), top_k, moe_.routing_buffers, routing, stream,
+                        /*skip_sorting=*/true);
+    } else if (moe_.routing_buffers.pool) {
+        moe_topk_gating(logits, top_k, moe_.routing_buffers, routing, stream, sigmoid, normalize, score_bias,
+                        /*skip_sorting=*/decode_fast, grp);
+    } else {
+        moe_topk_gating(logits, top_k, routing, stream, sigmoid, normalize, score_bias, grp);
+    }
+}
+
 bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices, int top_k, int n_rows,
                                        bool non_gated_experts, size_t* ms_off, const void* x,
                                        cudaStream_t stream) {
+    const DevRouteTopk route = std::exchange(pending_route_, DevRouteTopk{});
     for (int p = 0; p < kExpertProjCount; ++p)
         ms_off[p] = dev_expert_cache_.ms_off(layer, p);
     // Gated only: relu_sqr runs in place, a second pass would square the hit rows twice.
@@ -187,7 +226,7 @@ bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices,
         join_expert_prefetch_(stream);  // no-op without a prefetch in flight
     if (!g.stream || non_gated_experts || dev_expert_cache_.layer_tiered(layer)) {
         dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, n_rows, moe_.d_slot_idx.get(),
-                                            stream);
+                                            stream, route);
         return false;
     }
     if (pf_here)  // this layer's tables are settled once its prefetch resolve ran
@@ -196,7 +235,7 @@ bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices,
     const bool pf_next = !non_gated_experts &&
                          predict_next_experts_(layer, n_rows == 1 ? x : nullptr, stream);
     dev_expert_cache_.resolve(layer, expert_indices, top_k, n_rows, moe_.d_slot_idx.get(), moe_.entry_miss(),
-                              stream);
+                              stream, route);
     IMP_CUDA_CHECK_LOG(cudaEventRecord(g.resolved, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(g.stream, g.resolved, 0));
     dev_expert_cache_.gather(layer, top_k, n_rows, g.stream);

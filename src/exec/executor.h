@@ -1330,6 +1330,14 @@ private:
     [[nodiscard]] bool stage_dev_experts_(int layer, const int32_t* expert_indices, int top_k, int n_rows,
                                           bool non_gated_experts, size_t* ms_off, const void* x,
                                           cudaStream_t stream);
+    // Top-k of the router logits; a softmax decode row bound for stage_dev_experts_ launches nothing:
+    // the resolve kernel routes it (pending_route_, consumed there).
+    void run_topk_or_defer_(int layer, const Tensor& logits, int top_k, bool sigmoid, bool normalize,
+                            const void* score_bias, MoeGroupLimit grp, bool decode_fast,
+                            MoeRoutingOwned& routing, cudaStream_t stream);
+    [[nodiscard]] bool defer_topk_to_resolve_(int layer, const Tensor& logits, int top_k, bool sigmoid,
+                                              const void* score_bias, MoeGroupLimit grp, bool decode_fast);
+    DevRouteTopk pending_route_{};
     // Decode step for a layer whose NVFP4 experts live on host: stages the routed experts of n_rows
     // rows (n_rows > 1: device expert cache only) into the LRU cache's slot pool, runs fused NVFP4 GEMVs
     // against it. Called only when run_moe_decode_fast's dispatch predicate

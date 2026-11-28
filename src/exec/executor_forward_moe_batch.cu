@@ -657,13 +657,9 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         // DeepSeek's selection-only score_bias (router_bias_ptr).
         if (model_->profile().moe_router_logit_bias && ly.router_bias.data != nullptr)
             moe_add_logit_bias(static_cast<float*>(logits_f32.data), ly.router_bias.data, n, ne, stream);
-        if (moe_.routing_buffers.pool) {
-            moe_topk_gating(logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,
-                            norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast, grp);
-        } else {
-            moe_topk_gating(logits_f32, top_k, routing, stream, use_sigmoid, norm_weights, router_bias_ptr,
-                            grp);
-        }
+        // A device expert cache decode row is routed by the resolve kernel instead (B-59).
+        run_topk_or_defer_(layer, logits_f32, top_k, use_sigmoid, norm_weights, router_bias_ptr, grp,
+                           will_decode_fast, routing, stream);
     };
 
     // Fused gate GEMV+topk only profitable when n_experts <= warps (8). Higher

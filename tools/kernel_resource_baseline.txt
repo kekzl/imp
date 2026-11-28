@@ -93,6 +93,7 @@ void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	56
 void imp::paged_attention_splitk_fp8_pipeline_kernel<128>	sm_120a	56	16	0
 void imp::paged_attention_splitk_pipeline_kernel<192>	sm_120a	56	16	0
 void imp::paged_attention_splitk_pipeline_kernel<128>	sm_120a	53	16	0
+imp::inkling::(anonymous namespace)::attention_k	sm_120a	48	512	0
 imp::inkling::(anonymous namespace)::gate_mix_k	sm_120a	48	24	0
 void imp::flash_attention_blackwell_kernel<64, 128>	sm_120a	48	16	0
 void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 4>	sm_120a	48	16	0
@@ -107,8 +108,7 @@ void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	48	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<96>	sm_120a	48	16	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120a	48	8	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
-imp::inkling::(anonymous namespace)::attention_k	sm_120a	48	512	0
-imp::topk_gating_kernel	sm_120a	46	256	0
+imp::topk_gating_kernel	sm_120a	47	256	0
 void imp::inkling::(anonymous namespace)::gate_mix_t<64>	sm_120a	44	24	0
 imp::paged_attention_decode_kernel_generic	sm_120a	43	128	0
 imp::(anonymous namespace)::draft_cands_k	sm_120a	43	16	0
