@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Troubleshooting

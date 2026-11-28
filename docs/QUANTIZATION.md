@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-02
-commit: e66bf1d9
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Quantization

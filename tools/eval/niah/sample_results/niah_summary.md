@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-13
-commit: c155a57c
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # NIAH Phase 2 results

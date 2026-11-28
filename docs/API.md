@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-11
-commit: 21fc346c
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # API
@@ -33,7 +33,7 @@ so a streaming fix lands in all of them at once.
 | `POST /v1/decide` | 🟡 | closed-choice letter scoring, no decoding; see [`API_SCORING.md`](API_SCORING.md). GPU acceptance: `scripts/accept_2198.sh` |
 | `POST /v1/score` | 🟡 | softmax over caller-given candidate tokens at the last prompt position |
 | `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
-| `GET /v1/models`, `/v1/models/{id}` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`). Anthropic Models API fields on the same objects: `type`, `display_name`, `created_at`, list `has_more`/`first_id`/`last_id`; the loaded entry adds `max_input_tokens`, `max_tokens` and `capabilities` (`image_input.supported` = a vision encoder is loaded, `thinking`, `effort`) |
+| `GET /v1/models`, `/v1/models/{id}` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`). Anthropic Models API fields on the same objects: `type`, `display_name`, `created_at`, list `has_more`/`first_id`/`last_id`; every entry carries `max_input_tokens` and `max_tokens` (an unloaded one its context ceiling), the loaded entry adds `capabilities` (`image_input.supported` = a vision encoder is loaded, `thinking`, `effort`) |
 | `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |
 | `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md). `--idle-unload-seconds N` (default 0 = off) suspends after N s without a request and resumes on the next one, see [Admin](#admin-idle-unload-and-lora) |
 | `POST /v1/requests/{id}/end_thinking` | ✅ | ends a pending or running request's think block; the answer continues on the same KV. `id`: completion / message / response id or the client `X-Request-Id`. See [`API_CONTROL.md`](API_CONTROL.md) |
@@ -80,7 +80,7 @@ identical request returns different output than against the OpenAI API.
 Two of these do not switch off the way the field name suggests:
 
 - **`top_k: 0` is not "off", it is 50.** Every sampling site spells
-`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:240 state.top_k > 0`, `:289/340`, `src/runtime/engine_decode_pipeline.cpp:70 r.top_k > 0`).
+`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:240 state.top_k > 0`, `:321/374`, `src/runtime/engine_decode_pipeline.cpp:70 r.top_k > 0`).
 
 - Zero and "unset" both land on 50.
 - Disabling top-k needs a value at or above the vocabulary size.

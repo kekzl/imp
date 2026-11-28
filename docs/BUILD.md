@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: ed4422b7
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Build from source
@@ -40,6 +40,7 @@ For a machine with the CUDA toolkit installed natively.
 | CMake | 3.25 or newer |
 | host compiler | C++23: GCC 13+ or Clang 16+ |
 | CUDA libraries linked | `cudart`, `cuda_driver`, `cublasLt` |
+| other libraries | libcurl, OpenSSL (libcrypto), libjpeg-turbo, as dev packages (`find_package(... REQUIRED)` in `CMakeLists.txt`) |
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release

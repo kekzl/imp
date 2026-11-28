@@ -1,13 +1,13 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-23
-commit: 679866b6
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Measured sm_120a limits (RTX 5090)
 
-Achievable peaks for the kernel dispatch: every "% of peak" in `KERNELS_INVENTORY.md` divides by a row here, never by the datasheet.
+Achievable peaks for the kernel dispatch: every "% of peak" in [`../inventory/KERNELS.md`](../inventory/KERNELS.md) divides by a row here, never by the datasheet.
 Harness: `tools/roofline/peaks/run_peaks.sh [mem|tc|simt|launch]` (builds `imp-peaks` in `imp:toolchain`, refuses a busy card, writes `out/peaks_<utc>.{json,log,clocks.csv}`).
 
 [PROV: commit=679866b6 date=2026-09-23 hw=RTX5090 driver=616.92 cuda=13.4.1 (nvcc V13.4.59)

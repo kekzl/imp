@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-11-25
-commit: 4d7eebf8
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # imp - Architecture
@@ -120,7 +120,7 @@ Inkling2-Loop (`ModelArch::INKLING2`) is a private runtime inside `GraphExecutor
 | CUDA graph capture/replay | `src/runtime/cuda_graph.cu`, `src/runtime/graph_eligibility.h` | decode graph capture; demotion reasons (`GraphDemotionReason`: config `never`, `debug_raw`, calibration, streaming KV, host-resident experts, no pinned sample buffer, KV pressure) |
 | Prefill forward (dense) | `src/exec/executor_forward.cu` | per-layer RMSNorm -> attention -> FFN loop |
 | Prefill forward (MoE) | `src/exec/executor_forward_moe.cu` | MoE top-k grouped-GEMM variant of the same loop |
-| Attention dispatcher | `src/exec/executor_attention_prefill.cu`, `src/exec/executor_attention.cu` | per-layer prefill/decode kernel choice; full table: [`ATTENTION_DISPATCH.md`](ATTENTION_DISPATCH.md) |
+| Attention dispatcher | `src/exec/executor_attention_prefill.cpp`, `src/exec/executor_attention_decode.cpp`, `src/exec/executor_attention.cpp` | per-layer prefill/decode kernel choice; full table: [`ATTENTION_DISPATCH.md`](ATTENTION_DISPATCH.md) |
 | Decode FFN | `src/exec/executor_ffn.cu` | dp4a / mma.sync / NVFP4 GEMV variants |
 | Sampling / penalties | `src/compute/sampling.cu`, `src/compute/sampling.h`, `src/exec/executor.cu` | repeat/freq/presence/DRY penalties (params in `src/runtime/request.h`); temp/top-p/top-k/min-p/typical/mirostat via `sample_greedy`, `sample_topk_topp`, `sample_mirostat_v2`, `apply_typical_p` |
 | Speculative decoding | `src/runtime/engine_spec_ngram.cpp`, `src/runtime/suffix_draft.{h,cpp}`, `src/runtime/ngram_draft.h`, `src/runtime/engine_spec_mtp.cpp`, `src/compute/mtp_forward.cu` | n-gram/suffix draft and opt-in MTP head (`speculative.hybrid` gates hybrid SSM/GDN participation), batch-1 greedy only |

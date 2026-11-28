@@ -1,15 +1,15 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-13
-commit: c155a57c
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # KV-cache NIAH harness
 
-Runs a 4-config × 2-context × 5-depth × 3-seed Needle-in-a-Haystack
+Runs an 8-config × 2-context × 5-depth × 3-seed Needle-in-a-Haystack
 retrieval test on Qwen3-8B Q8_0, comparing the KV-cache dtypes
-FP16 / FP8 / NVFP4 / MXFP4-KV. (The TurboQuant `tq_qjl_on` / `tq_qjl_off`
+FP16 / FP8 / NVFP4 / MXFP4-KV plus four FP8 sparse-attention arms. (The TurboQuant `tq_qjl_on` / `tq_qjl_off`
 configs were retired in Phase 5, 2026-05-17.)
 
 Output: `sample_results/niah_results.json` (raw) + `niah_summary.md`
@@ -32,7 +32,7 @@ tools/eval/niah/niah_bench.py --smoke
 tools/eval/niah/niah_bench.py --config nvfp4 --config mxfp4_kv --ctx 4096
 ```
 
-Available `--config` names: `fp16`, `fp8`, `nvfp4`, `mxfp4_kv`.
+Available `--config` names: `fp16`, `fp8`, `nvfp4`, `mxfp4_kv`, `fp8_ng`, `fp8_sparse4k`, `fp8_sparse2k`, `fp8_sparse4k_spec`.
 
-See `docs/plans/turboquant_fp8_gap_design_2026_05_17.md` §5 Phase 2 for
+See `git show e58d9d9c9^:docs/plans/turboquant_fp8_gap_design_2026_05_17.md` §5 Phase 2 (removed in #273) for
 the historical TurboQuant context.

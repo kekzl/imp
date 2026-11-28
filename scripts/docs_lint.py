@@ -137,8 +137,9 @@ _COMMIT_DEPTH_CACHE: dict = {}
 
 
 def _edits_since(sha: str, path: str):
-    """Commits touching `path` after `sha`. None if `sha` is not an ancestor of HEAD: a squashed
-    branch sha still sits in a local clone, so `cat-file -e` alone read 0 of the 6 CI found."""
+    """Commits touching `path` after `sha`, minus the commit that wrote the `commit:` line (the
+    verification itself; it left every header on main at "edited 1x", 2026-11-28). None if `sha`
+    is not an ancestor of HEAD: a squashed branch sha sits in a local clone (CI found 6, local 0)."""
     key = (sha, path)
     if key in _COMMIT_DEPTH_CACHE:
         return _COMMIT_DEPTH_CACHE[key]
@@ -147,7 +148,14 @@ def _edits_since(sha: str, path: str):
     try:
         if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "HEAD"],
                           capture_output=True, timeout=10).returncode == 0:
-            out = subprocess.run(["git", "rev-list", "--count", f"{sha}..HEAD", "--", path],
+            base = sha
+            writer = subprocess.run(
+                ["git", "log", "-1", "--format=%H", r"-G^commit:[[:space:]]*[0-9a-f]", "--", path],
+                capture_output=True, text=True, timeout=10).stdout.strip()
+            if writer and subprocess.run(["git", "merge-base", "--is-ancestor", sha, writer],
+                                         capture_output=True, timeout=10).returncode == 0:
+                base = writer
+            out = subprocess.run(["git", "rev-list", "--count", f"{base}..HEAD", "--", path],
                                  capture_output=True, text=True, timeout=10)
             if out.returncode == 0 and out.stdout.strip():
                 val = int(out.stdout.strip())

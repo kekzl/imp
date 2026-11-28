@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-20
-commit: e8f2e115
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Limitations

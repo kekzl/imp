@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-10-31
-commit: 31ee90c6
+verified: 2026-11-28
+commit: 89516523
 -->
 
 <p align="center">

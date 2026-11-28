@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Profiling commands
@@ -18,7 +18,7 @@ nvidia-smi -lgc <base_clock>   # lock GPU clocks for reproducibility
 nvidia-smi -lmc <mem_clock>
 ```
 
-Build with `-lineinfo`, `-DIMP_ENABLE_NVTX=ON`, `-O3` with `-g` symbols retained for kernel attribution.
+Build with `CMAKE_BUILD_TYPE=RelWithDebInfo` (`-O3 -lineinfo`, `cmake/CompilerFlags.cmake`) for kernel attribution; imp-cli links NVTX unconditionally (`CUDA::nvtx3`), no option.
 
 ## nsys: capture a profile
 

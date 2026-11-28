@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-31
-commit: e08db9d2
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Attention dispatch
@@ -10,7 +10,7 @@ commit: e08db9d2
 Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel runs for each (phase × dtype × layer) combination.
 
 - If this doc and the code disagree, the code wins.
-- Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cpp` for the FMHA chain.
+- Source of truth: `src/exec/executor_attention_prefill.cpp` for the gate, `src/compute/attention_dispatch.cpp` for the FMHA chain.
 
 > **Measured coverage (2026-06-07, [`docs/archive/ROOFLINE_2026_06_07.md`](../archive/ROOFLINE_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2 the long range (the FP8 FMHA tier was deleted 2026-11-14). Since #930/#932 hd=256 rides the FA2 port too.
 >
@@ -18,7 +18,7 @@ Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel ru
 
 ## Prefill - the gate
 
-**Read the code, not a snippet.** This section used to inline the dispatch source; the variables it named (`force_cublas_attn`, `s_matrix_fits`, `prefer_fmha`) no longer all exist, and the quoted logic was wrong about Gemma-4 for six weeks. Source of truth: `src/exec/executor_attention_prefill.cu` for the outer gate (two blocks: chunked and non-chunked), `src/compute/attention_dispatch.cpp` for the FMHA chain.
+**Read the code, not a snippet.** This section used to inline the dispatch source; the variables it named (`force_cublas_attn`, `s_matrix_fits`, `prefer_fmha`) no longer all exist, and the quoted logic was wrong about Gemma-4 for six weeks. Source of truth: `src/exec/executor_attention_prefill.cpp` for the outer gate (two blocks: chunked and non-chunked), `src/compute/attention_dispatch.cpp` for the FMHA chain.
 
 The outer gate is decided **per layer**, not per model (the part the old snippet got wrong). A Gemma-4 request takes FA2 on its hd=256 SWA layers and cuBLAS on its hd=512 global layers, in the same forward pass:
 
@@ -56,16 +56,16 @@ The MXFP4 FMHA (`attention_fmha_mxfp4_sm120.cu`, `attention.mxfp4`, REFUTED #868
 Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunks halve/quarter per-chunk weight re-reads, NVFP4-MoE pp4096 +77%) for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4.
 
 - Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result hits the dispatch gate above with `q_offset`-aware causal masking.
-- See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and "Chunked prefill scope" in `docs/ROADMAP.md`.
+- See the chunked-prefill branch of `src/exec/executor_attention_prefill.cpp` and `Engine::resolve_prefill_chunk_size_()`.
 
-## Decode - switch on cache_dtype
+## Decode - branch on cache_dtype
 
-The decode dispatch (further down in `executor_attention.cu`) is a single `switch` on the KV cache dtype. The switch selects a **launcher**, not a kernel; each launcher picks among its own variants by batch, GQA ratio and split-K decision, so each row below is one dtype and up to four kernels (#1677 - this table named one kernel per dtype, and the FP16 row named a symbol that does not exist).
+The decode dispatch (`src/exec/executor_attention_decode.cpp`) is one if/else chain on the KV cache dtype. Each branch selects a **launcher**, not a kernel; each launcher picks among its own variants by batch, GQA ratio and split-K decision, so each row below is one dtype and up to four kernels (#1677 - this table named one kernel per dtype, and the FP16 row named a symbol that does not exist).
 
 | `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
 | FP16 | `paged_attention_decode` (`attention_paged.cu:905 void paged_attention_decode(`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (up to four Q heads per CTA); GQA multitok splits by `paged_attention_f16_multitok_split_count` (one wave, unsplit at a budget <= 2 splits, e.g. 16 Qwen3-8B rows) |
-| FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 GQA (four tokens per warp iteration): the Q-head-grouped `_decode_fp8_gqa_kernel<16,2,HPC,2,SPLIT>` in `attention_paged_fp8_multitok_gqa.cu`; its split-K instance when `paged_attention_f16_multitok_split_count` on its own CTAs splits with >= 8 KV blocks per split (8 splits at 4 x 1024 tokens), else unsplit without split-K (16 Qwen3-8B rows) or the tile split-K (short contexts); HD=128 MHA without split-K: `_decode_fp8_multitok_kernel<128,4>`; tile variants in `attention_paged_fp8_tile.cu` |
+| FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 GQA (four tokens per warp iteration): the Q-head-grouped `_decode_fp8_gqa_kernel<16,2,HPC,2,SPLIT>` in `attention_paged_fp8_multitok_gqa.cu`; its split-K instance when `paged_attention_f16_multitok_split_count` on its own CTAs splits with >= 8 KV blocks per split (8 splits at 4 x 1024 tokens), else unsplit without split-K (16 Qwen3-8B rows) or the tile split-K (short contexts); HD=128 MHA without split-K: `_decode_fp8_multitok_kernel<128,4>`; tile variants in `attention_paged_fp8_tile.cu` |
 | INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
 | INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |
 | NVFP4 | `paged_attention_decode_nvfp4` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu`; scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel` |

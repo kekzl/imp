@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-31
-commit: e08db9d2
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # The optimal sm_120a attention kernel

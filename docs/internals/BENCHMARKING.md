@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-31
-commit: cc0936bb
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # Benchmarking methodology

@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: 4666a109
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # API: controlling a running request

@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-11-27
-commit: 8f56197f
+verified: 2026-11-28
+commit: 89516523
 -->
 
 # imp test suite
