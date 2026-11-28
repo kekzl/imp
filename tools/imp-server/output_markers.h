@@ -18,14 +18,14 @@ struct OutputMarkerAlias {
     // Inkling2: one closing token (closes) ends whatever content marker opened last and decodes as that
     // marker's `close`. header: plain text up to the next marker is held, and dropped when that marker
     // sets drops_header (a tool name before its call marker).
-    std::string close;
+    std::string close{};
     bool closes = false;
     bool header = false;
     bool drops_header = false;
     // The marker, its body and its closer decode as nothing (thinking off on a marker protocol).
     bool silent = false;
     // First occurrence of rewrite_from after this marker becomes rewrite_to (tool JSON key).
-    std::string rewrite_from, rewrite_to;
+    std::string rewrite_from{}, rewrite_to{};
 };
 using OutputMarkerAliases = std::vector<OutputMarkerAlias>;
 

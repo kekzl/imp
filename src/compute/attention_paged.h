@@ -106,7 +106,7 @@ struct PagedDecodeTensorArgs {
     const void* attn_sinks = nullptr;
     int v_head_dim = 0;  // F16 only; see paged_attention_decode
     PagedQ8Epilogue* q8_epi = nullptr;
-    PagedSplitKScratch splitk;
+    PagedSplitKScratch splitk{};
 };
 
 // Paged attention decode (single query/sequence), F16 KV. v_head_dim: 0=same as head_dim. MLA
