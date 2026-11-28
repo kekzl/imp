@@ -2,7 +2,7 @@
 layer: L2
 audience: kernel-devs
 verified: 2026-08-13
-commit: 81ffa573
+commit: c155a57c
 -->
 
 # tools/roofline — reproducible roofline & coverage pipeline

@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-11-01
-commit: bd6921fe
+commit: 1bd027ac
 -->
 
 # Configuration reference

@@ -137,14 +137,15 @@ _COMMIT_DEPTH_CACHE: dict = {}
 
 
 def _edits_since(sha: str, path: str):
-    """Commits touching `path` after `sha`. None if `sha` is not in history."""
+    """Commits touching `path` after `sha`. None if `sha` is not an ancestor of HEAD: a squashed
+    branch sha still sits in a local clone, so `cat-file -e` alone read 0 of the 6 CI found."""
     key = (sha, path)
     if key in _COMMIT_DEPTH_CACHE:
         return _COMMIT_DEPTH_CACHE[key]
     import subprocess
     val = None
     try:
-        if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+        if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "HEAD"],
                           capture_output=True, timeout=10).returncode == 0:
             out = subprocess.run(["git", "rev-list", "--count", f"{sha}..HEAD", "--", path],
                                  capture_output=True, text=True, timeout=10)
