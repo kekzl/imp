@@ -1,5 +1,5 @@
 #!/bin/sh
-# CI change detection, one copy for ci.yml `Changes` (picks Build's container) and `Build` (gates its steps).
+# CI change detection for the `Build` job of ci.yml: code= gates its toolchain steps, cpp= its clang-tidy step.
 # Usage: ci_changes.sh <base sha>. Writes code= and cpp= to $GITHUB_OUTPUT (stdout without it).
 # FAIL-OPEN: an unresolvable base or an empty diff gives code=true cpp=true; a failed git diff exits 1.
 #

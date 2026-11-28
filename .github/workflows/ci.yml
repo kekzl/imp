@@ -36,44 +36,24 @@ concurrency:
 permissions:
   contents: read
 
-# A main push runs Changes, Build (saves the ccache every PR restores) and the path-driven PTX and
+# A main push runs Build (saves the ccache every PR restores) and the path-driven PTX and
 # Sanitizers lanes. The gate, lint and API jobs run on PRs and dispatch only: a push re-checked the
 # tree its PR run had passed, and `Build` still runs every static gate itself.
 jobs:
-  # Picks `Build`'s container: a docs-only diff runs `Build` on the runner without the CI image
-  # (1.1 GB pull, median 32 s of a 94 s docs-only Build). Same script as Build's own detection.
-  changes:
-    name: Changes
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    outputs:
-      code: ${{ steps.changes.outputs.code }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0  # the base SHA for `git diff`
-      - name: Detect non-docs changes
-        id: changes
-        run: sh scripts/ci_changes.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
-
   build:
     name: Build
-    needs: changes
-    # Also when `Changes` failed: a skipped `Build` reports success on the required check. An
-    # empty `needs.changes.outputs.code` then picks the container (fail-open).
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     outputs:
       code: ${{ steps.changes.outputs.code }}
 
     container:
-      # .github/ci-image/Dockerfile (1104 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
+      # .github/ci-image/Dockerfile (1251 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
       # nvcc, cuBLAS, git, python3, cmake, ninja, ccache, clang-tidy preinstalled: no job runs apt for its toolchain.
       # Ubuntu 26.04, GCC 15.2: same libstdc++ 15 as the release image (#903).
-      # Empty image = the runner itself (ubuntu-26.04, same python3): only for code=false, where
-      # every toolchain step below is skipped and only the static gates run.
-      image: ${{ needs.changes.outputs.code != 'false' && 'ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d' || '' }}
+      # Also on docs-only diffs: a `Changes` job choosing an empty image there saved 27 s per docs-only
+      # PR but delayed every code PR's Build start by 13-24 s (PR #3375, M11).
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -112,22 +92,14 @@ jobs:
       # Docs-only changes (only **/*.md or docs/** touched) skip the expensive
       # CUDA build/test below but still report the required `Build` check as
       # success — every heavy step is gated on steps.changes.outputs.code, so the
-      # job goes green in seconds instead of compiling and linking, on the bare
-      # runner (see `Changes`). Plain `git diff` in scripts/ci_changes.sh (no
+      # job goes green in seconds instead of compiling and linking. Plain
+      # `git diff` in scripts/ci_changes.sh (no
       # third-party action, so no Node-deprecation churn). FAIL-OPEN: no base SHA
       # or an empty diff → code=true, so detection can never wrongly skip a
       # code change or leave the required check unreported.
       - name: Detect non-docs changes
         id: changes
         run: sh scripts/ci_changes.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
-
-      # Both jobs run the same script on the same base, so this never fires; if it did, the steps
-      # below would compile on a runner without nvcc. Fail here, by name.
-      - name: Container matches the detection
-        if: steps.changes.outputs.code == 'true' && needs.changes.outputs.code == 'false'
-        run: |
-          echo "::error::Changes said docs-only (no container) but Build detected code changes"
-          exit 1
 
       # The blocking static gates, FIRST, before the compile. Ruleset 14716423
       # requires exactly one context (`Build`), so a gate that runs only as its
