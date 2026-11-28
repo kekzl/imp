@@ -17,35 +17,43 @@ on:
   # no longer had. Coverage is not lost (the PR run builds the tree that gets
   # squashed), but the branch's reported status is stale, and this makes it
   # refreshable without a PAT or a merge queue.
-  workflow_dispatch:
-  # Nightly, 03:17 UTC: refreshes `main`'s reported status (an auto-merge squash
+  #
+  # Nightly = a dispatch on main by .github/workflows/nightly.yml (01:00-06:59 UTC; a `schedule`
+  # trigger here fired 9-10 h late): refreshes `main`'s reported status (an auto-merge squash
   # armed with GITHUB_TOKEN starts no run, see above), runs Sanitizers without
   # its path filter, the libFuzzer job and the imp-bench build. No job here uses a GPU: there is no
   # GPU runner (docs/DESIGN_DECISIONS.md), GPU gates are local (`make verify-fast`).
-  schedule:
-    - cron: "17 3 * * *"
+  workflow_dispatch:
 
-# A new push to a PR cancels its older run; main and schedule runs never cancel.
+# A new push to a PR cancels its older run. A main push gets its own group per commit: one shared
+# group queued 20 of 60 main Builds > 60 s (max 1843 s) and replaced 6 pending main runs, since
+# GitHub keeps one pending run per group.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # No job writes to the repo; artifacts and caches need no token scope.
 permissions:
   contents: read
 
+# A main push runs Build (saves the ccache every PR restores) and the path-driven PTX and
+# Sanitizers lanes. The gate, lint and API jobs run on PRs and dispatch only: a push re-checked the
+# tree its PR run had passed, and `Build` still runs every static gate itself.
 jobs:
   build:
     name: Build
     runs-on: ubuntu-26.04
+    timeout-minutes: 60
     outputs:
       code: ${{ steps.changes.outputs.code }}
 
     container:
-      # .github/ci-image/Dockerfile (1104 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
-      # nvcc, cuBLAS, git, python3, cmake, ninja, ccache preinstalled, so no job runs apt for its toolchain.
+      # .github/ci-image/Dockerfile (1251 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
+      # nvcc, cuBLAS, git, python3, cmake, ninja, ccache, clang-tidy preinstalled: no job runs apt for its toolchain.
       # Ubuntu 26.04, GCC 15.2: same libstdc++ 15 as the release image (#903).
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
+      # Also on docs-only diffs: a `Changes` job choosing an empty image there saved 27 s per docs-only
+      # PR but delayed every code PR's Build start by 13-24 s (PR #3375, M11).
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -84,53 +92,14 @@ jobs:
       # Docs-only changes (only **/*.md or docs/** touched) skip the expensive
       # CUDA build/test below but still report the required `Build` check as
       # success — every heavy step is gated on steps.changes.outputs.code, so the
-      # job goes green in seconds instead of pulling the multi-GB CUDA image,
-      # configuring CUTLASS and linking. Plain `git diff` (no third-party action,
-      # so no Node-deprecation churn). FAIL-OPEN: any uncertainty (no base SHA,
-      # git error, empty diff) → code=true, so detection can never wrongly skip a
+      # job goes green in seconds instead of compiling and linking. Plain
+      # `git diff` in scripts/ci_changes.sh (no
+      # third-party action, so no Node-deprecation churn). FAIL-OPEN: no base SHA
+      # or an empty diff → code=true, so detection can never wrongly skip a
       # code change or leave the required check unreported.
       - name: Detect non-docs changes
         id: changes
-        run: |
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          code=true
-          # `cpp` gates the clang-tidy steps below, which lint changed src|tools|tests
-          # *.cpp, the host side of changed src/*.cu, tests/*.cu (#2210) and up to 3 TUs per changed
-          # src|tools|tests|include header (scripts/tidy_lane.sh): no apt install
-          # when there is nothing to lint. Same FAIL-OPEN rule as `code`: any
-          # uncertainty runs them.
-          cpp=true
-          # Say so when the fail-open fires. Without this the step prints a
-          # perfectly normal-looking `code=true` and an empty file list, which
-          # is what let a permanently-open gate go unnoticed: it looks the same
-          # as a genuine code PR. A run that cannot resolve its base is a
-          # detection that is not running, and should read as one.
-          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "::warning::change detection fell open (base '${base:-<unset>}' unresolvable) - every gated step runs"
-          fi
-          if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            files="$(git diff --name-only "$base" HEAD)"
-            # code stays true unless EVERY changed file is markdown, docs/, .claude/
-            # or a workflow other than ci.yml: none is a build input; 4/69 PR runs compiled 91-739 s for them.
-            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/|^\.claude/|^\.github/workflows/(codeql|auto-merge|roofline|release-docker)\.yml$)'; then
-              code=false
-            fi
-            # `grep -c`, not `grep -q`, and no here-string. Two traps meet on
-            # this line. #1499: `grep -q` exits at the first match, the producer
-            # takes EPIPE and pipefail reports a non-zero pipeline for a
-            # SUCCESSFUL match. And the here-string the other lanes use to dodge
-            # that is a bashism - this job declares no `shell:`, so it gets
-            # whatever the CUDA image provides, and `Build` is the one required
-            # check (ruleset 14716423): a syntax error here fails every PR.
-            # `grep -c` reads all of stdin, so nothing ever takes EPIPE, and it
-            # is POSIX. `|| true` because grep exits 1 when the count is 0.
-            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools|tests)/.*\.cpp$|^(src|tests)/.*\.cu$|^(src|tools|tests|include)/.*\.(h|hpp|cuh)$' || true)"
-            [ "${n_cpp:-0}" -gt 0 ] || cpp=false
-          fi
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "cpp=$cpp" >> "$GITHUB_OUTPUT"
-          printf 'non-docs changes: code=%s (src|tools|tests .cpp, src|tests .cu or header: %s)\nchanged files:\n%s\n' \
-            "$code" "$cpp" "${files:-<none>}"
+        run: sh scripts/ci_changes.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
 
       # The blocking static gates, FIRST, before the compile. Ruleset 14716423
       # requires exactly one context (`Build`), so a gate that runs only as its
@@ -146,7 +115,7 @@ jobs:
       #
       # Started in the background, joined by "Static gates (result)" below: same
       # script, same exit code, still fails `Build`. Serial they cost a median
-      # 26 s of the required check; next to a -j2 compile on 4 vCPU they are free.
+      # 26 s of the required check; next to the compile on 4 vCPU they are free.
       # The named gate jobs below still report a red gate within ~30 s.
       - name: Static gates (blocking, started in the background)
         id: gates
@@ -173,8 +142,8 @@ jobs:
       # change that invalidates many TUs (typical refactor), ccache hits
       # on the TUs whose post-preprocessor content didn't actually change —
       # saves the slow nvcc ptxas pass for sm_120a.
-      # restore + explicit "Save ccache" at the end: the save (median 27 s) is
-      # skipped when the build missed nothing, 6 of 38 green PR Builds before.
+      # restore + explicit "Save ccache" at the end: the save (median 38 s) runs on
+      # a main push with at least one miss, never on a PR.
       - name: Restore ccache
         if: steps.changes.outputs.code == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -191,36 +160,14 @@ jobs:
           ccache -p | head -20 || true
           ccache -z
 
-      # Build cache: FetchContent _deps clones + CMake config state. ccache
-      # handles object files separately. Restore-keys fall back to older
-      # caches when src changes; ninja then incrementally rebuilds and
-      # ccache provides per-TU hits even when the build cache misses.
-      # Saved on push to main only; PRs restore (main's entry via restore-keys).
-      # The post-step save cost ~27 s of the required Build check on every PR run.
-      - name: Cache build directory
-        if: steps.changes.outputs.code == 'true' && github.event_name == 'push'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build
-          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
-          restore-keys: |
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
-      - name: Restore build directory (no save)
-        if: steps.changes.outputs.code == 'true' && github.event_name != 'push'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build
-          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
-          restore-keys: |
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
-
+      # No build-directory cache: the restored build/ saved no compile call (the fresh checkout's
+      # mtimes are newer than its objects, ccache served all 1097 TUs either way) and cost a 10 s
+      # restore per PR, a 38 s save and 452 MB per push. FetchContent reads the image's /deps
+      # (scripts/ci_dep_dirs.sh) instead of cloning.
       - name: Configure
         if: steps.changes.outputs.code == 'true'
         run: |
+          # shellcheck disable=SC2046 # one -D per word
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DIMP_BUILD_TESTS=ON \
@@ -229,7 +176,8 @@ jobs:
             -DIMP_DISABLE_120F_FALLBACK=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache"
+            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache" \
+            $(sh scripts/ci_dep_dirs.sh)
           # CMakeLists.txt pins arch=compute_120a,code=sm_120a directly via
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. IMP_DISABLE_120F_FALLBACK=ON
           # builds the sm_120a SASS only (no compute_120f PTX fallback) — CI just
@@ -241,14 +189,14 @@ jobs:
           # fatbin carries no 120f PTX either since C-012 (sm_120a only); the opt-in
           # build is what the `PTX fallback` job below assembles (#1650).
           # IMP_BUILD_BENCH=OFF skips imp-bench here; the step "Build imp-bench
-          # (nightly)" below compiles it on schedule and dispatch. The mxf4nvf4 probe/microbench TUs
+          # (nightly)" below compiles it on dispatch (nightly). The mxf4nvf4 probe/microbench TUs
           # build with the tests (imp_test_kernels), never into libimp.
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
-        # -j$(nproc): scripts/ci_compile_slot.sh (CUDA launcher above) keeps the five
-        # 5-8.6 GB CUTLASS TUs to <= 2 at once (12.7 GB worst pair); build_jobs.sh caps
-        # the runner at -j2. memory.peak is the container cgroup high-water mark.
+        # -j$(nproc) = 4: the CUTLASS TUs are gone since 2026-10-31, every TU stays <= 1.27 GB,
+        # scripts/ci_compile_slot.sh only passes the command through. memory.peak is the
+        # container cgroup high-water mark (7.81 GB in run 46064840098).
         run: |
           cmake --build build -j"$(nproc)"
           echo "nproc=$(nproc) cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
@@ -273,14 +221,14 @@ jobs:
           # Fail-open: an unparsable count saves.
           misses="$(awk '/^ *Misses:/ {print $2; exit}' "$RUNNER_TEMP/ccache-stats.txt")"
           echo "misses=${misses:-unknown}" >> "$GITHUB_OUTPUT"
-          # A PR saves from 30 misses on (a re-push recompiles less than that in under 90 s);
-          # main saves on any miss: its entry is the one every PR restores.
+          # Only a main push saves, on any miss: its entry is the one every PR restores.
+          # A PR save cost 38 s of `Build` and 1.49 GB of the 10 GB cache; 72 of 77 PR branches ran CI once.
           save=true
           case "${misses:-unknown}" in
             *[!0-9]*) ;;
             0) save=false ;;
-            *) [ "$GITHUB_EVENT_NAME" != pull_request ] || [ "$misses" -ge 30 ] || save=false ;;
           esac
+          [ "$GITHUB_EVENT_NAME" = push ] || save=false
           echo "save=$save" >> "$GITHUB_OUTPUT"
 
       # Stage 2 (CI / CPU): run every CPU-runnable GTest. The `unit` ctest label
@@ -301,7 +249,7 @@ jobs:
       # only when someone measured (AUDIT_ARCH_2026_11_24 X-10). Nightly and on
       # demand: same build/ and flags, only the option flips, only that target builds.
       - name: Build imp-bench (nightly)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch'
         run: |
           cmake -B build -DIMP_BUILD_BENCH=ON
           cmake --build build --target imp-bench -j"$(nproc)"
@@ -312,16 +260,9 @@ jobs:
       # the one context `Build`. Lints only the changed src|tools|tests .cpp and the host
       # side of changed src|tests .cu (clang `-x cuda --cuda-host-only`, #2210) against this
       # job's own build/ (compile_commands.json, _deps, generated headers).
-      # Cost over 8 PR runs of the former job: install 8-11 s + lint 9-37 s, median
-      # 30 s, against a median 327 s `Build` on the 12 PR runs that linted.
       # Device code has no automated lane (docs/audit/SETTLED.md F-5, F2-7).
-      # Pin, key fingerprint: scripts/install_llvm.sh. The CUDA apt source goes first:
-      # its index shipped malformed on 2026-09-16 and the script runs apt-get update.
-      - name: Install clang-tidy
-        if: steps.changes.outputs.cpp == 'true' && steps.changes.outputs.code == 'true'
-        run: |
-          rm -f /etc/apt/sources.list.d/cuda*.list
-          bash scripts/install_llvm.sh clang-tidy
+      # clang-tidy ships in the CI image (scripts/install_llvm.sh at image build): the per-run
+      # apt.llvm.org install was 12 s median, 41 s p90 on push, and an apt mirror on the required path.
 
       # Hard (#2210): scripts/tidy_lane.sh fails on a clang-tidy nonzero exit, on a .cu with
       # a clang error (#2219's first run: 89 of 89, response-file includes lost) and on a
@@ -367,8 +308,7 @@ jobs:
           [ "$rc" = 0 ] || echo "::error::scripts/ci_static_gates.sh exited $rc"
           exit "$rc"
 
-      # 68 of 83 PR Builds saved (median 20 s, 765 MB each) with the repo cache at 10.8 of 10 GB;
-      # 45 of the 83 compiled for under 90 s.
+      # Main pushes only (see "ccache stats"): PR saves evicted main's entries from the 10 GB repo cache.
       - name: Save ccache
         if: steps.changes.outputs.code == 'true' && steps.ccstats.outputs.save == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -383,6 +323,8 @@ jobs:
         with:
           name: imp-build
           path: build/imp-server
+          # Read only by `Real API contract` in this run; the 90-day default kept 15 MB per run.
+          retention-days: 1
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against
@@ -394,7 +336,9 @@ jobs:
   # requires that exact check name.
   mock-api:
     name: Mock API contract
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -425,8 +369,9 @@ jobs:
   real-api:
     name: Real API contract (model-less)
     needs: build
-    if: needs.build.outputs.code == 'true'
+    if: github.event_name != 'push' && needs.build.outputs.code == 'true'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     container:
       image: ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d # 26.04
 
@@ -503,7 +448,9 @@ jobs:
   # for the same reason.
   lint:
     name: Lint
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -543,7 +490,9 @@ jobs:
   # is documented in docs/audit/AUDIT_FILESIZE.md. See CLAUDE.md "File Layout & Size".
   filesize:
     name: File size
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -566,7 +515,9 @@ jobs:
   # demoted vs the merge-base. Own check name: inside "File size" its reds misread (2026-08-25).
   testlanes:
     name: Test lanes
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -584,7 +535,9 @@ jobs:
   # to mirror. Ubuntu job, no toolchain, seconds.
   docs:
     name: Docs
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -597,7 +550,9 @@ jobs:
 
   hygiene:
     name: Release hygiene
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Release hygiene gate (blocking)
@@ -605,7 +560,9 @@ jobs:
 
   alloc-sites:
     name: Alloc sites
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -616,7 +573,9 @@ jobs:
 
   launchguards:
     name: Launch guards
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -645,8 +604,9 @@ jobs:
   ptx-fallback:
     name: PTX fallback
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     container:
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d
     defaults:
       run:
         shell: bash
@@ -682,9 +642,18 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "fallback build: run=$run"
 
+      # Saved on push to main only, like `Build` and `Sanitizers`: PRs restore main's store.
       - name: Restore ccache
-        if: steps.scope.outputs.run == 'true'
+        if: steps.scope.outputs.run == 'true' && github.event_name == 'push'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/.ccache-ptx
+          key: ${{ runner.os }}-cuda13.5-ccache-ptx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda13.5-ccache-ptx-
+      - name: Restore ccache (no save)
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'push'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache-ptx
           key: ${{ runner.os }}-cuda13.5-ccache-ptx-${{ github.sha }}
@@ -696,6 +665,7 @@ jobs:
       - name: Configure with the fallback on
         if: steps.scope.outputs.run == 'true'
         run: |
+          # shellcheck disable=SC2046 # one -D per word
           cmake -B build-ptx \
             -DIMP_DISABLE_120F_FALLBACK=OFF \
             -DCMAKE_BUILD_TYPE=Release \
@@ -705,11 +675,17 @@ jobs:
             -DIMP_BUILD_BENCH=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            $(sh scripts/ci_dep_dirs.sh)
 
       - name: Build the device library
         if: steps.scope.outputs.run == 'true'
-        run: cmake --build build-ptx --target imp -j"$(bash scripts/build_jobs.sh)"
+        run: |
+          # build_jobs.sh = -j2 here: cold -j4 took 668 s against 572 s at -j2 (runs 46083056552, 46082782818)
+          jobs="$(bash scripts/build_jobs.sh)"
+          echo "-j$jobs: nproc=$(nproc) MemTotal=$(awk '/MemTotal/ {print $2}' /proc/meminfo) kB cgroup memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo n/a)"
+          cmake --build build-ptx --target imp -j"$jobs"
+          echo "cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
 
       - name: Assemble every PTX image
         if: steps.scope.outputs.run == 'true'
@@ -741,8 +717,9 @@ jobs:
   sanitizers:
     name: Sanitizers
     runs-on: ubuntu-26.04
+    timeout-minutes: 90
     container:
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:75ec69fed50b1d34acb6a67bfa3cc850df04a2f9941fbba08bcb08e1b6f1d54d
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
     # flags, so nothing here is shareable with the `Build` (Release) or
     # `PTX fallback` stores and a shared dir would only evict theirs.
@@ -814,25 +791,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cuda13.5-ccache-asan-
 
-      - name: Fetch pinned deps
-        if: steps.scope.outputs.run == 'true'
-        run: |
-          # Two separate traps, both hit on the way here. The pin line is
-          #   set(IMP_DEP_GOOGLETEST_SHA    063de7e9...  CACHE STRING "...")
-          # with RUN-LENGTH whitespace, so a pattern with one space matches
-          # nothing, grep exits 1 and `-e` kills the step with no message at
-          # all. And `grep | head -1` under `-o pipefail` is #1499: head closes
-          # the pipe, grep dies of EPIPE, the pipeline is non-zero even on a
-          # hit. `\s+` fixes the first, `-m1` instead of a pipe the second.
-          # By commit, not by tag: same pin as the Dockerfile (H-8).
-          GT="$(grep -m1 -oP 'IMP_DEP_GOOGLETEST_SHA\s+\K[^ )]+' cmake/imp-deps.cmake)"
-          test -n "$GT" || { echo "googletest pin not found in cmake/imp-deps.cmake"; exit 1; }
-          echo "googletest pin: $GT"
-          mkdir -p /deps/googletest
-          git -C /deps/googletest init -q
-          git -C /deps/googletest fetch -q --depth=1 https://github.com/google/googletest.git "$GT"
-          git -C /deps/googletest checkout -q FETCH_HEAD
-
       # No tools, no bench, no server: the same configuration `make asan` uses,
       # which is also why the five unconditional fuzz targets must not live in
       # the IMP_BUILD_SERVER block - the first version of them did, and the
@@ -840,6 +798,7 @@ jobs:
       - name: Build test-core + test-text with ASan/UBSan
         if: steps.scope.outputs.run == 'true'
         run: |
+          # shellcheck disable=SC2046 # one -D per word
           cmake -B build-asan -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DIMP_SANITIZERS=ON \
@@ -848,7 +807,7 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
-            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest
+            $(sh scripts/ci_dep_dirs.sh)
           # IMP_DISABLE_120F_FALLBACK=ON: the option defaults OFF, so this lane
           # was emitting the compute_120f PTX entry as well as the sm_120a SASS.
           # The `Build` job measured the second gencode at +53.1% device-compile
@@ -857,7 +816,11 @@ jobs:
           # sanitized"). The fatbin that ships is assembled and checked by the
           # `PTX fallback` job, which deliberately leaves the option at OFF.
           ccache -z
-          cmake --build build-asan --target test-core test-text -j"$(bash scripts/build_jobs.sh)"
+          # -j$(nproc) = 4: cold build 1855 -> 1396 s, anon peak 1.88 -> 3.06 GB of 16 GB (runs 46082782818, 46083056552)
+          jobs="$(nproc)"
+          echo "-j$jobs: nproc=$(nproc) MemTotal=$(awk '/MemTotal/ {print $2}' /proc/meminfo) kB cgroup memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo n/a)"
+          cmake --build build-asan --target test-core test-text -j"$jobs"
+          echo "cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
           ccache -s
 
       # A binary that contains none of the tests reports "PASSED 0 tests" and
@@ -911,8 +874,8 @@ jobs:
   # replays 1500 fixed-seed iterations per target and can only re-find a known
   # defect class; libFuzzer with coverage feedback is what finds a new one, and
   # nothing ran it unless someone typed the docker line in fuzz/README.md. The
-  # four parser targets, 10 minutes each, corpus carried between nights in
-  # the cache, crashers in the run's artifacts. Advisory: a crasher is a
+  # four parser targets, 10 minutes each, corpus carried between nights as
+  # an artifact, crashers in the run's artifacts. Advisory: a crasher is a
   # warning here and an issue for a human. fuzz_tool_stream is not here: it
   # needs tool_call.cpp, whose utils.h pulls httplib and whose utils.cpp pulls
   # imp/imp.h: the chain ends at the engine, so a CPU-only build of it is a
@@ -920,35 +883,57 @@ jobs:
   # 2026-09-10, abandoned). The CPU lane runs its target function on every PR.
   fuzz-nightly:
     name: Fuzz (nightly, libFuzzer)
-    # workflow_dispatch too: schedule-only is why two nights of a job that
+    # Dispatch only (the nightly is one): schedule-only is why two nights of a job that
     # configured nothing went unnoticed, since there was no way to run it
     # against a branch before it landed.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
+    timeout-minutes: 60
     # Ubuntu 26.04 for its libstdc++: the tree's C++23 does not compile against
     # the libstdc++ 12 that silkeh/clang:18 ships (std::ranges over string_view),
     # and that image had no ninja and no nvcc either, so this job configured
     # nothing and fuzzed nothing from its first night (2026-09-08) on.
     container:
       image: ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d # 26.04
+    # actions: read lists and downloads the previous run's fuzz-corpus artifact.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Toolchain
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            cmake ninja-build git ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev
+            cmake ninja-build git ca-certificates curl jq libcurl4-openssl-dev libjpeg-turbo8-dev
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: "clang + libFuzzer (pin: scripts/install_llvm.sh)"
         run: bash scripts/install_llvm.sh clang libclang-rt
 
+      # The corpus travels as an artifact (30 days), not a cache: CI's ccache entries evicted
+      # the cache entry before the next night (`Cache not found` in 2 of 2 nightlies).
+      # Fail-open: no artifact or an API error starts from an empty corpus.
+      - name: Find the newest corpus artifact
+        id: corpus
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts?name=fuzz-corpus&per_page=20" \
+            | jq -r '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .workflow_run.id // empty')" \
+            || { echo "::warning::artifact list failed: starting from an empty corpus"; run_id=""; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "corpus from run: ${run_id:-<none>}"
+
       - name: Restore the corpus
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.corpus.outputs.run_id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: fuzz-corpus
           path: fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          run-id: ${{ steps.corpus.outputs.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Build the parser targets
         run: |
@@ -966,6 +951,16 @@ jobs:
             ./build-fuzz/$t -max_total_time=600 -artifact_prefix="fuzz/crashes/$t-" "fuzz/corpus/$t" \
               || echo "::warning::$t found a crasher (see the fuzz-crashes artifact)"
           done
+          find fuzz/corpus -type f | awk -F/ '{n[$3]++} END {for (t in n) printf "corpus %s: %d files\n", t, n[t]}'
+
+      - name: Keep the corpus
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-corpus
+          path: fuzz/corpus
+          retention-days: 30
+          if-no-files-found: ignore
 
       - name: Keep the crashers
         if: always()

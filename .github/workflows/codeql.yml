@@ -8,12 +8,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "41 4 * * 1"
+  # Nightly: a dispatch on main by .github/workflows/nightly.yml (01:00-06:59 UTC).
   workflow_dispatch:
 
+# Push: one group per commit (a shared one queued 63 main push jobs > 60 s, max 723 s).
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: codeql-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -23,13 +23,15 @@ jobs:
   analyze:
     name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
     strategy:
       fail-fast: false
       matrix:
-        language: [c-cpp, python, actions]
+        # c-cpp on PR, nightly and dispatch, not on a main push: analyze median 510 s per push.
+        language: ${{ github.event_name == 'push' && fromJSON('["python","actions"]') || fromJSON('["c-cpp","python","actions"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

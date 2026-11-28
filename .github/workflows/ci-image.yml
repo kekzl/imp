@@ -8,11 +8,15 @@ on:
     paths:
       - .github/ci-image/**
       - .github/workflows/ci-image.yml
+      - scripts/install_llvm.sh
+      - cmake/imp-deps.cmake
   pull_request:
     branches: [main]
     paths:
       - .github/ci-image/**
       - .github/workflows/ci-image.yml
+      - scripts/install_llvm.sh
+      - cmake/imp-deps.cmake
   workflow_dispatch:
 
 concurrency:
@@ -21,13 +25,16 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   image:
     name: Build CI image
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    # Job scope: the GHCR push is the only write.
+    permissions:
+      contents: read
+      packages: write
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/imp-ci
     steps:
@@ -50,6 +57,10 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .github/ci-image
+          # COPY --from=: the LLVM pin (scripts/install_llvm.sh) and the dependency pins (cmake/imp-deps.cmake).
+          build-contexts: |
+            scripts=scripts
+            pins=cmake
           push: ${{ github.event_name != 'pull_request' }}
           provenance: false
           tags: |
@@ -57,7 +68,7 @@ jobs:
             ${{ env.IMAGE }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.description=imp CI toolchain (CUDA 13.5 nvcc, cuBLAS, cmake, ninja, ccache)
+            org.opencontainers.image.description=imp CI toolchain (CUDA 13.5 nvcc, cuBLAS, cmake, ninja, ccache, clang-tidy, pinned deps in /deps)
 
       - name: Digest for ci.yml
         if: github.event_name != 'pull_request'

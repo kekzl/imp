@@ -19,6 +19,7 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login == github.repository_owner
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
     permissions:
       pull-requests: write
       contents: write
