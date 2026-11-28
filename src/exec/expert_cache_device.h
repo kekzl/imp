@@ -175,10 +175,7 @@ public:
     // pred_out, plus a trace record [1000 + layer, ids] when trace is set. prefetch_resolve stamps the
     // predicted keys of `layer`, assigns LRU victims to up to `budget` absent ones and lists them as
     // pending; prefetch_gather copies them (gather stream, before that layer's own gather) and counts its
-    // finished blocks in pf_done, so that layer's resolve runs a landed key with the hits. Tiered layer:
-    // the misses take the tier list and one mailbox request, so prefetch_resolve follows the previous
-    // tier request's gather on the stream; prefetch_gather waits for the ack, copies with write-back,
-    // and the caller joins it before that layer resolves.
+    // finished blocks in pf_done, so that layer's resolve runs a landed key with the hits.
     [[nodiscard]] bool enable_prefetch(int budget, int blocks_per_key = kDevExpertGatherBlocks);
     [[nodiscard]] bool prefetch_on() const { return pf_budget_ > 0; }
     [[nodiscard]] float* pf_logits() const { return pf_logits_; }
@@ -249,7 +246,6 @@ private:
     int pf_budget_ = 0;
     void free_prefetch_();
     [[nodiscard]] DevGatherBytes gather_bytes_(int layer) const;
-    void gather_misses_(int layer, dim3 grid, cudaStream_t stream);  // the layer miss list (tier ack first)
 
     // Host expert tier (tiered layers only).
     std::vector<char> tiered_;  // [n_layers]

@@ -543,16 +543,12 @@ void DeviceExpertCache::resolve(int layer, const int32_t* expert_indices, int to
 }
 
 void DeviceExpertCache::gather(int layer, int top_k, int n_rows, cudaStream_t stream) {
-    gather_misses_(layer, dim3(kDevExpertGatherBlocks, 3 * top_k * n_rows), stream);
-}
-
-// grid.y >= the miss count. Tiered: the tier thread makes the missed units resident and fills their sources.
-void DeviceExpertCache::gather_misses_(int layer, dim3 grid, cudaStream_t stream) {
     const bool tier = layer_tiered(layer);
-    if (tier) {
+    if (tier) {  // the tier thread makes the missed units resident and fills their sources
         expert_tier_wait_kernel<<<1, 1, 0, stream>>>(tier_mb_d_, d_tier_seq_);
         IMP_CUDA_CHECK_LAUNCH();
     }
+    const dim3 grid(kDevExpertGatherBlocks, 3 * top_k * n_rows);
     expert_cache_gather_kernel<<<grid, 256, 0, stream>>>(tier ? tier_misses_d_ : d_misses_,
                                                          tier ? tier_n_miss_d_ : d_n_miss_,
                                                          gather_bytes_(layer));
